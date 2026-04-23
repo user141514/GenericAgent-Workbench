@@ -1,0 +1,24 @@
+# Local secrets
+mykey.py
+mykey.json
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local runtime artifacts
+temp/
+
+# Memory/runtime state
+memory/file_access_stats.json
+memory/global_mem.txt
+memory/global_mem_insight.txt
+memory/history_memory_inbox.md
+memory/L4_raw_sessions/
+
+# Local backups
+*.backup_*
+
+# OS/editor noise
+.DS_Store
+Thumbs.db
