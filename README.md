@@ -23,8 +23,7 @@
 > [!IMPORTANT]
 > 这个仓库的核心定位不是“替代上游 GenericAgent”，而是“以 GenericAgent 为执行内核做出来的工作台层”。
 
-> [!NOTE]
-> 仓库目录当前仍然叫 `GAgent-Multi`，但面对外部介绍时，更推荐使用产品名 `GenericAgent Workbench`。
+
 
 ## TL;DR
 
