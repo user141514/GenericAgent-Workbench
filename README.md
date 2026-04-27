@@ -1,16 +1,17 @@
 # GenericAgent Workbench
 
 <p align="center">
-  <strong>A multi-agent workbench built on top of GenericAgent.</strong><br/>
-  Keep the classic GenericAgent executor, and add orchestration, UI, attachments, restore, and memory workflows.
+  <strong>A practical desktop workbench built on top of GenericAgent.</strong><br/>
+  Classic GenericAgent execution core + orchestration + Streamlit UI + attachments + session restore + memory workflows.
 </p>
 
 <p align="center">
   <a href="https://github.com/lsdefine/GenericAgent">Upstream GenericAgent</a> |
-  <a href="#positioning">项目定位</a> |
-  <a href="#upgrades">核心升级</a> |
-  <a href="#quick-start">快速开始</a> |
-  <a href="#comparison">对比上游</a>
+  <a href="#quick-start">Quick Start</a> |
+  <a href="#first-time-usage">First-time Usage</a> |
+  <a href="#backend-modes">Backend Modes</a> |
+  <a href="#architecture">Architecture</a> |
+  <a href="#troubleshooting">Troubleshooting</a>
 </p>
 
 <p align="center">
@@ -21,324 +22,184 @@
 </p>
 
 > [!IMPORTANT]
-> 这个仓库的核心定位不是“替代上游 GenericAgent”，而是“以 GenericAgent 为执行内核做出来的工作台层”。
-
-
-
-## TL;DR
-
-如果把上游 [GenericAgent](https://github.com/lsdefine/GenericAgent) 看成一个极简、自演化、真实可执行的 Agent 内核，那么这个仓库就是围绕它搭出来的一个更适合日常使用的工作台：
-
-- 保留经典 GenericAgent 作为“强执行器”
-- 新增 OpenAI Agents 多智能体编排层
-- 增强 Streamlit 聊天式 UI
-- 支持文本 / PDF / DOCX 附件注入
-- 支持结构化历史恢复、摘要提炼、记忆候选池
-- 支持桌面窗口、Bot 前端、调度与归档工作流
-
-一句话概括：
-
-> **GenericAgent 是内核，GenericAgent Workbench 是工作台。**
-
-<a id="positioning"></a>
-## 项目定位
-
-### 这个项目是什么
-
-`GenericAgent Workbench` 是一个以 `GenericAgent` 为执行底座的多智能体工作台。  
-它不是只做“聊天”，也不是重新发明一套执行器，而是在上游内核之外补齐更像产品的那一层：
-
-- 路由
-- 编排
-- UI
-- 会话管理
-- 附件处理
-- 历史恢复
-- 调度与记忆操作
-
-### 这个项目不是什么
-
-- 不是上游主线仓库的逐行同步镜像
-- 不是“官方下一代 GenericAgent”
-- 不是把经典 GenericAgent 丢掉后另起炉灶
-
-### 名字为什么继续和 GenericAgent 挂钩
-
-因为这个仓库最重要的事实没有变：
-
-1. 真正的文件 / 代码 / 浏览器 / 工具执行，仍然依赖经典 GenericAgent
-2. 新增的大部分内容，本质上是围绕这个执行内核做的工作台包装
-3. 因此名字里保留 `GenericAgent`，能直接说明血缘关系和核心能力来源
-
-<a id="upgrades"></a>
-## 核心升级
-
-### 升级摘要
-
-- [x] 双后端：经典 GenericAgent + OpenAI Agents 编排后端
-- [x] 多智能体分工：`task_router / chat_specialist / planner_executor`
-- [x] 规则快速路由层
-- [x] 聊天式 Streamlit 工作台 UI
-- [x] 文本 / PDF / DOCX 附件处理
-- [x] 结构化 `INPUT_ITEMS` 历史恢复
-- [x] 历史提炼、记忆候选池、L4 会话归档
-- [x] 桌面窗口 + Telegram / Feishu / 企业微信 / 钉钉 / 微信等前端入口
-
-### 1. OpenAI Agents 多智能体编排层
-
-新增 [`core/openai_agentmain.py`](./core/openai_agentmain.py)。
-
-它不是另一个“自己全做”的执行器，而是一个 orchestration layer：
-
-- `task_router`：只负责分流，不直接执行
-- `chat_specialist`：处理解释型、纯对话型请求
-- `planner_executor`：负责复杂任务的规划、委派、验证
-- `run_genericagent_executor`：把真实执行委托给经典 GenericAgent
-
-这套结构的价值是：
-
-- 简单聊天不必进入重型执行路径
-- 复杂任务仍然复用上游真实工具链
-- 编排层和执行层职责更清晰
-
-### 2. 规则路由层
-
-新增 [`core/router_rules.py`](./core/router_rules.py)。
-
-在 LLM 路由前先做一层轻量规则判断：
-
-- 简单问答优先去 `chat_specialist`
-- 文件 / 代码 / 浏览器 / shell / 多步骤任务优先去 `planner_executor`
-- 未命中规则时，再交给模型做最终判断
-
-这让系统在“聊天”和“执行”之间切换时更稳，也更省。
-
-### 3. 工作台式 Streamlit UI
-
-主界面在 [`frontends/stapp.py`](./frontends/stapp.py)。
-
-它已经不是一个只有输入框的 demo，而是一个工作台：
-
-- 历史对话列表与预览
-- 一键恢复历史上下文
-- 历史摘要提炼
-- 记忆面板查看 `L1 / L2 / Inbox`
-- 附件上传面板
-- 助手历史回复压缩 / 展开
-- 兼容 `genericagent` 与 `openai-agents`
-
-### 4. 附件处理管线
-
-新增 [`frontends/file_processor.py`](./frontends/file_processor.py)。
-
-支持：
-
-- 文本类文件
-- PDF
-- DOCX
-
-它会自动完成：
-
-- 抽取正文
-- 生成预览
-- 压缩长文为 distilled text
-- 敏感文件名预警
-- 把附件摘要拼进 prompt
-
-所以这个工作台不是“只能聊天”，而是“能带文档上下文工作”。
-
-### 5. 结构化历史恢复
-
-相关逻辑在：
-
-- [`frontends/chatapp_common.py`](./frontends/chatapp_common.py)
-- [`core/openai_agentmain.py`](./core/openai_agentmain.py)
-
-除了传统文本日志恢复，这个分支还支持：
-
-- 为 `openai-agents` 后端写入结构化 `INPUT_ITEMS`
-- 从结构化历史中恢复真实 `user / assistant` 消息
-- 避免把工具结果误恢复成用户消息
-- 在 UI 与部分 Bot 前端里复用同一套恢复逻辑
-
-### 6. 桌面工作流与调度
-
-入口包括：
-
-- [`launch.pyw`](./launch.pyw)：默认桌面启动器
-- [`start_test.pyw`](./start_test.pyw)：直接启动 `openai-agents` 后端
-- [`core/runtime_env.py`](./core/runtime_env.py)：优先选择 `rag-env` Conda 环境
-- [`reflect/scheduler.py`](./reflect/scheduler.py)：调度与归档触发
-
-因此这个仓库更接近“持续运行的桌面 Agent 工作台”，而不是一次性脚本集合。
+> This is not the official next version of GenericAgent.
+> It is a downstream workbench fork focused on practical desktop usage, China-accessible model compatibility, session restoration, attachments, and multi-agent orchestration.
 
 ---
 
-## 架构概览
+## What is this?
 
-```mermaid
-flowchart LR
-    U["User / Bot / UI"] --> F["Workbench Frontends"]
-    F --> B{"Backend"}
-    B --> G["Classic GenericAgent"]
-    B --> O["OpenAI Agents Orchestrator"]
-    O --> R["task_router"]
-    R --> C["chat_specialist"]
-    R --> P["planner_executor"]
-    P --> E["run_genericagent_executor"]
-    E --> G
-    G --> X["Files / Code / Browser / Memory / ADB"]
-```
+**GenericAgent Workbench** is a downstream workbench fork of [GenericAgent](https://github.com/lsdefine/GenericAgent).
 
-### 执行逻辑
+The upstream project provides a minimal, self-evolving, real-execution agent runtime. This project keeps the classic GenericAgent executor as the lower-level execution core, then adds a product-like workbench layer around it:
 
-```text
-simple question
-  -> task_router
-  -> chat_specialist
-  -> direct answer
+* desktop Streamlit UI
+* classic GenericAgent / OpenAI Agents dual backend
+* rule-based fast routing
+* multi-agent orchestration
+* text / PDF / DOCX attachment context
+* structured session restore
+* conversation distillation and memory inbox
+* bot, scheduler, and desktop window entrypoints
 
-complex task
-  -> task_router
-  -> planner_executor
-  -> run_genericagent_executor
-  -> classic GenericAgent
-  -> result verification
-```
+In one sentence:
 
-<a id="comparison"></a>
-## 与上游 GenericAgent 的对比
-
-| 维度 | 上游 GenericAgent | GenericAgent Workbench |
-|---|---|---|
-| 核心定位 | 极简、自演化 Agent 内核 | 围绕内核构建的交互工作台 |
-| 主要卖点 | 最小核心、真实执行、自演化 skill | 编排层、工作台 UI、附件、恢复、记忆工作流 |
-| 执行架构 | 经典单体执行循环 | 多智能体编排 + 经典执行器下沉 |
-| 后端模式 | 经典后端 | 双后端可切换 |
-| 路由方式 | 主要依赖主模型 | 规则快速路由 + agent handoff |
-| UI 形态 | 原生前端 / demo 风格 | 聊天式 Streamlit workbench |
-| 会话恢复 | 传统文本日志恢复 | 结构化 `INPUT_ITEMS` 恢复 |
-| 文件上下文 | 以任务输入为主 | 文本 / PDF / DOCX 附件注入 |
-| 适合人群 | 研究原始设计、喜欢极简 runtime | 想直接把 Agent 当工作台使用 |
-
-### 什么时候更适合用上游
-
-如果你更在意：
-
-- 最小代码量
-- 主线能力同步
-- 原教旨式 GenericAgent 设计
-
-那更适合直接使用上游仓库：  
-[https://github.com/lsdefine/GenericAgent](https://github.com/lsdefine/GenericAgent)
-
-### 什么时候更适合用这个仓库
-
-如果你更在意：
-
-- 更强的日常交互体验
-- 更清晰的 agent 分工
-- 更好用的历史恢复
-- 文档附件上下文
-- 更像产品而不是 demo 的桌面入口
-
-那这个工作台分支会更顺手。
+> **GenericAgent is the execution kernel. GenericAgent Workbench is the daily-use workbench around it.**
 
 ---
 
-## 目录说明
+## Demo
+
+> Screenshot / GIF placeholder.
+> Add a screenshot of the Streamlit workbench here, especially the sidebar with History, Memory, Attachments, and backend status.
 
 ```text
-GAgent-Multi/
-├─ core/                      # 核心运行时与编排逻辑
-│  ├─ openai_agentmain.py     # OpenAI Agents 多智能体编排后端
-│  ├─ agentmain.py            # 经典 GenericAgent 后端
-│  ├─ router_rules.py         # 规则快速路由层
-│  ├─ llmcore.py              # 模型会话与供应商适配
-│  └─ runtime_env.py          # Conda 运行时选择
-├─ launch.pyw                 # 默认桌面启动器
-├─ start_test.pyw             # openai-agents 启动器
-├─ frontends/
-│  ├─ stapp.py                # 主 Streamlit 工作台
-│  ├─ chatapp_common.py       # 恢复、提炼、公共聊天逻辑
-│  ├─ file_processor.py       # 附件抽取与压缩
-│  ├─ tgapp.py                # Telegram 前端
-│  ├─ fsapp.py                # Feishu 前端
-│  ├─ wecomapp.py             # 企业微信前端
-│  ├─ dingtalkapp.py          # 钉钉前端
-│  ├─ wechatapp.py            # 微信个人号前端
-│  └─ ...
-├─ memory/
-│  ├─ global_mem.txt
-│  ├─ global_mem_insight.txt
-│  ├─ history_memory_inbox.md
-│  └─ L4_raw_sessions/
-└─ reflect/
-   └─ scheduler.py            # 调度与会话归档
+UI / Bot / Desktop Window
+        ↓
+Session + Attachment + Restore Layer
+        ↓
+Routing + Orchestration Layer
+        ↓
+Classic GenericAgent Executor
+        ↓
+Files / Code / Browser / Shell / Memory
 ```
 
-<a id="quick-start"></a>
-## 快速开始
+---
 
-### 环境建议
+## What can it do?
 
-- Windows 桌面环境
-- Python 3.11+
-- 推荐 Conda 环境：`rag-env`
+You can use GenericAgent Workbench as a local personal agent workbench.
 
-### 1. 安装依赖
+It can:
 
-最常用的一组依赖：
+* answer lightweight questions without entering the heavy executor path
+* delegate file / code / browser / shell tasks to the classic GenericAgent executor
+* upload `.txt`, `.md`, `.py`, `.json`, `.csv`, `.pdf`, and `.docx` files as task context
+* restore previous conversations and continue from structured history
+* distill useful conversation history into a memory inbox
+* switch between the classic backend and the OpenAI Agents orchestration backend
+* run as a desktop window through `pywebview`
+* optionally start bot frontends and scheduled workflows
+
+Example tasks:
+
+```text
+Explain what this repository does.
+```
+
+```text
+Read the uploaded PDF and summarize the implementation plan.
+```
+
+```text
+Check the current project files and suggest how to improve the README.
+```
+
+```text
+Run the test script and help me debug the failure.
+```
+
+---
+
+## Who is this for?
+
+Use this repository if you want:
+
+* the real execution ability of GenericAgent
+* a more usable desktop-style interface
+* better session recovery and long-running workflow support
+* attachment-based document context
+* a cleaner separation between routing, planning, execution, and UI
+* practical OpenAI-compatible / Claude-compatible model configuration for local usage
+
+Use upstream GenericAgent directly if you want:
+
+* the smallest possible runtime
+* the most faithful upstream design
+* less product-layer code
+* easier tracking of upstream changes
+
+---
+
+## Quick Start
+
+### 1. Clone
+
+```bash
+git clone https://github.com/user141514/GenericAgent-Workbench.git
+cd GenericAgent-Workbench
+```
+
+### 2. Create a Python environment
+
+Recommended on Windows:
+
+```bash
+conda create -n rag-env python=3.11 -y
+conda activate rag-env
+```
+
+The launcher will try to use the `rag-env` Conda environment when available.
+
+### 3. Install dependencies
+
+Core dependencies:
 
 ```bash
 pip install streamlit pywebview requests qrcode pycryptodome lark-oapi
 ```
 
-如果你要启用附件上传（PDF / DOCX）：
+Optional dependencies for PDF / DOCX attachments:
 
 ```bash
 pip install pymupdf python-docx
 ```
 
-### 2. 配置模型
-
-复制模板：
+If this repository later provides a `requirements.txt`, you can use:
 
 ```bash
+pip install -r requirements.txt
+```
+
+### 4. Configure your model
+
+Copy the template:
+
+```powershell
 copy mykey_template.py mykey.py
 ```
 
-然后填写你的模型配置。
+On macOS / Linux:
 
-当前多智能体后端会优先尝试从这些位置读取配置：
+```bash
+cp mykey_template.py mykey.py
+```
 
-1. `mykey.py`
-2. `mykey.json`
-3. `~/.claude/settings.json`
-4. 环境变量中的 `OPENAI_*` / `ANTHROPIC_*`
+Then edit `mykey.py` and fill in your model provider configuration.
 
-### 3. 启动经典后端
+### 5. Launch the workbench
+
+Classic GenericAgent backend:
 
 ```bash
 python launch.pyw
 ```
 
-### 4. 启动 OpenAI Agents 后端
-
-推荐直接使用：
+OpenAI Agents orchestration backend:
 
 ```bash
 python start_test.pyw
 ```
 
-或者手动切换：
+Or manually select the backend:
 
 ```powershell
 $env:GA_AGENT_BACKEND = "openai-agents"
 python launch.pyw
 ```
 
-### 5. 启动带调度器的桌面版本
+### 6. Launch with scheduler
 
 ```bash
 python launch.pyw --sched
@@ -346,74 +207,419 @@ python launch.pyw --sched
 
 ---
 
-## 常用入口
+## Model Configuration
 
-| 入口 | 用途 |
-|---|---|
-| `python launch.pyw` | 默认桌面工作台 |
-| `python start_test.pyw` | OpenAI Agents 编排后端测试入口 |
-| `python frontends/tgapp.py` | Telegram 前端 |
-| `python frontends/fsapp.py` | Feishu 前端 |
-| `python frontends/wecomapp.py` | 企业微信前端 |
-| `python frontends/dingtalkapp.py` | 钉钉前端 |
-| `python frontends/wechatapp.py` | 微信个人号前端 |
+GenericAgent Workbench tries to load model configuration from these sources:
+
+1. `mykey.py`
+2. `mykey.json`
+3. `~/.claude/settings.json`
+4. environment variables such as `OPENAI_*` and `ANTHROPIC_*`
+
+### Example: OpenAI-compatible provider
+
+```python
+mykeys = {
+    "openai_compatible": {
+        "apikey": "YOUR_API_KEY",
+        "apibase": "https://your-openai-compatible-endpoint.com/v1",
+        "model": "gpt-4o-mini",
+        "stream": True,
+        "connect_timeout": 30,
+        "read_timeout": 300,
+    }
+}
+```
+
+For China-accessible OpenAI-compatible providers, set `apibase` to the provider's `/v1` endpoint.
+
+### Example: Claude / Anthropic-compatible provider
+
+```python
+mykeys = {
+    "claude": {
+        "apikey": "YOUR_ANTHROPIC_KEY",
+        "apibase": "https://api.anthropic.com",
+        "model": "claude-3-5-sonnet-latest",
+        "stream": True,
+        "connect_timeout": 30,
+        "read_timeout": 300,
+    }
+}
+```
+
+> The exact field names should follow the current `mykey_template.py` in this repository.
 
 ---
 
-## 适合谁
+## First-time Usage
 
-### 用这个仓库，如果你想要
+After launching, the project opens a local Streamlit workbench, usually inside a desktop `pywebview` window.
 
-- 继续吃到 GenericAgent 的真实执行能力
-- 但又不想只停留在一个极简 runtime
-- 想要更好的交互层和工作台体验
-- 想尝试“编排层 + 执行层”拆分架构
+### Main chat
 
-### 用上游仓库，如果你想要
+Use the main chat input like a normal assistant interface.
 
-- 最小、最直接的 GenericAgent 内核体验
-- 更强的主线一致性
-- 更聚焦于自演化 runtime 本身
+The router decides whether a request should go through a lightweight chat path or a heavier execution path.
+
+Typical lightweight requests:
+
+```text
+What is the difference between ReAct and Plan-and-Execute agents?
+```
+
+Typical execution requests:
+
+```text
+Read the current repository and find where the Streamlit UI is implemented.
+```
+
+```text
+Run the test script and summarize the error.
+```
+
+### Sidebar
+
+The sidebar is the main workbench control panel.
+
+#### History
+
+Use **History** to:
+
+* view recent conversation logs
+* preview a previous session
+* restore a previous conversation
+* distill a conversation into a memory candidate
+* delete old history after saving useful memory
+
+#### Memory
+
+Use **Memory** to inspect:
+
+* `global_mem_insight.txt`
+* `global_mem.txt`
+* `history_memory_inbox.md`
+
+The memory inbox stores manually confirmed distilled conversation notes. It is useful for turning long sessions into reusable knowledge.
+
+#### Attachments
+
+Use **Attachments** to upload task context files.
+
+Supported types include:
+
+* text-like files: `.txt`, `.md`, `.py`, `.json`, `.csv`, `.yaml`, `.log`, `.sql`, `.js`, `.ts`, `.html`, `.css`, `.xml`
+* `.pdf`
+* `.docx`
+
+The workbench will extract text, generate a preview, compress long content, and inject distilled context into the current prompt.
+
+#### Stop task
+
+Use **Stop task** when the current agent run is too long, incorrect, or no longer needed.
+
+#### Switch LLM
+
+Use **Switch LLM** to rotate between configured model backends.
+
+#### Reinject tools
+
+Use **Reinject tools** when the model becomes unstable with tool usage or forgets available tools.
+
+---
+
+## Backend Modes
+
+GenericAgent Workbench supports two main backend modes.
+
+### 1. Classic GenericAgent backend
+
+Launch:
+
+```bash
+python launch.pyw
+```
+
+Best for:
+
+* original GenericAgent behavior
+* local file operations
+* code execution
+* browser / shell tasks
+* studying the upstream runtime design
+
+This mode keeps the classic executor path close to the original GenericAgent style.
+
+### 2. OpenAI Agents orchestration backend
+
+Launch:
+
+```bash
+python start_test.pyw
+```
+
+Best for:
+
+* mixed lightweight chat and complex task execution
+* separating routing, chat, planning, and execution
+* experimenting with task router / planner-executor flows
+* delegating real execution back to classic GenericAgent only when needed
+
+The orchestration backend includes:
+
+* `task_router`
+* `chat_specialist`
+* `planner_executor`
+* `run_genericagent_executor`
+
+Simple questions can be handled by the chat specialist. Complex tasks are routed to the planner/executor path and eventually delegated to the classic GenericAgent runtime.
+
+---
+
+## Architecture
+
+GenericAgent Workbench uses a layered design.
+
+```mermaid
+flowchart LR
+    U["User / Bot / Desktop UI"] --> F["Workbench Frontends"]
+    F --> S["Session / Attachment / Restore Layer"]
+    S --> B{"Backend Mode"}
+    B --> G["Classic GenericAgent"]
+    B --> O["OpenAI Agents Orchestrator"]
+    O --> R["task_router"]
+    R --> C["chat_specialist"]
+    R --> P["planner_executor"]
+    P --> E["run_genericagent_executor"]
+    E --> G
+    G --> X["Files / Code / Browser / Shell / Memory / ADB"]
+```
+
+### Execution flow
+
+Lightweight question:
+
+```text
+user
+  -> workbench UI
+  -> task_router
+  -> chat_specialist
+  -> final answer
+```
+
+Complex task:
+
+```text
+user
+  -> workbench UI
+  -> task_router
+  -> planner_executor
+  -> run_genericagent_executor
+  -> classic GenericAgent executor
+  -> tool results
+  -> final answer
+```
+
+---
+
+## Project Structure
+
+```text
+GenericAgent-Workbench/
+├─ core/                      # Core runtime and orchestration logic
+│  ├─ agentmain.py            # Classic GenericAgent backend
+│  ├─ openai_agentmain.py     # OpenAI Agents orchestration backend
+│  ├─ router_rules.py         # Rule-based fast routing
+│  ├─ llmcore.py              # Model sessions and provider adapters
+│  └─ runtime_env.py          # Conda runtime selection
+├─ frontends/
+│  ├─ stapp.py                # Main Streamlit workbench
+│  ├─ chatapp_common.py       # Restore, distillation, common chat logic
+│  ├─ file_processor.py       # Attachment extraction and compression
+│  ├─ tgapp.py                # Telegram frontend
+│  ├─ fsapp.py                # Feishu frontend
+│  ├─ wecomapp.py             # WeCom frontend
+│  ├─ dingtalkapp.py          # DingTalk frontend
+│  ├─ wechatapp.py            # WeChat personal account frontend
+│  └─ ...
+├─ memory/
+│  ├─ global_mem.txt
+│  ├─ global_mem_insight.txt
+│  ├─ history_memory_inbox.md
+│  └─ L4_raw_sessions/
+├─ reflect/
+│  └─ scheduler.py            # Scheduler and session archive trigger
+├─ launch.pyw                 # Default desktop launcher
+├─ start_test.pyw             # OpenAI Agents backend launcher
+└─ mykey_template.py           # Model configuration template
+```
+
+---
+
+## Relationship with Upstream GenericAgent
+
+This repository is not intended to replace upstream GenericAgent.
+
+A useful mental model:
+
+| Layer                  | Role                                    |
+| ---------------------- | --------------------------------------- |
+| Upstream GenericAgent  | Minimal execution kernel                |
+| GenericAgent Workbench | Downstream product-like workbench layer |
+
+### What stays close to upstream
+
+* real local execution
+* file / code / browser / shell tool usage
+* memory-oriented agent workflow
+* classic GenericAgent runtime as executor
+
+### What this fork adds
+
+* desktop workbench UI
+* dual backend switch
+* multi-agent orchestration
+* rule-based routing
+* attachment ingestion
+* structured history restore
+* memory inbox workflow
+* practical local launchers
+
+### Why not merge everything upstream?
+
+The upstream project prefers a small core and focused patches. This repository intentionally keeps broader product-layer changes in a downstream fork.
+
+---
+
+## Safety Notes
+
+This project can delegate tasks to a real local executor. Use it carefully.
+
+* Do not upload `.env`, private keys, credentials, password files, or token files unless you fully understand the risk.
+* Run it inside a dedicated project directory when possible.
+* Review shell, file modification, browser automation, and autonomous tasks before trusting them.
+* The attachment pipeline warns about suspicious filenames, but it does not guarantee full secret detection.
+* This is an experimental local workbench, not a production security sandbox.
+
+---
+
+## Troubleshooting
+
+### `mykey.py` not found
+
+Copy the template first:
+
+```powershell
+copy mykey_template.py mykey.py
+```
+
+Then fill in your API key, base URL, and model name.
+
+### Streamlit does not open
+
+Try running the frontend manually:
+
+```bash
+streamlit run frontends/stapp.py
+```
+
+### Wrong Python environment
+
+The launcher prefers the `rag-env` Conda environment.
+
+Check your environment:
+
+```bash
+conda env list
+where python
+```
+
+On macOS / Linux:
+
+```bash
+which python
+```
+
+### Attachments fail to parse
+
+Install optional dependencies:
+
+```bash
+pip install pymupdf python-docx
+```
+
+### The agent keeps using tools incorrectly
+
+Try one of these:
+
+1. click **Reinject tools** in the sidebar
+2. switch to another configured model
+3. restart the workbench
+4. reduce the task scope and try again
+
+### The task runs too long
+
+Click **Stop task** in the sidebar, or restart the workbench.
+
+### OpenAI-compatible endpoint fails
+
+Check:
+
+* whether `apibase` ends with `/v1`
+* whether the model name is valid for your provider
+* whether streaming is supported
+* whether your provider supports tool calling
+* whether your network proxy is interfering with requests
+
+---
+
+## Roadmap
+
+Current focus:
+
+* stabilize classic / OpenAI Agents dual backend switching
+* improve model provider compatibility
+* improve session restore reliability
+* make attachment context safer and more predictable
+* document common usage patterns
+
+Possible next steps:
+
+* add screenshots and demo GIFs
+* add a complete `requirements.txt`
+* add a dedicated Chinese README
+* add RAG-based attachment retrieval instead of direct prompt injection
+* add MCP-style tool integration
+* improve policy evaluation for router rules
+* add safer confirmation gates for high-risk actions
 
 ---
 
 ## FAQ
 
-<details>
-<summary><strong>Q1. 这是不是 GenericAgent 的官方主线升级版？</strong></summary>
+### Is this the official next version of GenericAgent?
 
-不是。  
-更准确地说，这是一个以 GenericAgent 为执行底座的工程化工作台分支。
+No. This is a downstream workbench fork built around GenericAgent.
 
-</details>
+### Why keep the GenericAgent name?
 
-<details>
-<summary><strong>Q2. 为什么名字里还保留 GenericAgent？</strong></summary>
+Because the most important execution ability still comes from the classic GenericAgent runtime. This repository adds the workbench layer around it.
 
-因为最核心的执行能力仍然来自经典 GenericAgent。  
-这个仓库新增的主要是编排层、交互层、恢复与工作流层。
+### Should I use upstream GenericAgent or this fork?
 
-</details>
+Use upstream GenericAgent if you want the minimal original runtime.
+Use this fork if you want a desktop workbench with attachments, restore, orchestration, and more practical local usage features.
 
-<details>
-<summary><strong>Q3. 这个仓库和上游是什么关系？</strong></summary>
+### Is this production-ready?
 
-可以理解为：
+No. It is experimental and intended for local personal usage, research, and workflow exploration.
 
-- 上游：Agent 内核
-- 这个仓库：围绕内核做出来的工作台
+### Is attachment upload the same as RAG?
 
-</details>
-
-<details>
-<summary><strong>Q4. 这个仓库未来最像什么？</strong></summary>
-
-更像一个“个人 Agent Workbench”，而不是单纯的聊天界面或一次性脚本集合。
-
-</details>
+No. The current attachment pipeline extracts and compresses text, then injects distilled context into the current prompt. A full RAG pipeline would require indexing, retrieval, reranking, and citation-aware answer generation.
 
 ---
 
-## 当前一句话定位
+## Current Positioning
 
-> **GenericAgent Workbench = GenericAgent execution core + orchestration layer + workbench UI + memory and restore workflows.**
+> **GenericAgent Workbench = GenericAgent execution core + orchestration layer + desktop workbench UI + attachment context + session restore + memory workflows.**
