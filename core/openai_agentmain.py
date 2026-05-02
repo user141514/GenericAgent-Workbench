@@ -14,10 +14,30 @@ import sys
 import threading
 import time
 import traceback
+import uuid
+from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, cast
 
 from .router_rules import RouterRules, RouteResult
+from .quality import (
+    answer_quality_enabled,
+    build_answer_quality_context,
+    should_inject_answer_quality_context,
+)
+from .runtime import (
+    RuntimeProfiler,
+    build_profile_path,
+    detect_read_prefetch,
+    format_profile_summary,
+    profiling_enabled,
+)
+from .skills import (
+    build_optional_sop_context,
+    build_skill_activation,
+    export_skill_activation,
+    skill_sop_enabled,
+)
 
 os.environ.setdefault(
     "GA_LANG",
@@ -411,6 +431,24 @@ def _log_exchange(prompt: str, response: str, input_items: list | None = None) -
         f.write("\n")
 
 
+def _profile_status_label(status: str) -> str:
+    return status if status in {"success", "error", "aborted"} else "success"
+
+
+def _start_manual_span(profiler: RuntimeProfiler | None, name: str, kind: str | None = None, metadata: dict[str, Any] | None = None):
+    if profiler is None:
+        return None
+    cm = profiler.span(name, kind=kind, metadata=metadata)
+    cm.__enter__()
+    return cm
+
+
+def _stop_manual_span(span_cm) -> None:
+    if span_cm is None:
+        return
+    span_cm.__exit__(None, None, None)
+
+
 def _restored_lines_to_inputs(restored: list[str]) -> list[dict[str, str]]:
     inputs: list[dict[str, str]] = []
     for line in restored:
@@ -523,6 +561,13 @@ def _chat_messages_to_claude_messages(messages: list[dict[str, Any]]) -> list[di
         if role == "assistant":
             flush_tool_results()
             content_blocks = _message_content_to_claude_blocks(message.get("content"))
+
+            # Preserve reasoning_content as a thinking block so it is passed
+            # back to the API on subsequent turns (required by DeepSeek v4).
+            reasoning = message.get("reasoning_content")
+            if reasoning and isinstance(reasoning, str) and reasoning.strip():
+                content_blocks.insert(0, {"type": "thinking", "thinking": reasoning})
+
             for tool_call in message.get("tool_calls") or []:
                 function = tool_call.get("function", {})
                 arguments = function.get("arguments") or "{}"
@@ -619,6 +664,12 @@ def _extract_classic_executor_report(text: str) -> str:
 class GenericAgentSDKModel(Model):
     def __init__(self, variant: dict[str, Any]) -> None:
         self.variant = dict(variant)
+        self._audit_context: dict[str, Any] = {}
+
+    def update_audit_context(self, **kwargs: Any) -> None:
+        current = dict(self._audit_context)
+        current.update({k: v for k, v in kwargs.items() if v is not None})
+        self._audit_context = current
 
     def _build_session(
         self,
@@ -658,6 +709,7 @@ class GenericAgentSDKModel(Model):
         session = session_cls(cfg)
         session.system = system_instructions or ""
         session.tools = converted_tools
+        session._audit_context = dict(self._audit_context)
         return session, converted_tools
 
     def _prepare_request(
@@ -710,6 +762,23 @@ class GenericAgentSDKModel(Model):
             ResponseOutputText,
         )
 
+        output_items: list[Any] = []
+
+        # Preserve thinking blocks as reasoning items (required by DeepSeek v4
+        # which demands that thinking content be passed back to the API).
+        # Use plain dicts because Converter.maybe_reasoning_message() only
+        # matches dict instances, not Pydantic model objects.
+        for block in content_blocks:
+            if block.get("type") != "thinking":
+                continue
+            thinking_text = str(block.get("thinking") or "")
+            if thinking_text:
+                output_items.append({
+                    "id": FAKE_RESPONSES_ID,
+                    "type": "reasoning",
+                    "summary": [{"text": thinking_text, "type": "summary_text"}],
+                })
+
         message_parts: list[Any] = []
         for block in content_blocks:
             if block.get("type") != "text":
@@ -726,7 +795,6 @@ class GenericAgentSDKModel(Model):
                 )
             )
 
-        output_items: list[Any] = []
         if message_parts:
             output_items.append(
                 ResponseOutputMessage(
@@ -1179,6 +1247,11 @@ class OpenAIOrchestratedAgent:
         self._active_stream_result: Any | None = None
         self._turn_end_hooks: dict[str, Any] = {}
         self._classic_executor: Any | None = None
+        self.active_profiler: RuntimeProfiler | None = None
+        self._profile_run_id: str | None = None
+        self._profile_status = "success"
+        self._active_sdk_model: GenericAgentSDKModel | None = None
+        self._executor_result_state: dict[str, Any] | None = None
 
         self.variants = _resolve_model_variants()
         self.supports_llm_switch = len(self.variants) > 1
@@ -1215,6 +1288,15 @@ class OpenAIOrchestratedAgent:
 
     def _build_model(self) -> GenericAgentSDKModel:
         return GenericAgentSDKModel(self._current_variant())
+
+    def _update_model_audit_context(self, **kwargs: Any) -> None:
+        if self._active_sdk_model is None:
+            return
+        self._active_sdk_model.update_audit_context(
+            run_id=self._profile_run_id,
+            flow="openai_orchestrated",
+            **kwargs,
+        )
 
     def _apply_variant(self, idx: int) -> None:
         variant = self.variants[idx]
@@ -1261,20 +1343,49 @@ class OpenAIOrchestratedAgent:
             except Exception:
                 pass
 
-    def _run_classic_executor_task(self, user_request: str, execution_plan: str, on_progress=None) -> str:
+    def _store_executor_result_state(self, state: dict[str, Any] | None) -> None:
+        self._executor_result_state = dict(state) if isinstance(state, dict) else None
+
+    def _consume_executor_result_state(self) -> dict[str, Any] | None:
+        state = self._executor_result_state
+        self._executor_result_state = None
+        return dict(state) if isinstance(state, dict) else None
+
+    @staticmethod
+    def _should_skip_planner_followup(state: dict[str, Any] | None) -> bool:
+        if not isinstance(state, dict):
+            return False
+        final_answer_text = str(state.get("final_answer_text") or "").strip()
+        return (
+            bool(state.get("final_answer_ready"))
+            and bool(state.get("skip_planner_followup"))
+            and not bool(state.get("tool_error"))
+            and str(state.get("shortcut_type") or "") == "read_shortcut"
+            and bool(final_answer_text)
+        )
+
+    def _run_classic_executor_task(
+        self,
+        user_request: str,
+        execution_plan: str,
+        on_progress=None,
+        original_user_request: str | None = None,
+    ) -> str:
+        self._store_executor_result_state(None)
         try:
             classic = self._classic_executor
             if classic is None:
                 return "[Executor Error] Classic GenericAgent executor is unavailable. Check _init_classic_executor logs."
+            original_request = str(original_user_request or user_request or "").strip()
             prompt = (
                 "You are the execution engine inside a multi-agent workflow.\n"
                 "Execute the task with your normal GenericAgent tools and internal loop.\n"
                 "Focus on doing the work, not re-routing or re-explaining the workflow.\n"
                 "When you finish, provide a concise execution report with actions taken, evidence gathered, and remaining gaps.\n\n"
-                f"Original user request:\n{user_request}\n\n"
+                f"Original user request:\n{original_request}\n\n"
                 f"Execution plan or corrective follow-up:\n{execution_plan}"
             )
-            dq = classic.put_task(prompt, source="user")
+            dq = classic.put_task(prompt, source="user", run_id=self._profile_run_id)
             final_output = ""
             first_progress = True
             deadline = time.time() + 900
@@ -1303,6 +1414,17 @@ class OpenAIOrchestratedAgent:
                         first_progress = False
                 if "done" in item:
                     final_output = str(item.get("done") or "").strip()
+                    self._store_executor_result_state(
+                        {
+                            "final_answer_ready": bool(item.get("final_answer_ready")),
+                            "final_answer_text": str(item.get("final_answer_text") or "").strip(),
+                            "shortcut_type": str(item.get("shortcut_type") or "").strip(),
+                            "skip_planner_followup": bool(item.get("skip_planner_followup")),
+                            "shortcut_reason": str(item.get("shortcut_reason") or "").strip(),
+                            "shortcut_confidence": item.get("shortcut_confidence"),
+                            "tool_error": bool(item.get("tool_error")),
+                        }
+                    )
                     break
             if final_output:
                 return final_output
@@ -1371,10 +1493,10 @@ class OpenAIOrchestratedAgent:
             except Exception:
                 pass
 
-    def put_task(self, query: str, source: str = "user", images: list[str] | None = None):
+    def put_task(self, query: str, source: str = "user", images: list[str] | None = None, run_id: str | None = None):
         display_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.task_queue.put(
-            {"query": query, "source": source, "images": images or [], "output": display_queue}
+            {"query": query, "source": source, "images": images or [], "output": display_queue, "run_id": run_id}
         )
         return display_queue
 
@@ -1430,11 +1552,12 @@ class OpenAIOrchestratedAgent:
         display_queue.put({"done": f"未知命令: {cmd}", "source": "system"})
         return None
 
-    def _build_agent_graph(self, executor_progress=None) -> dict[str, Any]:
+    def _build_agent_graph(self, original_user_request: str, executor_progress=None) -> dict[str, Any]:
         _ensure_openai_agents_on_path()
         from agents import Agent, function_tool
 
         model = self._build_model()
+        self._active_sdk_model = model
         common = {"model": model}
 
         chat_agent = Agent(
@@ -1465,6 +1588,7 @@ class OpenAIOrchestratedAgent:
                 user_request,
                 execution_plan,
                 executor_progress,
+                original_user_request,
             )
 
         planner_executor_agent = Agent(
@@ -1588,11 +1712,21 @@ class OpenAIOrchestratedAgent:
         MAX_RETRIES = 3
         RETRY_DELAY = 2.0  # seconds
         route_target = "root"
+        profiler = self.active_profiler
         
         for attempt in range(MAX_RETRIES):
             full_text = ""
             last_sent_len = 0
             seen_turn = 0
+            selected_agent_name = "root"
+            active_tool_span = None
+            active_tool_name = ""
+            active_llm_turn_span = None
+            planning_span = None
+            execution_span = None
+            llm_span = None
+            stream_span = None
+            planner_followup_override = None
 
             def flush_progress(*, force: bool = False) -> None:
                 nonlocal last_sent_len
@@ -1631,28 +1765,285 @@ class OpenAIOrchestratedAgent:
 
             try:
                 # 规则快速匹配层 - 在LLM路由前进行预判
+                planning_span = _start_manual_span(profiler, "routing_and_planning", kind="agent", metadata={"attempt": attempt + 1, "source": source})
                 route_result = RouterRules.match(raw_query)
                 route_target = route_result.target
+                answer_quality_flag = bool(answer_quality_enabled())
+                answer_quality_query_match = should_inject_answer_quality_context(raw_query, route_target=None)
+                answer_quality_route_override = (
+                    answer_quality_flag
+                    and answer_quality_query_match
+                    and route_target != "executor"
+                )
                 route_hint = None
                 if route_result.target == "chat":
                     route_hint = "[ROUTER_HINT] This is a simple conversation request. Transfer to chat_specialist immediately."
                 elif route_result.target == "executor":
                     route_hint = "[ROUTER_HINT] This is a task requiring file/code/browser operations. Transfer to planner_executor immediately."
+                if answer_quality_route_override:
+                    route_target = "executor"
+                    route_hint = "[ROUTER_HINT] This is a roadmap / architecture / capability-planning request. Transfer to planner_executor immediately."
             
-                agents = self._build_agent_graph(executor_progress=executor_progress)
+                agents = self._build_agent_graph(raw_query, executor_progress=executor_progress)
                 inputs = list(self.input_items)
+                memory_span = _start_manual_span(profiler, "working_memory_prepare", kind="memory", metadata={"history_size": len(self.history)})
                 working_memory = _working_memory_message(self.history)
                 if working_memory:
                     inputs.append({"role": "system", "content": working_memory})
+                _stop_manual_span(memory_span)
                 selected_agent = agents["root"]
-                if route_result.target == "chat":
+                if route_target == "chat":
                     selected_agent = agents["chat"]
-                elif route_result.target == "executor":
+                elif route_target == "executor":
                     selected_agent = agents["executor"]
+                selected_agent_name = getattr(selected_agent, "name", route_target)
+                answer_quality_context = {
+                    "block": "",
+                    "chars": 0,
+                    "matched": False,
+                    "reason": "disabled",
+                }
+                if selected_agent_name in {"planner_executor", "task_router"}:
+                    if answer_quality_flag:
+                        if answer_quality_query_match:
+                            answer_quality_context = build_answer_quality_context(
+                                raw_query,
+                                max_chars=1800,
+                            )
+                        else:
+                            answer_quality_context = {
+                                "block": "",
+                                "chars": 0,
+                                "matched": False,
+                                "reason": "query did not match answer-quality planning triggers",
+                            }
+                    else:
+                        answer_quality_context = {
+                            "block": "",
+                            "chars": 0,
+                            "matched": False,
+                            "reason": "answer quality guard disabled",
+                        }
+                read_prefetch_should_prefetch = False
+                read_prefetch_target_file: str | None = None
+                read_prefetch_reason = "not_checked"
+                read_prefetch_confidence = 0.0
+                read_prefetch_max_lines: int | None = None
+                read_prefetch_max_chars: int | None = None
+                read_prefetch_signals: list[str] = []
+                if selected_agent_name in {"planner_executor", "task_router"}:
+                    prefetch_decision = detect_read_prefetch(
+                        raw_query,
+                        project_root=PROJECT_ROOT,
+                    )
+                    read_prefetch_should_prefetch = bool(prefetch_decision.should_prefetch)
+                    read_prefetch_target_file = prefetch_decision.target_file
+                    read_prefetch_reason = str(prefetch_decision.reason or "")
+                    read_prefetch_confidence = float(prefetch_decision.confidence or 0.0)
+                    read_prefetch_max_lines = int(prefetch_decision.max_lines or 0)
+                    read_prefetch_max_chars = int(prefetch_decision.max_chars or 0)
+                    read_prefetch_signals = list(prefetch_decision.signals or [])
+                    if profiler is not None and read_prefetch_should_prefetch:
+                        profiler.record_event(
+                            "read_prefetch_detected",
+                            kind="io",
+                            metadata={
+                                "should_prefetch": read_prefetch_should_prefetch,
+                                "target_file": read_prefetch_target_file,
+                                "reason": read_prefetch_reason,
+                                "confidence": read_prefetch_confidence,
+                                "max_lines": read_prefetch_max_lines,
+                                "max_chars": read_prefetch_max_chars,
+                                "signals": read_prefetch_signals,
+                            },
+                        )
+                skill_sop_flag = bool(skill_sop_enabled())
+                skill_sop_context = {"block": "", "selected_skills": [], "skill_matches": [], "chars": 0, "phase": "planner"}
+                if selected_agent_name == "planner_executor" and skill_sop_flag:
+                    skill_sop_context = build_optional_sop_context(
+                        user_input=raw_query,
+                        max_skills=2,
+                        max_chars_per_skill=1800,
+                        max_total_chars=3500,
+                        phase="planner",
+                    )
+                skill_activation = None
+                skill_match_entries = list(skill_sop_context.get("skill_matches") or [])
+                skill_match_scores = {
+                    str(item.get("name") or ""): float(item.get("score") or 0.0)
+                    for item in skill_match_entries
+                    if str(item.get("name") or "").strip()
+                }
+                skill_match_reasons = {
+                    str(item.get("name") or ""): list(item.get("reasons") or [])
+                    for item in skill_match_entries
+                    if str(item.get("name") or "").strip()
+                }
+                skill_match_applies_to = {
+                    str(item.get("name") or ""): list(item.get("applies_to") or [])
+                    for item in skill_match_entries
+                    if str(item.get("name") or "").strip()
+                }
+                skill_activation_export_path = ""
+                skill_policy_preview: dict[str, Any] = {}
+                skill_policy_source_skills: list[str] = []
+                skill_policy_disabled_tools: list[str] = []
+                skill_policy_suppressed_context_sections: list[str] = []
+                skill_policy_max_turns: int | None = None
+                skill_policy_max_prompt_chars: int | None = None
+                skill_policy_warnings: list[str] = []
+                skill_memory_write_allowed = False
+                if skill_sop_context.get("selected_skills"):
+                    try:
+                        skill_activation = build_skill_activation(
+                            user_input=raw_query,
+                            phase=str(skill_sop_context.get("phase") or "planner"),
+                            skill_sop_context=skill_sop_context,
+                            run_id=self._profile_run_id,
+                        )
+                        try:
+                            skill_activation_export_path = str(export_skill_activation(skill_activation))
+                        except Exception as exc:
+                            print(f"[skill_activation] export failed: {exc}")
+                        skill_policy_source_skills = list(
+                            skill_activation.execution_policy.get("source_skills") or []
+                        )
+                        skill_policy_disabled_tools = list(
+                            skill_activation.execution_policy.get("disabled_tools") or []
+                        )
+                        skill_policy_suppressed_context_sections = list(
+                            skill_activation.execution_policy.get("suppressed_context_sections") or []
+                        )
+                        skill_policy_max_turns = skill_activation.execution_policy.get("max_turns")
+                        skill_policy_max_prompt_chars = skill_activation.execution_policy.get("max_prompt_chars")
+                        skill_policy_warnings = list(skill_activation.policy_warnings or [])
+                        skill_memory_write_allowed = bool(skill_activation.memory_write_allowed)
+                        skill_policy_preview = {
+                            "source_skills": skill_policy_source_skills,
+                            "disabled_tools": skill_policy_disabled_tools,
+                            "suppressed_context_sections": skill_policy_suppressed_context_sections,
+                            "tool_schema_policy": skill_activation.execution_policy.get("tool_schema_policy"),
+                            "context_policy": skill_activation.execution_policy.get("context_policy"),
+                            "max_turns": skill_policy_max_turns,
+                            "max_prompt_chars": skill_policy_max_prompt_chars,
+                        }
+                        if profiler is not None:
+                            profiler.record_event(
+                                "skill_activation",
+                                kind="agent",
+                                metadata={
+                                    "activation_id": skill_activation.activation_id,
+                                    "phase": skill_activation.phase,
+                                    "selected_skills": list(skill_activation.selected_skills),
+                                    "prompt_chars_added": skill_activation.prompt_chars_added,
+                                    "policy_preview": skill_policy_preview,
+                                    "policy_warnings": skill_policy_warnings,
+                                    "memory_write_allowed": skill_memory_write_allowed,
+                                    "export_path": skill_activation_export_path,
+                                },
+                            )
+                    except Exception as exc:
+                        print(f"[skill_activation] build failed: {exc}")
+                self._update_model_audit_context(
+                    source=source,
+                    attempt=attempt + 1,
+                    route_target=route_target,
+                    agent_name=selected_agent_name,
+                    turn=max(seen_turn, 1),
+                    skill_sop_enabled=skill_sop_flag,
+                    skill_phase=str(skill_sop_context.get("phase") or "planner"),
+                    selected_skills=list(skill_sop_context.get("selected_skills") or []),
+                    skill_match_scores=skill_match_scores,
+                    skill_match_reasons=skill_match_reasons,
+                    selected_skill_applies_to=skill_match_applies_to,
+                    skill_sop_chars=int(skill_sop_context.get("chars") or 0),
+                    answer_quality_enabled=answer_quality_flag,
+                    answer_quality_route_override=answer_quality_route_override,
+                    answer_quality_context_injected=bool(answer_quality_context.get("block")),
+                    answer_quality_context_chars=int(answer_quality_context.get("chars") or 0),
+                    answer_quality_reason=str(answer_quality_context.get("reason") or ""),
+                    read_prefetch_should_prefetch=read_prefetch_should_prefetch,
+                    read_prefetch_target_file=read_prefetch_target_file,
+                    read_prefetch_reason=read_prefetch_reason,
+                    read_prefetch_confidence=read_prefetch_confidence,
+                    read_prefetch_max_lines=read_prefetch_max_lines,
+                    read_prefetch_max_chars=read_prefetch_max_chars,
+                    skill_activation_id=getattr(skill_activation, "activation_id", None),
+                    skill_policy_preview=skill_policy_preview or None,
+                    skill_policy_source_skills=skill_policy_source_skills or None,
+                    skill_policy_disabled_tools=skill_policy_disabled_tools or None,
+                    skill_policy_suppressed_context_sections=skill_policy_suppressed_context_sections or None,
+                    skill_policy_max_turns=skill_policy_max_turns,
+                    skill_policy_max_prompt_chars=skill_policy_max_prompt_chars,
+                    skill_policy_warnings=skill_policy_warnings or None,
+                    skill_memory_write_allowed=skill_memory_write_allowed,
+                )
                 # 如果规则匹配命中，添加路由提示
                 if route_hint and selected_agent is agents["root"]:
                     inputs.append({"role": "system", "content": route_hint})
+                answer_quality_block = str(answer_quality_context.get("block") or "").strip()
+                if selected_agent_name in {"planner_executor", "task_router"} and answer_quality_block:
+                    inputs.append({"role": "user", "content": answer_quality_block})
+                optional_sop_block = str(skill_sop_context.get("block") or "").strip()
+                if selected_agent_name == "planner_executor" and optional_sop_block:
+                    inputs.append({"role": "user", "content": optional_sop_block})
                 inputs.append({"role": "user", "content": raw_query})
+                if profiler is not None:
+                    profiler.record_event(
+                        "route_selected",
+                        kind="agent",
+                        metadata={
+                            "target": route_target,
+                            "selected_agent": selected_agent_name,
+                            "skill_sop_enabled": skill_sop_flag,
+                            "skill_phase": str(skill_sop_context.get("phase") or "planner"),
+                            "selected_skills": list(skill_sop_context.get("selected_skills") or []),
+                            "skill_match_scores": skill_match_scores,
+                            "skill_match_reasons": skill_match_reasons,
+                            "selected_skill_applies_to": skill_match_applies_to,
+                            "skill_sop_chars": int(skill_sop_context.get("chars") or 0),
+                            "answer_quality_enabled": answer_quality_flag,
+                            "answer_quality_route_override": answer_quality_route_override,
+                            "answer_quality_context_injected": bool(answer_quality_context.get("block")),
+                            "answer_quality_context_chars": int(answer_quality_context.get("chars") or 0),
+                            "answer_quality_reason": str(answer_quality_context.get("reason") or ""),
+                            "read_prefetch_should_prefetch": read_prefetch_should_prefetch,
+                            "read_prefetch_target_file": read_prefetch_target_file,
+                            "read_prefetch_reason": read_prefetch_reason,
+                            "read_prefetch_confidence": read_prefetch_confidence,
+                            "read_prefetch_max_lines": read_prefetch_max_lines,
+                            "read_prefetch_max_chars": read_prefetch_max_chars,
+                            "skill_activation_id": getattr(skill_activation, "activation_id", None),
+                            "skill_policy_preview": skill_policy_preview or None,
+                            "skill_policy_source_skills": skill_policy_source_skills,
+                            "skill_policy_disabled_tools": skill_policy_disabled_tools,
+                            "skill_policy_suppressed_context_sections": skill_policy_suppressed_context_sections,
+                            "skill_policy_max_turns": skill_policy_max_turns,
+                            "skill_policy_max_prompt_chars": skill_policy_max_prompt_chars,
+                            "skill_policy_warnings": skill_policy_warnings,
+                            "skill_memory_write_allowed": skill_memory_write_allowed,
+                        },
+                    )
+                _stop_manual_span(planning_span)
+                execution_span = _start_manual_span(
+                    profiler,
+                    "selected_agent_execution",
+                    kind="agent",
+                    metadata={"attempt": attempt + 1, "selected_agent": selected_agent_name, "route_target": route_target},
+                )
+                llm_span = _start_manual_span(
+                    profiler,
+                    "orchestrator_streamed_run",
+                    kind="llm",
+                    metadata={"attempt": attempt + 1, "selected_agent": selected_agent_name},
+                )
+                stream_span = _start_manual_span(
+                    profiler,
+                    "stream_events",
+                    kind="frontend",
+                    metadata={"attempt": attempt + 1, "selected_agent": selected_agent_name},
+                )
+                self._store_executor_result_state(None)
                 result = Runner.run_streamed(selected_agent, input=inputs, max_turns=100)
                 self._active_stream_result = result
 
@@ -1662,7 +2053,21 @@ class OpenAIOrchestratedAgent:
                         raise asyncio.CancelledError()
 
                     while result.current_turn > seen_turn:
+                        _stop_manual_span(active_llm_turn_span)
                         seen_turn += 1
+                        self._update_model_audit_context(
+                            source=source,
+                            attempt=attempt + 1,
+                            route_target=route_target,
+                            agent_name=selected_agent_name,
+                            turn=seen_turn,
+                        )
+                        active_llm_turn_span = _start_manual_span(
+                            profiler,
+                            f"llm_call_turn_{seen_turn}",
+                            kind="llm",
+                            metadata={"turn": seen_turn, "attempt": attempt + 1, "selected_agent": selected_agent_name},
+                        )
                         if full_text and not full_text.endswith("\n\n"):
                             full_text += "\n\n"
                         full_text += f"**LLM Running (Turn {seen_turn}) ...**\n\n"
@@ -1677,12 +2082,124 @@ class OpenAIOrchestratedAgent:
                                 flush_progress(force="\n" in delta)
                         continue
 
+                    if getattr(event, "type", "") == "run_item_stream_event":
+                        event_name = getattr(event, "name", "")
+                        if event_name == "tool_called":
+                            _stop_manual_span(active_tool_span)
+                            tool_name = self._tool_name_from_item(event.item)
+                            active_tool_name = tool_name
+                            active_tool_span = _start_manual_span(
+                                profiler,
+                                f"tool_call:{tool_name}",
+                                kind="tool",
+                                metadata={"tool": tool_name, "attempt": attempt + 1, "turn": max(seen_turn, 1)},
+                            )
+                        elif event_name == "tool_output":
+                            _stop_manual_span(active_tool_span)
+                            active_tool_span = None
+                            if active_tool_name == "run_genericagent_executor":
+                                executor_state = self._consume_executor_result_state()
+                                if self._should_skip_planner_followup(executor_state):
+                                    planner_followup_override = executor_state
+                                    if profiler is not None:
+                                        profiler.record_event(
+                                            "orchestrator_skip_planner_followup",
+                                            kind="agent",
+                                            metadata={
+                                                "reason": executor_state.get("shortcut_reason") or "read_shortcut_final_answer_ready",
+                                                "shortcut_type": executor_state.get("shortcut_type"),
+                                                "confidence": executor_state.get("shortcut_confidence"),
+                                                "saved_llm_call_estimate": 1,
+                                            },
+                                        )
+                                    try:
+                                        result.cancel(mode="immediate")
+                                    except Exception:
+                                        pass
+                                    active_tool_name = ""
+                                    break
+                            active_tool_name = ""
+                        elif event_name in {"handoff_requested", "handoff_occured"} and profiler is not None:
+                            target = getattr(event.item, "target_agent", None)
+                            target_name = getattr(target, "name", "") if target is not None else ""
+                            profiler.record_event(
+                                event_name,
+                                kind="agent",
+                                metadata={"target_agent": target_name},
+                            )
+                            if target_name:
+                                selected_agent_name = target_name
+                                self._update_model_audit_context(
+                                    source=source,
+                                    attempt=attempt + 1,
+                                    route_target=route_target,
+                                    agent_name=selected_agent_name,
+                                    turn=max(seen_turn, 1),
+                                )
+
                     progress_text = self._progress_text_for_event(event)
                     if progress_text:
                         if full_text and not full_text.endswith("\n"):
                             full_text += "\n"
                         full_text += f"{progress_text}\n\n"
                         flush_progress(force=True)
+
+                _stop_manual_span(active_tool_span)
+                active_tool_span = None
+                _stop_manual_span(active_llm_turn_span)
+                active_llm_turn_span = None
+                _stop_manual_span(stream_span)
+                stream_span = None
+                _stop_manual_span(llm_span)
+                llm_span = None
+                _stop_manual_span(execution_span)
+                execution_span = None
+
+                if planner_followup_override is not None:
+                    final_text = str(planner_followup_override.get("final_answer_text") or "").strip()
+                    if not full_text.strip():
+                        full_text = _inject_turn_markers(final_text or "[Empty response]")
+                        seen_turn = max(1, full_text.count("LLM Running (Turn"))
+                    elif final_text and final_text not in full_text:
+                        if not full_text.endswith("\n\n"):
+                            full_text += "\n\n"
+                        full_text += final_text
+
+                    try:
+                        self.input_items = result.to_input_list(mode="normalized")
+                    except Exception:
+                        pass
+                    if self.llmclient:
+                        self.llmclient.backend.history = list(self.input_items)
+                    user_line = smart_format(raw_query.replace("\n", " "), max_str_len=200)
+                    agent_line = _extract_summary_line(final_text) or smart_format(final_text.replace("\n", " "), max_str_len=300)
+                    self.history.append(f"[USER]: {user_line}")
+                    self.history.append(f"[Agent] {agent_line}")
+                    io_span = _start_manual_span(
+                        profiler,
+                        "save_model_response_log",
+                        kind="io",
+                        metadata={"attempt": attempt + 1, "shortcut_type": planner_followup_override.get("shortcut_type")},
+                    )
+                    _log_exchange(raw_query, full_text, self.input_items)
+                    _stop_manual_span(io_span)
+
+                    for hook in self._turn_end_hooks.values():
+                        try:
+                            hook(
+                                {
+                                    "turn": max(seen_turn, full_text.count("LLM Running (Turn")),
+                                    "summary": agent_line,
+                                    "exit_reason": {
+                                        "result": "DONE",
+                                        "shortcut_type": planner_followup_override.get("shortcut_type"),
+                                    },
+                                }
+                            )
+                        except Exception:
+                            pass
+                    display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 1)})
+                    return
 
                 if result.run_loop_exception:
                     raise result.run_loop_exception
@@ -1692,11 +2209,13 @@ class OpenAIOrchestratedAgent:
                     final_output if isinstance(final_output, str) else str(final_output or "")
                 ).strip()
                 if _should_fallback_to_classic(route_target, final_text=final_text):
+                    fallback_span = _start_manual_span(profiler, "classic_executor_fallback", kind="tool", metadata={"reason": "unusable_output"})
                     final_text = await asyncio.to_thread(
                         self._run_classic_executor_task,
                         raw_query,
                         _classic_executor_plan(f"Unusable orchestration output: {final_text or '[empty]'}"),
                     )
+                    _stop_manual_span(fallback_span)
                     full_text = _inject_turn_markers(final_text)
                     seen_turn = max(1, full_text.count("LLM Running (Turn"))
                 if not full_text.strip():
@@ -1717,7 +2236,9 @@ class OpenAIOrchestratedAgent:
                 agent_line = _extract_summary_line(final_text) or smart_format(final_text.replace("\n", " "), max_str_len=300)
                 self.history.append(f"[USER]: {user_line}")
                 self.history.append(f"[Agent] {agent_line}")
+                io_span = _start_manual_span(profiler, "save_model_response_log", kind="io", metadata={"attempt": attempt + 1})
                 _log_exchange(raw_query, full_text, self.input_items)
+                _stop_manual_span(io_span)
 
                 for hook in self._turn_end_hooks.values():
                     try:
@@ -1738,6 +2259,8 @@ class OpenAIOrchestratedAgent:
                 # 超时/连接错误 - 自动重试
                 error_name = type(e).__name__
                 if attempt < MAX_RETRIES - 1:
+                    if profiler is not None:
+                        profiler.record_event("retry_scheduled", kind="io", metadata={"attempt": attempt + 2, "error": error_name})
                     retry_msg = f"[WARN] {error_name}: {e}. Retrying in {RETRY_DELAY}s... (attempt {attempt + 2}/{MAX_RETRIES})"
                     print(retry_msg)
                     display_queue.put({"next": f"\n**{retry_msg}**\n\n", "source": "system", "turn": max(seen_turn, 0)})
@@ -1746,12 +2269,14 @@ class OpenAIOrchestratedAgent:
                     continue
                 else:
                     # 重试次数用尽
+                    self._profile_status = "error"
                     error_msg = f"[ERROR] {error_name}: {e}. All {MAX_RETRIES} retries failed."
                     print(error_msg)
                     display_queue.put({"done": f"\n**{error_msg}**\n\n请尝试重新发送请求。", "source": "system", "turn": max(seen_turn, 0)})
                     return
             except asyncio.CancelledError:
                 if self._user_abort_requested or self.stop_sig:
+                    self._profile_status = "aborted"
                     display_queue.put({"done": full_text + "\n\n[已取消]", "source": "system", "turn": max(seen_turn, 0)})
                     return
                 warn_msg = "[WARN] Unexpected internal cancellation."
@@ -1761,15 +2286,18 @@ class OpenAIOrchestratedAgent:
                     await asyncio.sleep(RETRY_DELAY)
                     RETRY_DELAY *= 1.5
                     continue
+                self._profile_status = "error"
                 display_queue.put({"done": full_text or f"\n**{warn_msg}**\n\n", "source": "system", "turn": max(seen_turn, 0)})
                 return
             except Exception as e:
                 if _should_fallback_to_classic(route_target, exc=e):
+                    fallback_span = _start_manual_span(profiler, "classic_executor_fallback", kind="tool", metadata={"reason": type(e).__name__})
                     fallback_text = await asyncio.to_thread(
                         self._run_classic_executor_task,
                         raw_query,
                         _classic_executor_plan(f"{type(e).__name__}: {e}"),
                     )
+                    _stop_manual_span(fallback_span)
                     fallback_text = (fallback_text or "").strip()
                     if fallback_text:
                         full_text = _inject_turn_markers(fallback_text)
@@ -1779,15 +2307,24 @@ class OpenAIOrchestratedAgent:
                         )
                         self.history.append(f"[USER]: {user_line}")
                         self.history.append(f"[Agent] {agent_line}")
+                        io_span = _start_manual_span(profiler, "save_model_response_log", kind="io", metadata={"attempt": attempt + 1, "fallback": True})
                         _log_exchange(raw_query, full_text, self.input_items)
+                        _stop_manual_span(io_span)
                         display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 0)})
                         return
                 # 其他异常 - 直接报错
+                self._profile_status = "error"
                 import traceback
                 traceback.print_exc()
                 display_queue.put({"done": f"\n**[ERROR] {type(e).__name__}: {e}**\n\n", "source": "system", "turn": max(seen_turn, 0)})
                 return
             finally:
+                _stop_manual_span(active_tool_span)
+                _stop_manual_span(active_llm_turn_span)
+                _stop_manual_span(stream_span if 'stream_span' in locals() else None)
+                _stop_manual_span(llm_span if 'llm_span' in locals() else None)
+                _stop_manual_span(execution_span if 'execution_span' in locals() else None)
+                _stop_manual_span(planning_span if 'planning_span' in locals() else None)
                 self._active_stream_result = None
 
         # 不应该到达这里
@@ -1828,6 +2365,7 @@ class OpenAIOrchestratedAgent:
             raw_query = task["query"]
             source = task["source"]
             display_queue = task["output"]
+            run_id = task.get("run_id") or uuid.uuid4().hex
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done()
@@ -1836,9 +2374,19 @@ class OpenAIOrchestratedAgent:
             self.is_running = True
             self.stop_sig = False
             self._user_abort_requested = False
+            self._profile_status = "success"
+            self._profile_run_id = run_id
+            self.active_profiler = RuntimeProfiler() if profiling_enabled() else None
+            if self.active_profiler is not None:
+                self.active_profiler.start_run(
+                    run_id=run_id,
+                    name="openai_orchestrated_request",
+                    metadata={"backend": "openai-agents", "source": source},
+                )
             try:
                 self._drain_task(raw_query, source, display_queue)
             except Exception as e:
+                self._profile_status = "error"
                 display_queue.put(
                     {
                         "done": f"[OpenAI Agents Error]\n\n```\n{format_error(e)}\n```",
@@ -1846,6 +2394,19 @@ class OpenAIOrchestratedAgent:
                     }
                 )
             finally:
+                if self.active_profiler is not None:
+                    try:
+                        summary = self.active_profiler.end_run(status=_profile_status_label(self._profile_status))
+                        profile_path = build_profile_path(os.path.join(PROJECT_ROOT, "temp", "profiles"), self._profile_run_id or run_id)
+                        self.active_profiler.export_json(profile_path)
+                        print(format_profile_summary(summary, top_n=10))
+                        print(f"[PROFILE] saved={profile_path}")
+                    except Exception as profile_error:
+                        print(f"[PROFILE] export failed: {profile_error}")
+                    finally:
+                        self.active_profiler = None
+                        self._profile_run_id = None
+                self._store_executor_result_state(None)
                 self.is_running = False
                 self.stop_sig = False
                 self._user_abort_requested = False

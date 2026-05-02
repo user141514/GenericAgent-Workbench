@@ -33,24 +33,44 @@ if BACKEND_KIND == "openai-agents":
     from core.openai_agentmain import OpenAIOrchestratedAgent as BackendAgent
 else:
     from core.agentmain import GeneraticAgent as BackendAgent
-from chatapp_common import (
-    delete_history_file,
-    distill_conversation,
-    format_restore,
-    input_items_to_backend_history,
-    input_items_to_lines,
-    input_items_to_messages,
-    restored_lines_to_backend_history,
-    restored_lines_to_messages,
-    save_distilled_memory,
-    unpack_restore_result,
-)
-from file_processor import (
-    SUPPORTED_UPLOAD_SUFFIXES,
-    build_attachment_prompt,
-    build_upload_id,
-    process_uploaded_file,
-)
+try:
+    from frontends.chatapp_common import (
+        delete_history_file,
+        distill_conversation,
+        format_restore,
+        input_items_to_backend_history,
+        input_items_to_lines,
+        input_items_to_messages,
+        restored_lines_to_backend_history,
+        restored_lines_to_messages,
+        save_distilled_memory,
+        unpack_restore_result,
+    )
+    from frontends.file_processor import (
+        SUPPORTED_UPLOAD_SUFFIXES,
+        build_attachment_prompt,
+        build_upload_id,
+        process_uploaded_file,
+    )
+except ImportError:
+    from chatapp_common import (
+        delete_history_file,
+        distill_conversation,
+        format_restore,
+        input_items_to_backend_history,
+        input_items_to_lines,
+        input_items_to_messages,
+        restored_lines_to_backend_history,
+        restored_lines_to_messages,
+        save_distilled_memory,
+        unpack_restore_result,
+    )
+    from file_processor import (
+        SUPPORTED_UPLOAD_SUFFIXES,
+        build_attachment_prompt,
+        build_upload_id,
+        process_uploaded_file,
+    )
 
 
 st.set_page_config(page_title="Cowork", layout="wide")
@@ -87,17 +107,6 @@ def init():
     agent = BackendAgent()
     if getattr(agent, "startup_error", None):
         st.error("⚠️ 未配置任何可用的 LLM 接口，请设置mykey.py。")
-        st.stop()
-    else:
-        threading.Thread(target=agent.run, daemon=True).start()
-    return agent
-
-
-@st.cache_resource
-def init():
-    agent = BackendAgent()
-    if getattr(agent, "startup_error", None):
-        st.error(agent.startup_error)
         st.stop()
     if not getattr(agent, "ready", getattr(agent, "llmclient", None) is not None):
         st.error("Startup failed.")
@@ -490,6 +499,30 @@ def render_upload_panel():
 
 @st.fragment
 def render_sidebar():
+    # 新建对话按钮
+    if st.button("➕ 新建对话", key="new_conversation", use_container_width=True, type="primary"):
+        # 清空UI消息
+        st.session_state.messages = []
+        # 清空附件
+        if "uploaded_files" in st.session_state:
+            st.session_state.uploaded_files = []
+        # 停止当前任务并清空后端历史
+        agent.abort()
+        if hasattr(agent, "history"):
+            agent.history = []
+        if (
+            hasattr(agent, "llmclient")
+            and agent.llmclient
+            and hasattr(agent.llmclient, "backend")
+            and agent.llmclient.backend
+        ):
+            agent.llmclient.backend.history = []
+            agent.llmclient.last_tools = ""
+        st.toast("✅ 已新建对话")
+        st.rerun()
+    
+    st.divider()
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📜 历史", key="toggle_history", use_container_width=True):
