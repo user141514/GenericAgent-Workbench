@@ -10,6 +10,13 @@ _RESP_CACHE_KEY = str(uuid.uuid4())
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 _LLM_AUDIT_CACHE = LLMCallCache(Path(PROJECT_ROOT) / "temp" / "llm_cache")
 
+# Load .env file for API key configuration (preferred over mykey.py)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+except ImportError:
+    pass
+
 
 def _audit_response_text(content_blocks):
     texts = []
@@ -54,13 +61,44 @@ def _safe_audit_llm_call(*, session, call_site, messages, response, duration_ms,
     except Exception as exc:
         print(f"[LLM AUDIT] {call_site} failed: {exc}")
 
+def _load_mykeys_from_env():
+    """Build a mykeys-compatible config dict from GA_* environment variables."""
+    api_key = os.environ.get("GA_API_KEY", "").strip()
+    if not api_key:
+        return {}
+    return {
+        "native_oai_config": {
+            "name": os.environ.get("GA_BACKEND_NAME", "env-configured"),
+            "apikey": api_key,
+            "apibase": os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+            "model": os.environ.get("GA_MODEL", "deepseek-chat"),
+            "stream": os.environ.get("GA_STREAM", "true").lower() != "false",
+            "max_retries": int(os.environ.get("GA_MAX_RETRIES", "3")),
+            "connect_timeout": int(os.environ.get("GA_CONNECT_TIMEOUT", "10")),
+            "read_timeout": int(os.environ.get("GA_READ_TIMEOUT", "120")),
+        }
+    }
+
 def _load_mykeys():
+    # 1. Try importing mykey.py (legacy, gitignored)
     try:
-        import mykey; return {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
-    except ImportError: pass
-    p = os.path.join(PROJECT_ROOT, 'mykey.json')
-    if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from mykey_template.')
-    with open(p, encoding='utf-8') as f: return json.load(f)
+        import mykey
+        return {k: v for k, v in vars(mykey).items() if not k.startswith("_")}
+    except ImportError:
+        pass
+    # 2. Try mykey.json (legacy)
+    p = os.path.join(PROJECT_ROOT, "mykey.json")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    # 3. Fall back to environment variables (preferred new approach)
+    keys = _load_mykeys_from_env()
+    if keys:
+        return keys
+    raise Exception(
+        "[ERROR] No API key configuration found. "
+        "Set GA_API_KEY environment variable, or create mykey.py from mykey_template.py."
+    )
 
 def __getattr__(name):
     if name in ('mykeys', 'proxies'):

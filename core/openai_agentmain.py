@@ -56,6 +56,13 @@ elif hasattr(sys.stderr, "reconfigure"):
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT_DIR = PROJECT_ROOT
+
+# Load .env file for API key configuration (preferred over mykey.py)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+except ImportError:
+    pass
 sys.path.append(SCRIPT_DIR)
 CLAUDE_SETTINGS_PATH = os.path.expanduser(r"~/.claude/settings.json")
 CAPABILITY_BRIEF = (
@@ -237,6 +244,21 @@ def _load_mykeys() -> dict[str, Any]:
     if os.path.exists(json_path):
         return _load_json_file(json_path)
 
+    # Fall back to environment variables (preferred new approach)
+    api_key = os.environ.get("GA_API_KEY", "").strip()
+    if api_key:
+        return {
+            "native_oai_config": {
+                "name": os.environ.get("GA_BACKEND_NAME", "env-configured"),
+                "apikey": api_key,
+                "apibase": os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com").rstrip("/"),
+                "model": os.environ.get("GA_MODEL", "deepseek-chat"),
+                "stream": os.environ.get("GA_STREAM", "true").lower() != "false",
+                "max_retries": int(os.environ.get("GA_MAX_RETRIES", "3")),
+                "connect_timeout": int(os.environ.get("GA_CONNECT_TIMEOUT", "10")),
+                "read_timeout": int(os.environ.get("GA_READ_TIMEOUT", "120")),
+            }
+        }
     return {}
 
 
