@@ -1,0 +1,50 @@
+# Ruff configuration for GAgent-Multi project
+# 文档: https://docs.astral.sh/ruff/
+
+# 目标Python版本
+target-version = "py310"
+
+# 行长度限制
+line-length = 120
+
+# 排除目录
+exclude = [
+    ".git",
+    "__pycache__",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "temp",
+    "*.egg-info",
+]
+
+# 源代码目录
+src = [".", "core", "frontends", "memory"]
+
+[lint]
+# 启用的规则集
+select = [
+    "E",      # pycodestyle errors
+    "F",      # pyflakes
+    "I",      # isort
+    "W",      # pycodestyle warnings
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+]
+
+# 忽略的规则
+ignore = [
+    "E501",   # 行长度由line-length控制
+    "B008",   # 函数默认参数中的函数调用
+]
+
+# 每个文件的忽略规则
+[lint.per-file-ignores]
+"__init__.py" = ["F401"]  # 未使用的导入
+
+[format]
+# 格式化配置
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false

@@ -54,6 +54,7 @@ Thumbs.db
 !assets/**
 !memory/*.md
 !memory/*.py
+!.env.template
 
 # Re-exclude build artifacts (must follow negations above to override !core/**)
 __pycache__/
