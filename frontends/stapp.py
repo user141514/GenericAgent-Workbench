@@ -739,6 +739,7 @@ except (ImportError, AttributeError):
 _js_scroll_fix = (
     "!function(){var p=window.parent;if(p.__sfx)return;p.__sfx=1;"
     "var d=p.document;"
+    "var lastScrollEvent=0;"
     "var isNearBottom=function(){"
     "var m=d.querySelector('section.main');if(!m)return 1;"
     "return m.scrollTop+m.clientHeight>=m.scrollHeight-200;"
@@ -748,16 +749,18 @@ _js_scroll_fix = (
     "var b=m.querySelector('.block-container');if(!b)return;"
     "b.scrollIntoView({block:'end',behavior:'instant'});"
     "};"
-    "var streamActive=function(){"
-    "var e=d.querySelector('[data-stream-active]');"
-    "return e&&e.getAttribute('data-stream-active')==='1';"
-    "};"
     "var obs=new MutationObserver(function(){"
-    "if(streamActive()&&isNearBottom())doScroll();"
+    "var marker=d.querySelector('#stream-marker');"
+    "if(!marker)return;"
+    "var active=marker.getAttribute('data-stream-active');"
+    "if(active!=='1')return;"
+    "var se=parseInt(marker.getAttribute('data-scroll-event')||'0',10);"
+    "if(se===lastScrollEvent)return;"
+    "lastScrollEvent=se;"
+    "if(isNearBottom())doScroll();"
     "});"
     "var target=d.querySelector('section.main .block-container')||d.body;"
     "obs.observe(target,{childList:1,subtree:1,characterData:1});"
-    "d.addEventListener('scroll',function(){},0);"
     "}()"
 )
 _js_ime_fix = (
@@ -786,35 +789,37 @@ if prompt := st.chat_input("any task?"):
         st.markdown(visible_prompt)
 
     with st.chat_message("assistant"):
-        st.markdown('<div id="stream-marker" data-stream-active="1"></div>', unsafe_allow_html=True)
+        st.markdown('<div id="stream-marker" data-stream-active="1" data-scroll-event="0"></div>', unsafe_allow_html=True)
         frozen = 0
-        live = st.empty()
+        live = st.container()
         response = ""
         current_turn = 0
         cursor = " ▌"
+        scroll_event = 0
         for payload in agent_backend_stream(task_prompt):
             response = payload["response"]
             current_turn = payload.get("turn", current_turn)
             segs = fold_turns(response)
             n_done = max(0, len(segs) - 1)
             while frozen < n_done:
-                with live.container():
+                with live:
                     render_segments([segs[frozen]])
-                live = st.empty()
                 frozen += 1
-            with live.container():
+                scroll_event += 1
+            with live:
                 if should_show_live_turn(response, current_turn):
                     st.caption(f"LLM Running (Turn {current_turn}) ...")
                 render_segments([segs[-1]], suffix=cursor)
+                scroll_event += 1
+                st.markdown(f'<div id="stream-marker" data-stream-active="1" data-scroll-event="{scroll_event}"></div>', unsafe_allow_html=True)
+        # Mark streaming done BEFORE final render — no more scroll triggers
+        st.markdown(f'<div id="stream-marker" data-stream-active="0" data-scroll-event="{scroll_event}"></div>', unsafe_allow_html=True)
         segs = fold_turns(response)
         for i in range(frozen, len(segs)):
-            with live.container():
+            with live:
                 if i == len(segs) - 1 and should_show_live_turn(response, current_turn):
                     st.caption(f"LLM Running (Turn {current_turn}) ...")
                 render_segments([segs[i]])
-            if i < len(segs) - 1:
-                live = st.empty()
-        st.markdown('<div id="stream-marker" data-stream-active="0"></div>', unsafe_allow_html=True)
     st.session_state.msg_counter += 1
     st.session_state.messages.append({"role": "assistant", "content": response, "id": st.session_state.msg_counter})
     st.session_state.last_reply_time = int(time.time())
