@@ -707,14 +707,21 @@ def agent_backend_stream(prompt):
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+    st.session_state.msg_counter = 0
+# assign stable ids to legacy messages (from prior sessions)
+for m in st.session_state.messages:
+    if "id" not in m:
+        st.session_state.msg_counter += 1
+        m["id"] = st.session_state.msg_counter
 for msg_idx, msg in enumerate(st.session_state.messages):
+    msg_id = msg.get("id", msg_idx)
     with st.chat_message(msg["role"]):
         slot = st.empty()
         with slot.container():
             if msg["role"] == "assistant":
                 render_segments(
                     fold_turns(msg["content"]),
-                    key_prefix=f"hist_{msg_idx}",
+                    key_prefix=f"hist_{msg_id}",
                     fold_expanded=not st.session_state.compact_assistant_history,
                 )
             else:
@@ -731,12 +738,27 @@ except (ImportError, AttributeError):
 
 _js_scroll_fix = (
     "!function(){var p=window.parent;if(p.__sfx)return;p.__sfx=1;"
-    "var d=p.document;setInterval(function(){"
+    "var d=p.document;"
+    "var isNearBottom=function(){"
+    "var m=d.querySelector('section.main');if(!m)return 1;"
+    "return m.scrollTop+m.clientHeight>=m.scrollHeight-200;"
+    "};"
+    "var doScroll=function(){"
     "var m=d.querySelector('section.main');if(!m)return;"
     "var b=m.querySelector('.block-container');if(!b)return;"
-    "if(m.scrollHeight>b.scrollHeight+150){"
-    "m.style.overflow='hidden';void m.offsetHeight;m.style.overflow=''}"
-    "},3000)}()"
+    "b.scrollIntoView({block:'end',behavior:'instant'});"
+    "};"
+    "var streamActive=function(){"
+    "var e=d.querySelector('[data-stream-active]');"
+    "return e&&e.getAttribute('data-stream-active')==='1';"
+    "};"
+    "var obs=new MutationObserver(function(){"
+    "if(streamActive()&&isNearBottom())doScroll();"
+    "});"
+    "var target=d.querySelector('section.main .block-container')||d.body;"
+    "obs.observe(target,{childList:1,subtree:1,characterData:1});"
+    "d.addEventListener('scroll',function(){},0);"
+    "}()"
 )
 _js_ime_fix = (
     ""
@@ -756,13 +778,15 @@ _embed_html(f"<script>{_js_scroll_fix};{_js_ime_fix}</script>", height=0)
 if prompt := st.chat_input("any task?"):
     task_prompt = build_prompt_with_attachments(prompt)
     visible_prompt = format_user_message(prompt)
-    st.session_state.messages.append({"role": "user", "content": visible_prompt})
+    st.session_state.msg_counter += 1
+    st.session_state.messages.append({"role": "user", "content": visible_prompt, "id": st.session_state.msg_counter})
     if hasattr(agent, "_pet_req") and not prompt.startswith("/"):
         agent._pet_req("state=walk")
     with st.chat_message("user"):
         st.markdown(visible_prompt)
 
     with st.chat_message("assistant"):
+        st.markdown('<div id="stream-marker" data-stream-active="1"></div>', unsafe_allow_html=True)
         frozen = 0
         live = st.empty()
         response = ""
@@ -790,7 +814,9 @@ if prompt := st.chat_input("any task?"):
                 render_segments([segs[i]])
             if i < len(segs) - 1:
                 live = st.empty()
-    st.session_state.messages.append({"role": "assistant", "content": response})
+        st.markdown('<div id="stream-marker" data-stream-active="0"></div>', unsafe_allow_html=True)
+    st.session_state.msg_counter += 1
+    st.session_state.messages.append({"role": "assistant", "content": response, "id": st.session_state.msg_counter})
     st.session_state.last_reply_time = int(time.time())
 
 if st.session_state.autonomous_enabled:
