@@ -69,7 +69,7 @@ def format_profile_summary(summary: dict[str, Any], top_n: int = 10) -> str:
     return "\n".join(lines)
 
 
-@dataclass(slots=True)
+@dataclass
 class SpanRecord:
     id: str
     parent_id: str | None
@@ -94,7 +94,7 @@ class SpanRecord:
         return data
 
 
-@dataclass(slots=True)
+@dataclass
 class EventRecord:
     id: str
     parent_id: str | None

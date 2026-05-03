@@ -62,22 +62,35 @@ def _safe_audit_llm_call(*, session, call_site, messages, response, duration_ms,
         print(f"[LLM AUDIT] {call_site} failed: {exc}")
 
 def _load_mykeys_from_env():
-    """Build a mykeys-compatible config dict from GA_* environment variables."""
-    api_key = os.environ.get("GA_API_KEY", "").strip()
-    if not api_key:
-        return {}
-    return {
-        "native_oai_config": {
-            "name": os.environ.get("GA_BACKEND_NAME", "env-configured"),
-            "apikey": api_key,
-            "apibase": os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-            "model": os.environ.get("GA_MODEL", "deepseek-chat"),
-            "stream": os.environ.get("GA_STREAM", "true").lower() != "false",
-            "max_retries": int(os.environ.get("GA_MAX_RETRIES", "3")),
-            "connect_timeout": int(os.environ.get("GA_CONNECT_TIMEOUT", "10")),
-            "read_timeout": int(os.environ.get("GA_READ_TIMEOUT", "120")),
+    """Build a mykeys-compatible config dict from GA_* / GA_KEY1_* / GA_KEY2_* env vars."""
+    result = {}
+    # ── Key1 (primary model) ──
+    key1_api = os.environ.get("GA_KEY1_API_KEY", "").strip() or os.environ.get("GA_API_KEY", "").strip()
+    if key1_api:
+        result["key1_config"] = {
+            "name": os.environ.get("GA_KEY1_NAME", os.environ.get("GA_BACKEND_NAME", "key1")),
+            "apikey": key1_api,
+            "apibase": os.environ.get("GA_KEY1_API_BASE", os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com")).rstrip("/"),
+            "model": os.environ.get("GA_KEY1_MODEL", os.environ.get("GA_MODEL", "deepseek-chat")),
+            "stream": os.environ.get("GA_KEY1_STREAM", os.environ.get("GA_STREAM", "true")).lower() != "false",
+            "max_retries": int(os.environ.get("GA_KEY1_MAX_RETRIES", os.environ.get("GA_MAX_RETRIES", "3"))),
+            "connect_timeout": int(os.environ.get("GA_KEY1_CONNECT_TIMEOUT", os.environ.get("GA_CONNECT_TIMEOUT", "10"))),
+            "read_timeout": int(os.environ.get("GA_KEY1_READ_TIMEOUT", os.environ.get("GA_READ_TIMEOUT", "120"))),
         }
-    }
+    # ── Key2 (secondary model) ──
+    key2_api = os.environ.get("GA_KEY2_API_KEY", "").strip()
+    if key2_api:
+        result["key2_config"] = {
+            "name": os.environ.get("GA_KEY2_NAME", "key2"),
+            "apikey": key2_api,
+            "apibase": os.environ.get("GA_KEY2_API_BASE", "https://api.deepseek.com").rstrip("/"),
+            "model": os.environ.get("GA_KEY2_MODEL", "deepseek-chat"),
+            "stream": os.environ.get("GA_KEY2_STREAM", "true").lower() != "false",
+            "max_retries": int(os.environ.get("GA_KEY2_MAX_RETRIES", "3")),
+            "connect_timeout": int(os.environ.get("GA_KEY2_CONNECT_TIMEOUT", "10")),
+            "read_timeout": int(os.environ.get("GA_KEY2_READ_TIMEOUT", "120")),
+        }
+    return result
 
 def _load_mykeys():
     # 1. Try importing mykey.py (legacy, gitignored)

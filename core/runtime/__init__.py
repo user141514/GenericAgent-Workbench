@@ -32,6 +32,7 @@ from .read_shortcut import (
     detect_read_shortcut,
     read_shortcut_enabled,
 )
+from .shared_store import Artifact, SharedArtifactStore
 
 __all__ = [
     "DIRECT_ANSWER_ENV_VAR",
@@ -59,4 +60,6 @@ __all__ = [
     "read_shortcut_enabled",
     "should_stop_classic_executor",
     "try_direct_answer_from_tool_result",
+    "Artifact",
+    "SharedArtifactStore",
 ]

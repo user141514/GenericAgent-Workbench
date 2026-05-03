@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 
-@dataclass(slots=True)
+@dataclass
 class MemoryItem:
     id: str
     kind: str
@@ -22,7 +22,7 @@ class MemoryItem:
     updated_at: str = ""
 
 
-@dataclass(slots=True)
+@dataclass
 class EvidenceChunk:
     id: str
     source_path: str
@@ -39,7 +39,7 @@ class EvidenceChunk:
     created_at: str = ""
 
 
-@dataclass(slots=True)
+@dataclass
 class MemoryCandidate:
     id: str
     source: str
@@ -56,7 +56,7 @@ class MemoryCandidate:
     updated_at: str = ""
 
 
-@dataclass(slots=True)
+@dataclass
 class MemoryEvent:
     id: str
     event_type: str

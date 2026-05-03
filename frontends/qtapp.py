@@ -1149,7 +1149,7 @@ class ChatPanel(QWidget):
         lbl.setStyleSheet("color: #f4f4f5; font-weight: 600; font-size: 14px;")
         ly.addWidget(lbl)
 
-        self._model_info = QLabel(f"当前模型：{self._model_name()} (#{self.agent.llm_no})")
+        self._model_info = QLabel(f"当前：Key{self.agent.llm_no + 1} — {self._model_name()}")
         self._model_info.setStyleSheet(f"color: {C['muted']}; font-size: 12px;")
         ly.addWidget(self._model_info)
         ly.addSpacing(4)
@@ -1220,62 +1220,80 @@ class ChatPanel(QWidget):
                 w.deleteLater()
         self._model_row_widgets.clear()
 
+        # 3-column horizontal card layout, matching Streamlit sidebar Key1/Key2/Key3
+        row = QWidget()
+        row.setStyleSheet("background: transparent;")
+        row_layout = QHBoxLayout(row)
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(6)
+
         for idx, tc in enumerate(self.agent.llmclients):
             b = tc.backend
-            name = f"{type(b).__name__}/{b.model}"
+            model_name = getattr(b, "model", getattr(b, "name", "unknown"))
+            key_label = f"Key{idx + 1}"
             is_current = idx == self.agent.llm_no
 
-            row = QWidget()
-            row.setStyleSheet("background: transparent;")
-            rlay = QHBoxLayout(row)
-            rlay.setContentsMargins(0, 0, 0, 0)
-            rlay.setSpacing(6)
+            card = QPushButton()
+            card.setCursor(QCursor(Qt.PointingHandCursor))
+            card.setMinimumHeight(50)
+            card.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-            dot = QLabel("●")
-            dot.setFixedWidth(14)
-            dot.setAlignment(Qt.AlignCenter)
-            dot.setStyleSheet("color: #71717a; font-size: 11px;")
-            rlay.addWidget(dot)
+            base_props = (
+                "background: #166534; border: 2px solid #22c55e; border-radius: 8px; "
+                "color: #ffffff; font-weight: bold; font-size: 11px; padding: 6px 8px;"
+                if is_current else
+                "background: #27272a; border: 2px solid #3f3f46; border-radius: 8px; "
+                "color: #ffffff; font-size: 11px; padding: 6px 8px;"
+            )
+            card.setStyleSheet(
+                f"QPushButton {{ {base_props} }}"
+                f"QPushButton:hover {{ background: #3f3f46; border-color: #52525b; }}"
+            )
 
-            btn = QPushButton(f"  #{idx}  {name}")
-            btn.setCursor(QCursor(Qt.PointingHandCursor))
-            btn.setStyleSheet(self._MODEL_ROW_ACTIVE if is_current else self._MODEL_ROW_STYLE)
-            btn.clicked.connect(lambda checked, i=idx: self._do_switch_to(i))
-            rlay.addWidget(btn, 1)
+            active_mark = " ✅" if is_current else ""
+            card.setText(f"{key_label}{active_mark}\n{model_name}")
+            card.clicked.connect(lambda checked, i=idx: self._do_switch_to(i))
 
-            self._model_rows_layout.addWidget(row)
-            self._model_row_widgets.append({"dot": dot, "btn": btn, "idx": idx})
+            row_layout.addWidget(card, 1)
+            self._model_row_widgets.append({"btn": card, "idx": idx})
+
+        self._model_rows_layout.addWidget(row)
 
     def _refresh_model_rows_style(self):
         for entry in self._model_row_widgets:
             is_current = entry["idx"] == self.agent.llm_no
-            entry["btn"].setStyleSheet(
-                self._MODEL_ROW_ACTIVE if is_current else self._MODEL_ROW_STYLE
+            btn = entry["btn"]
+            b = self.agent.llmclients[entry["idx"]].backend
+            model_name = getattr(b, "model", getattr(b, "name", "unknown"))
+            key_label = f"Key{entry['idx'] + 1}"
+            active_mark = " ✅" if is_current else ""
+            btn.setText(f"{key_label}{active_mark}\n{model_name}")
+            base_props = (
+                "background: #166534; border: 2px solid #22c55e; border-radius: 8px; "
+                "color: #ffffff; font-weight: bold; font-size: 11px; padding: 6px 8px;"
+                if is_current else
+                "background: #27272a; border: 2px solid #3f3f46; border-radius: 8px; "
+                "color: #ffffff; font-size: 11px; padding: 6px 8px;"
             )
-            status = self._health_results.get(entry["idx"])
-            if status is True:
-                entry["dot"].setStyleSheet("color: #22c55e; font-size: 11px;")
-            elif status is False:
-                entry["dot"].setStyleSheet("color: #ef4444; font-size: 11px;")
-            else:
-                entry["dot"].setStyleSheet("color: #71717a; font-size: 11px;")
+            btn.setStyleSheet(
+                f"QPushButton {{ {base_props} }}"
+                f"QPushButton:hover {{ background: #3f3f46; border-color: #52525b; }}"
+            )
 
     def _do_switch_to(self, idx: int):
         if idx == self.agent.llm_no:
             return
         self.agent.next_llm(n=idx)
         name = self._model_name()
+        key_label = f"Key{self.agent.llm_no + 1}"
         self._model_badge.setText(name)
-        self._model_info.setText(f"当前模型：{name} (#{self.agent.llm_no})")
-        self._add_system_notice(f"已切换至 {name}，对话上下文已保留")
+        self._model_info.setText(f"当前：{key_label} — {name}")
+        self._add_system_notice(f"已切换至 {key_label} ({name})，对话上下文已保留")
         self._refresh_model_rows_style()
 
     def _start_health_checks(self):
         self._health_results.clear()
         self._health_pending = 0
-        for entry in self._model_row_widgets:
-            entry["dot"].setStyleSheet("color: #71717a; font-size: 11px;")
-            entry["dot"].setText("◌")
         for idx, tc in enumerate(self.agent.llmclients):
             self._health_pending += 1
             t = threading.Thread(target=self._check_backend, args=(idx, tc.backend), daemon=True)

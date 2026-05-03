@@ -355,7 +355,7 @@ def _maybe_apply_early_stop(client, handler, response, tool_calls, tool_results,
     return {"result": "EARLY_STOP", "data": response, "meta": event_payload}
 
 
-def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=80, verbose=True, initial_user_content=None):
+def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=80, verbose=True, initial_user_content=None, stop_event=None):
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": initial_user_content if initial_user_content is not None else user_input},
@@ -365,7 +365,14 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
     exit_reason = None
     handler._done_hooks = []
     handler.max_turns = max_turns
+
+    def _stopped():
+        return stop_event and stop_event.is_set()
+
     while turn < handler.max_turns:
+        if _stopped():
+            yield "\n\n[已停止输出]\n"
+            break
         turn += 1
         md = "**" if verbose else ""
         handler.current_turn = turn
@@ -380,15 +387,34 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 kind="llm",
                 metadata={"turn": turn, "model": getattr(getattr(client, "backend", None), "name", "")},
             ):
+                if _stopped():
+                    yield "\n\n[已停止输出]\n"
+                    break
                 response_gen = client.chat(messages=messages, tools=tools_schema)
                 if verbose:
-                    response = yield from response_gen
+                    _resp = None
+                    while True:
+                        if _stopped():
+                            break
+                        try:
+                            chunk = next(response_gen)
+                            yield chunk
+                        except StopIteration as e:
+                            _resp = e.value
+                            break
+                    if _stopped():
+                        yield "\n\n[已停止输出]\n"
+                        break
+                    response = _resp
                     yield "\n\n"
                 else:
                     response = exhaust(response_gen)
                     cleaned = _clean_content(response.content)
                     if cleaned:
                         yield cleaned + "\n"
+
+            if _stopped():
+                break
 
             if not response.tool_calls:
                 tool_calls = [{"tool_name": "no_tool", "args": {}}]
@@ -401,6 +427,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             tool_results = []
             next_prompts = set()
             for ii, tc in enumerate(tool_calls):
+                if _stopped():
+                    break
                 tool_name, args, tid = tc["tool_name"], tc["args"], tc.get("id", "")
                 tool_args_summary = _safe_tool_arg_metadata(tool_name, args)
                 tool_target_path = (
@@ -432,6 +460,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
 
                         def proxy():
                             yield first_value
+                            if _stopped():
+                                return None
                             return (yield from gen)
 
                         if verbose:
@@ -474,6 +504,8 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         else str(outcome.data)
                     )
                     tool_results.append({"tool_use_id": tid, "content": datastr})
+                    if len(tool_results) > 20:
+                        tool_results[:] = tool_results[-10:]
                 next_prompts.add(outcome.next_prompt)
 
             if not exit_reason and next_prompts:
@@ -506,7 +538,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 next_prompts.add(handler._done_hooks.pop(0))
 
             with _profile_span(profiler, f"frontend_turn_gap_{turn}", kind="frontend", metadata={"turn": turn}):
-                time.sleep(2.5)
+                time.sleep(0)
             with _profile_span(profiler, f"turn_end_{turn}", kind="agent", metadata={"turn": turn}):
                 next_prompt = handler.turn_end_callback(
                     response,

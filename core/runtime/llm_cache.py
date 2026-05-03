@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import queue
 import re
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -273,7 +275,7 @@ def is_cache_safe(metadata: dict | None = None) -> bool:
     return cache_type in SAFE_CACHE_TYPES
 
 
-@dataclass(slots=True)
+@dataclass
 class LLMCallRecord:
     id: str
     model: str
@@ -307,6 +309,30 @@ class LLMCallCache:
         self.records_path = self.cache_dir / "records.jsonl"
         self.entries_dir.mkdir(parents=True, exist_ok=True)
         self.records_path.parent.mkdir(parents=True, exist_ok=True)
+        # Background queue for non-blocking audit writes.
+        self._audit_queue: queue.Queue[dict[str, Any] | None] = queue.Queue()
+        self._audit_thread = threading.Thread(target=self._audit_worker, daemon=True)
+        self._audit_thread.start()
+
+    def _audit_worker(self) -> None:
+        """Daemon thread: consume audit tasks, compute stats, write to disk."""
+        while True:
+            task = self._audit_queue.get()
+            if task is None:
+                break
+            try:
+                record_dict = self._build_audit_record(
+                    model=task["model"],
+                    messages=task["messages"],
+                    response=task["response"],
+                    duration_ms=task["duration_ms"],
+                    tools=task["tools"],
+                    metadata=task["metadata"],
+                )
+                with self.records_path.open("a", encoding="utf-8") as f:
+                    f.write(json.dumps(record_dict, ensure_ascii=False) + "\n")
+            except Exception:
+                pass
 
     def make_key(
         self,
@@ -347,7 +373,7 @@ class LLMCallCache:
         tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         tmp_path.replace(path)
 
-    def audit(
+    def _build_audit_record(
         self,
         model: str,
         messages: list[dict] | str,
@@ -355,7 +381,8 @@ class LLMCallCache:
         duration_ms: float,
         tools: list[dict] | None = None,
         metadata: dict | None = None,
-    ) -> LLMCallRecord:
+    ) -> dict[str, Any]:
+        """Compute stats and build a record dict (heavy work, runs in bg thread or sync)."""
         stats = _audit_stats(messages=messages, response=response, tools=tools, metadata=metadata)
         prompt_hash = self.make_key(
             model=model,
@@ -386,9 +413,25 @@ class LLMCallCache:
             estimated_prompt_tokens=float(stats["estimated_prompt_tokens"]),
             estimated_response_tokens=float(stats["estimated_response_tokens"]),
         )
-        with self.records_path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record.to_dict(), ensure_ascii=False) + "\n")
-        return record
+        return record.to_dict()
+
+    def audit(
+        self,
+        model: str,
+        messages: list[dict] | str,
+        response: str | dict | None,
+        duration_ms: float,
+        tools: list[dict] | None = None,
+        metadata: dict | None = None,
+    ) -> None:
+        """Enqueue audit work to a background thread; returns immediately."""
+        try:
+            self._audit_queue.put_nowait({
+                "model": model, "messages": messages, "response": response,
+                "duration_ms": duration_ms, "tools": tools, "metadata": metadata,
+            })
+        except Exception:
+            pass  # never block the caller on audit failures
 
 
 __all__ = ["LLMCallCache", "LLMCallRecord", "is_cache_safe"]

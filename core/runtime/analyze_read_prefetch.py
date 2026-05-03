@@ -11,7 +11,7 @@ from statistics import mean
 from typing import Any
 
 
-@dataclass(slots=True)
+@dataclass
 class RunAnalysis:
     run_id: str
     read_prefetch_should_prefetch: bool

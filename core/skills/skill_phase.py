@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Literal, get_args
+from typing_extensions import Literal, get_args
 
 
 SkillPhase = Literal["planner", "executor", "reviewer", "verifier", "postmortem"]

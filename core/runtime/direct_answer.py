@@ -119,7 +119,7 @@ def direct_answer_enabled() -> bool:
     return str(os.environ.get(DIRECT_ANSWER_ENV_VAR, "")).strip() == "1"
 
 
-@dataclass(slots=True)
+@dataclass
 class DirectAnswerDecision:
     should_answer: bool
     answer: str | None

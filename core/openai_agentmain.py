@@ -161,11 +161,14 @@ def _classic_executor_plan(reason: str = "") -> str:
 
 
 def _should_fallback_to_classic(route_target: str, final_text: str = "", exc: BaseException | None = None) -> bool:
+    # Targets that use the classic executor as their backend — all are eligible
+    # for fallback if the orchestrated run fails.
+    _executor_targets = {"executor", "code", "review", "research"}
     if exc is not None:
         msg = f"{type(exc).__name__}: {exc}".lower()
         if "run_genericagent_executor" in msg or "not found in agent chat_specialist" in msg:
             return True
-        if route_target != "executor":
+        if route_target not in _executor_targets:
             return False
         return any(
             token in msg
@@ -177,7 +180,7 @@ def _should_fallback_to_classic(route_target: str, final_text: str = "", exc: Ba
                 "run_loop",
             )
         )
-    if route_target != "executor":
+    if route_target not in _executor_targets:
         return False
     normalized = " ".join((final_text or "").split()).strip().lower()
     if not normalized:
@@ -217,9 +220,13 @@ def format_error(exc: BaseException) -> str:
 
 
 def _ensure_openai_agents_on_path() -> None:
+    # Only check once; the path doesn't change during a process lifetime.
+    if getattr(_ensure_openai_agents_on_path, "_done", False):
+        return
     repo_src = os.path.join(os.path.dirname(SCRIPT_DIR), "openai-agents-python", "src")
     if os.path.isdir(repo_src) and repo_src not in sys.path:
         sys.path.insert(0, repo_src)
+    _ensure_openai_agents_on_path._done = True
 
 
 def _load_json_file(path: str) -> dict[str, Any]:
@@ -282,19 +289,71 @@ def _normalize_openai_base_url(base_url: str | None) -> str | None:
 
 
 def _infer_backend_kind(name: str, base_url: str | None, model: str | None) -> str | None:
+    """Infer the backend protocol from configuration metadata.
+
+    Priority (highest to lowest):
+      1. Explicit `native_oai` / `native_claude` in the config key name
+      2. Base URL structure (anthropic endpoint vs openai endpoint)
+      3. Model name keywords with base URL context
+      4. Protocol override via GA_PROTOCOL env var
+    """
     lname = name.lower()
     lbase = (base_url or "").lower()
     lmodel = (model or "").lower()
+
+    # ── Explicit backend type in config key name (highest priority) ──
+    if "native_claude" in lname:
+        return "native_claude"
+    if "native_oai" in lname:
+        return "native_oai"
+
+    # ── Backward-compatible name heuristics ──
+    # "native" + "claude" anywhere → native_claude
+    if "native" in lname and "claude" in lname:
+        return "native_claude"
+    if "native" in lname and ("oai" in lname or "openai" in lname or "gpt" in lname):
+        return "native_oai"
+    # Legacy: just "claude" in name → native_claude
     if any(token in lname for token in ("claude", "anthropic")):
         return "native_claude"
-    if any(token in lbase for token in ("anthropic", "/messages")):
-        return "native_claude"
-    if any(token in lmodel for token in ("claude", "anthropic")):
-        return "native_claude"
+    # Legacy: just "openai" / "oai" / "gpt" in name → native_oai
     if any(token in lname for token in ("oai", "openai", "gpt")):
         return "native_oai"
-    if any(token in lbase for token in ("openai", "/v1", "chat/completions", "responses")):
+
+    # ── Base URL indicates protocol ──
+    if any(token in lbase for token in ("anthropic", "/messages")):
+        return "native_claude"
+    if any(token in lbase for token in ("/v1", "chat/completions", "responses", "openai")):
+        # OpenAI-compatible endpoint → check model to decide
+        if any(token in lmodel for token in ("claude-", "claude3", "claude4", "anthropic")):
+            # Claude model on OpenAI-compatible proxy → native_oai (uses OAI protocol)
+            return "native_oai"
         return "native_oai"
+
+    # ── Model name with no base URL context ──
+    if any(token in lmodel for token in ("claude-", "claude3", "claude4", "anthropic")):
+        # Unknown base URL but Claude model — could be either protocol
+        # Default to native_oai (more widely supported by proxies)
+        if lbase and not any(t in lbase for t in ("anthropic", "messages", "openai", "v1")):
+            return "native_oai"
+        return "native_claude"
+
+    if any(token in lmodel for token in ("deepseek",)):
+        return "native_oai"
+    if any(token in lmodel for token in ("gpt-", "o1", "o3", "o4")):
+        return "native_oai"
+
+    # ── Protocol override via environment ──
+    protocol_override = os.environ.get("GA_PROTOCOL", "").strip().lower()
+    if protocol_override == "claude":
+        return "native_claude"
+    if protocol_override == "openai":
+        return "native_oai"
+
+    # ── Fallback ──
+    if lbase and any(t in lbase for t in ("claude", "api.anthropic")):
+        return "native_claude"
+
     return None
 
 
@@ -723,10 +782,22 @@ class GenericAgentSDKModel(Model):
         for handoff in handoffs:
             converted_tools.append(Converter.convert_handoff_tool(handoff))
 
+        # Auto-detect model capabilities for protocol negotiation
+        from .llm_capabilities import detect_model_profile
+        model_profile = detect_model_profile(cfg["model"], cfg["apibase"])
+
         if self.variant["backend_kind"] == "native_claude":
             session_cls = NativeClaudeSession
         else:
             session_cls = NativeOAISession if converted_tools else LLMSession
+
+        # Override session class based on detected protocol
+        if model_profile.protocol == "claude":
+            session_cls = NativeClaudeSession
+            # Auto-configure Claude-specific features
+            if model_profile.supports_thinking and not cfg.get("thinking_type"):
+                cfg["thinking_type"] = "enabled"
+                cfg["thinking_budget_tokens"] = 16000  # Extended thinking for complex tasks
 
         session = session_cls(cfg)
         session.system = system_instructions or ""
@@ -1087,7 +1158,6 @@ class GenericAgentSDKModel(Model):
             sequence_number=next_sequence(),
         )
 
-        streamed_text = ""
         message_started = False
         content_blocks: list[dict[str, Any]] = []
 
@@ -1125,7 +1195,6 @@ class GenericAgentSDKModel(Model):
                             type="response.content_part.added",
                             sequence_number=next_sequence(),
                         )
-                    streamed_text += delta_text
                     yield ResponseTextDeltaEvent(
                         content_index=0,
                         delta=delta_text,
@@ -1190,7 +1259,6 @@ class GenericAgentSDKModel(Model):
                     sequence_number=next_sequence(),
                 )
                 message_started = True
-                streamed_text = message_text
 
             if message_started and message_item.content:
                 final_text_part = cast(ResponseOutputText, message_item.content[0])
@@ -1274,6 +1342,9 @@ class OpenAIOrchestratedAgent:
         self._profile_status = "success"
         self._active_sdk_model: GenericAgentSDKModel | None = None
         self._executor_result_state: dict[str, Any] | None = None
+        self._cached_agent_graph: dict[str, Any] | None = None
+        self._cached_agent_graph_model_id: int | None = None
+        self._run_store: Any | None = None
 
         self.variants = _resolve_model_variants()
         self.supports_llm_switch = len(self.variants) > 1
@@ -1392,6 +1463,7 @@ class OpenAIOrchestratedAgent:
         execution_plan: str,
         on_progress=None,
         original_user_request: str | None = None,
+        store: Any | None = None,
     ) -> str:
         self._store_executor_result_state(None)
         try:
@@ -1399,11 +1471,25 @@ class OpenAIOrchestratedAgent:
             if classic is None:
                 return "[Executor Error] Classic GenericAgent executor is unavailable. Check _init_classic_executor logs."
             original_request = str(original_user_request or user_request or "").strip()
+            # Build workspace context if store is available.
+            workspace_block = ""
+            if store is not None:
+                try:
+                    summary = store.workspace_summary()
+                except Exception:
+                    summary = "(workspace unavailable)"
+                workspace_block = (
+                    f"\n=== SHARED WORKSPACE ===\n"
+                    f"{summary}\n"
+                    f"To reference an existing artifact, use its key name.\n"
+                    f"To create or update an artifact, write the file and mention [artifact: <key>] in your output.\n"
+                )
             prompt = (
                 "You are the execution engine inside a multi-agent workflow.\n"
                 "Execute the task with your normal GenericAgent tools and internal loop.\n"
                 "Focus on doing the work, not re-routing or re-explaining the workflow.\n"
-                "When you finish, provide a concise execution report with actions taken, evidence gathered, and remaining gaps.\n\n"
+                "When you finish, provide a concise execution report with actions taken, evidence gathered, and remaining gaps.\n"
+                f"{workspace_block}\n"
                 f"Original user request:\n{original_request}\n\n"
                 f"Execution plan or corrective follow-up:\n{execution_plan}"
             )
@@ -1457,14 +1543,21 @@ class OpenAIOrchestratedAgent:
             print(f"[Executor Error] {type(e).__name__}: {e}\n{tb}")
             return f"[Executor Error] {type(e).__name__}: {e}"
 
+    def switch_to_key(self, n: int) -> str:
+        """Switch directly to a specific variant index. Returns the new model name."""
+        if not self.variants or n < 0 or n >= len(self.variants):
+            return self.get_llm_name()
+        self._apply_variant(n)
+        classic = self._classic_executor
+        if classic is not None and getattr(classic, "llmclients", None):
+            classic.switch_to_key(n % len(classic.llmclients))
+        return self.get_llm_name()
+
     def next_llm(self, n: int = -1) -> None:
         if not self.variants:
             return
         next_idx = ((self.llm_no + 1) if n < 0 else n) % len(self.variants)
-        self._apply_variant(next_idx)
-        classic = self._classic_executor
-        if classic is not None and getattr(classic, "llmclients", None):
-            classic.next_llm(next_idx % len(classic.llmclients))
+        self.switch_to_key(next_idx)
 
     def list_llms(self) -> list[tuple[int, str, bool]]:
         return [
@@ -1478,6 +1571,15 @@ class OpenAIOrchestratedAgent:
 
     def get_llm_name(self, _backend: Any | None = None) -> str:
         return f"{self._variant_label}/{self.model_name} [{self._variant_backend_kind}]"
+
+    def get_key_labels(self) -> list[str]:
+        """Return display labels for all configured variants (for UI model switcher)."""
+        labels = []
+        for idx, item in enumerate(self.variants):
+            prefix = f"Key{idx + 1}"
+            active = " *" if idx == self.llm_no else ""
+            labels.append(f"{prefix}: {item['model']} [{item['backend_kind']}]{active}")
+        return labels
 
     def restore_history(self, restored: list[str], is_input_items: bool = False) -> None:
         self.abort()
@@ -1574,7 +1676,20 @@ class OpenAIOrchestratedAgent:
         display_queue.put({"done": f"未知命令: {cmd}", "source": "system"})
         return None
 
-    def _build_agent_graph(self, original_user_request: str, executor_progress=None) -> dict[str, Any]:
+    def _build_agent_graph(
+        self, original_user_request: str, executor_progress=None,
+        graph_mode: str = "full",
+    ) -> dict[str, Any]:
+        if graph_mode == "dynamic":
+            return self._build_dynamic_graph(original_user_request, executor_progress)
+        # Return cached graph if model hasn't changed since last build.
+        if (
+            self._cached_agent_graph is not None
+            and self._cached_agent_graph_model_id == self.llm_no
+        ):
+            self._active_sdk_model = self._cached_agent_graph["root"].model
+            return self._cached_agent_graph
+
         _ensure_openai_agents_on_path()
         from agents import Agent, function_tool
 
@@ -1596,7 +1711,7 @@ class OpenAIOrchestratedAgent:
             **common,
         )
 
-        # 简化架构: 合并规划、执行、验证为一个agent
+        # Shared executor tool - all specialized agents use this.
         @function_tool(name_override="run_genericagent_executor")
         async def run_genericagent_executor(user_request: str, execution_plan: str) -> str:
             """Delegate execution to the classic GenericAgent runtime.
@@ -1611,49 +1726,406 @@ class OpenAIOrchestratedAgent:
                 execution_plan,
                 executor_progress,
                 original_user_request,
+                getattr(self, "_run_store", None),
             )
 
-        planner_executor_agent = Agent(
-            name="planner_executor",
-            handoff_description="Plan, execute and verify complex tasks involving files, code, browser or multi-step work.",
+        # ── Code Agent: writing, modifying, debugging code ──
+        code_agent = Agent(
+            name="code_agent",
+            handoff_description="Write, modify, debug, or refactor code.",
             instructions=(
                 f"{CAPABILITY_BRIEF} "
-                "You handle complex tasks end-to-end. For any non-trivial task:\n"
+                "You are a code specialist. Your focus is producing correct, clean, well-structured code.\n"
+                "For every code task:\n"
+                "1. BRIEFLY state the approach (1-2 sentences) — do not write long plans.\n"
+                "2. Call run_genericagent_executor with a clear, actionable execution plan.\n"
+                "3. AFTER execution, verify:\n"
+                "   - Does the code compile / run without errors?\n"
+                "   - Are edge cases handled?\n"
+                "   - Is the code readable and follows conventions?\n"
+                "4. AFTER producing code, hand off to review_agent for review "
+                "(unless the user explicitly asked to skip review).\n"
+                "5. After producing code, write it to the shared workspace by instructing the executor "
+                "to include [artifact: <name>] markers in its output.\n"
+                "6. If the review comes back with issues, fix them and update the artifact.\n"
+                "7. When you encounter an unfamiliar API or library, hand off to research_agent "
+                "to look up documentation first.\n\n"
+                "Quality standards:\n"
+                "- Prefer tested, working code over speculative implementations.\n"
+                "- Handle errors explicitly, not silently.\n"
+                "- Name variables and functions clearly.\n"
+                "- Keep functions small and single-purpose.\n\n"
+                "IMPORTANT: You have ONE tool (run_genericagent_executor) and "
+                "TWO handoffs (review_agent for code review, research_agent for documentation lookup). "
+                "Use the shared workspace to store code artifacts so review_agent can access them.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            tools=[run_genericagent_executor],
+            handoffs=[],  # filled after other agents are defined
+            **common,
+        )
+
+        # ── Review Agent: code review, testing, security audit ──
+        review_agent = Agent(
+            name="review_agent",
+            handoff_description="Review code, run tests, verify correctness, find bugs and security issues.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You are a code reviewer and quality specialist. Your focus is finding problems "
+                "and verifying correctness.\n"
+                "For every review task:\n"
+                "1. Identify what needs to be checked (correctness, security, performance, tests).\n"
+                "2. Call run_genericagent_executor with specific review instructions:\n"
+                "   - Run existing tests first.\n"
+                "   - Check for edge cases, error handling, input validation.\n"
+                "   - Look for security issues (injection, leaks, race conditions).\n"
+                "   - Check code style and conventions.\n"
+                "3. Summarize findings clearly:\n"
+                "   - Critical issues (must fix)\n"
+                "   - Warnings (should fix)\n"
+                "   - Suggestions (nice to have)\n"
+                "4. If you find issues that need code changes, reference the artifact key from the "
+                "shared workspace and hand off to code_agent with SPECIFIC fix instructions.\n"
+                "5. After the code_agent returns with fixes, re-review the artifact to verify.\n"
+                "6. If the code passes review, write your review report as an artifact "
+                "([artifact: review-report]) and present your final approval.\n"
+                "7. If you need to verify code against external documentation or specifications, "
+                "hand off to research_agent first.\n\n"
+                "Be specific. Point to exact lines or patterns. "
+                "Do NOT just say \"looks good\" — explain WHY it looks good.\n\n"
+                "IMPORTANT: You have ONE tool (run_genericagent_executor) and "
+                "TWO handoffs (code_agent for fixes, research_agent for spec/doc verification). "
+                "Read artifacts from the shared workspace to review code. "
+                "Write review findings as artifacts.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            tools=[run_genericagent_executor],
+            handoffs=[],  # filled after other agents are defined
+            **common,
+        )
+
+        # ── Research Agent: information gathering, documentation, exploration ──
+        research_agent = Agent(
+            name="research_agent",
+            handoff_description="Search information, read files and documentation, explore codebases.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You are a research specialist. Your focus is finding accurate information "
+                "and presenting it clearly with sources.\n"
+                "For every research task:\n"
+                "1. Clarify what information is needed.\n"
+                "2. Call run_genericagent_executor to:\n"
+                "   - Read relevant files, documentation, or search results.\n"
+                "   - Explore the codebase to find relevant code patterns.\n"
+                "   - Search for API documentation and usage examples.\n"
+                "3. Organize findings:\n"
+                "   - Key facts with sources (file paths, URLs, line numbers).\n"
+                "   - Code examples with context.\n"
+                "   - Gotchas and common pitfalls.\n"
+                "4. If the executor's findings are incomplete, call it again with refined search terms.\n"
+                "5. Write your research findings as artifacts in the shared workspace "
+                "([artifact: research-findings]) with sources and code examples.\n"
+                "6. If your findings indicate that code implementation is needed, "
+                "hand off to code_agent with references to the research artifacts.\n"
+                "7. If you found potential issues or security concerns that need verification, "
+                "hand off to review_agent.\n"
+                "8. If the question can be answered with information alone (no code needed), "
+                "present your findings as the final answer.\n\n"
+                "Be thorough but concise. Always cite your sources. "
+                "Distinguish between facts you found and your interpretation.\n\n"
+                "IMPORTANT: You have ONE tool (run_genericagent_executor) and "
+                "TWO handoffs (code_agent for implementation, review_agent for verification). "
+                "Write research artifacts to the shared workspace. "
+                "Use handoffs only when the user's intent requires follow-up action.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            tools=[run_genericagent_executor],
+            handoffs=[],  # filled after other agents are defined
+            **common,
+        )
+
+        # ── General Executor (backward-compatible fallback) ──
+        planner_executor_agent = Agent(
+            name="planner_executor",
+            handoff_description="General-purpose planner and executor for complex multi-step tasks.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You handle complex, multi-step tasks that do not clearly fall into code-writing, "
+                "code-review, or research categories.\n"
                 "1. FIRST create a short, actionable plan (2-5 steps)\n"
                 "2. Call run_genericagent_executor to execute the plan\n"
                 "3. AFTER execution, ALWAYS verify results:\n"
                 "   - Did the execution achieve all goals?\n"
                 "   - Is there already a usable answer or evidence?\n"
-                "   - Do NOT automatically retry just because the executor mentioned connection warnings, retries, or partial progress.\n"
-                "   - Only call run_genericagent_executor a second time if the first run produced no usable findings at all.\n"
+                "   - Only retry if the first run produced no usable findings at all.\n"
                 "4. End with: Plan, Execution Summary, Verification, Final Answer\n\n"
                 "IMPORTANT: You have only ONE tool: run_genericagent_executor. "
-                "All file/code/browser operations happen inside the executor. "
-                "Do NOT try to call any other tools. Focus on planning, delegating, and verifying.\n\n"
+                "All file/code/browser operations happen inside the executor.\n\n"
                 f"{_summary_protocol()}"
             ),
             tools=[run_genericagent_executor],
             **common,
         )
 
+        # ── Wire up cross-handoffs (Level 2: multi-hop pipelines) ──
+        # Set handoffs after all agents exist so they can reference each other.
+        code_agent.handoffs = [review_agent, research_agent]
+        review_agent.handoffs = [code_agent, research_agent]
+        research_agent.handoffs = [code_agent, review_agent]
+        # planner_executor and chat_specialist remain leaf agents (no handoffs).
+
         root_agent = Agent(
             name="task_router",
             instructions=(
                 f"{CAPABILITY_BRIEF} "
                 "You are a router. You MUST NOT call any tools directly. "
-                "Your ONLY job is to transfer to the appropriate agent via handoffs. "
-                "For simple chat/conversation, transfer to chat_specialist. "
-                "For any task involving files, code, browser, tools, or multi-step work, transfer to planner_executor. "
-                "Never try to call run_genericagent_executor or any other tool yourself."
+                "Your ONLY job is to transfer to the appropriate agent via handoffs.\n"
+                "- For simple chat/conversation → transfer to chat_specialist.\n"
+                "- For code writing, modification, debugging, refactoring → transfer to code_agent.\n"
+                "- For code review, testing, security audit, bug finding → transfer to review_agent.\n"
+                "- For information search, documentation lookup, codebase exploration → transfer to research_agent.\n"
+                "- For complex multi-step tasks that mix multiple concerns → transfer to planner_executor.\n"
+                "Never try to call any tool yourself."
             ),
-            handoffs=[chat_agent, planner_executor_agent],
+            handoffs=[chat_agent, code_agent, review_agent, research_agent, planner_executor_agent],
             **common,
         )
-        return {
+        graph = {
             "root": root_agent,
             "chat": chat_agent,
             "executor": planner_executor_agent,
+            "code": code_agent,
+            "review": review_agent,
+            "research": research_agent,
         }
+        self._cached_agent_graph = graph
+        self._cached_agent_graph_model_id = self.llm_no
+        return graph
+
+    def _build_dynamic_graph(
+        self, original_user_request: str, executor_progress=None,
+    ) -> dict[str, Any]:
+        """Level 3: Task→DAG compiler — build only the agents needed for this task.
+
+        Uses RouterRules keyword counts to determine which agents to create,
+        then wires the minimal handoff topology.
+        """
+        from core.router_rules import RouterRules
+
+        _ensure_openai_agents_on_path()
+        from agents import Agent, function_tool
+
+        model = self._build_model()
+        self._active_sdk_model = model
+        common = {"model": model}
+
+        # Analyze the query to determine needed agent types.
+        query = str(original_user_request or "").strip()
+        route_result = RouterRules.match(query)
+
+        # Count per-category keyword hits to determine needed agents.
+        code_hits = sum(1 for kw in RouterRules.CODE_KEYWORDS if kw in query)
+        review_hits = sum(1 for kw in RouterRules.REVIEW_KEYWORDS if kw in query)
+        research_hits = sum(1 for kw in RouterRules.RESEARCH_KEYWORDS if kw in query)
+        chat_hits = sum(1 for kw in RouterRules.CHAT_KEYWORDS if kw in query)
+        exec_hits = sum(1 for kw in RouterRules.EXECUTOR_KEYWORDS if kw in query)
+
+        needs_code = code_hits > 0 or (exec_hits > 0 and code_hits >= review_hits and code_hits >= research_hits)
+        needs_review = review_hits > 0
+        needs_research = research_hits > 0
+        needs_chat = route_result.target == "chat" or (chat_hits > exec_hits and chat_hits > 0)
+
+        # Shared executor tool
+        @function_tool(name_override="run_genericagent_executor")
+        async def run_genericagent_executor(user_request: str, execution_plan: str) -> str:
+            return await asyncio.to_thread(
+                self._run_classic_executor_task,
+                user_request,
+                execution_plan,
+                executor_progress,
+                original_user_request,
+                getattr(self, "_run_store", None),
+            )
+
+        agent_map: dict[str, Any] = {}
+        handoff_list: list[Any] = []
+        leaf_count = 0
+
+        # Always include chat_specialist for conversation fallback
+        chat_agent = Agent(
+            name="chat_specialist",
+            handoff_description="Handle simple conversation or explanation-only requests.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You handle simple conversational requests that do not require tool use. "
+                "Be concise, helpful, and avoid inventing actions you did not take.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            **common,
+        )
+        agent_map["chat"] = chat_agent
+        handoff_list.append(chat_agent)
+
+        # Planner executor as general fallback
+        planner_executor_agent = Agent(
+            name="planner_executor",
+            handoff_description="General-purpose planner and executor.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You handle complex, multi-step tasks.\n"
+                "1. Create a short, actionable plan.\n"
+                "2. Call run_genericagent_executor to execute.\n"
+                "3. Verify results.\n"
+                "4. End with: Plan, Execution Summary, Verification, Final Answer.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            tools=[run_genericagent_executor],
+            **common,
+        )
+        agent_map["executor"] = planner_executor_agent
+        handoff_list.append(planner_executor_agent)
+
+        # ── Create only the specialized agents needed ──
+
+        if needs_code or (not needs_review and not needs_research and exec_hits > 0):
+            code_agent = Agent(
+                name="code_agent",
+                handoff_description="Write, modify, debug, or refactor code.",
+                instructions=(
+                    f"{CAPABILITY_BRIEF} "
+                    "You are a code specialist. Produce correct, clean code. "
+                    "Call run_genericagent_executor to do the work. "
+                    "Write artifacts to the shared workspace with [artifact: <name>].\n\n"
+                    f"{_summary_protocol()}"
+                ),
+                tools=[run_genericagent_executor],
+                handoffs=[],
+                **common,
+            )
+            agent_map["code"] = code_agent
+            handoff_list.append(code_agent)
+            leaf_count += 1
+
+        if needs_review:
+            review_agent = Agent(
+                name="review_agent",
+                handoff_description="Review code, run tests, verify correctness.",
+                instructions=(
+                    f"{CAPABILITY_BRIEF} "
+                    "You are a code reviewer. Find problems, verify correctness. "
+                    "Call run_genericagent_executor for testing. "
+                    "Read and write artifacts from the shared workspace.\n\n"
+                    f"{_summary_protocol()}"
+                ),
+                tools=[run_genericagent_executor],
+                handoffs=[],
+                **common,
+            )
+            agent_map["review"] = review_agent
+            handoff_list.append(review_agent)
+            leaf_count += 1
+
+        if needs_research:
+            research_agent = Agent(
+                name="research_agent",
+                handoff_description="Search information, read documentation.",
+                instructions=(
+                    f"{CAPABILITY_BRIEF} "
+                    "You are a research specialist. Find accurate information. "
+                    "Call run_genericagent_executor to search and read. "
+                    "Write findings as artifacts. Always cite sources.\n\n"
+                    f"{_summary_protocol()}"
+                ),
+                tools=[run_genericagent_executor],
+                handoffs=[],
+                **common,
+            )
+            agent_map["research"] = research_agent
+            handoff_list.append(research_agent)
+            leaf_count += 1
+
+        # ── Wire cross-handoffs only between agents that exist ──
+        # If both code and review exist, connect them bidirectionally.
+        if "code" in agent_map and "review" in agent_map:
+            agent_map["code"].handoffs = [agent_map["review"]]
+            agent_map["review"].handoffs = [agent_map["code"]]
+            if "research" in agent_map:
+                agent_map["code"].handoffs.append(agent_map["research"])
+                agent_map["review"].handoffs.append(agent_map["research"])
+        if "research" in agent_map:
+            if "code" in agent_map and agent_map["code"] not in agent_map["research"].handoffs:
+                agent_map["research"].handoffs.append(agent_map["code"])
+            if "review" in agent_map and agent_map["review"] not in agent_map["research"].handoffs:
+                agent_map["research"].handoffs.append(agent_map["review"])
+
+        # ── Root agent with handoffs to all created agents ──
+        agent_list_str = ", ".join(
+            a.name for a in handoff_list if a.name != "task_router"
+        )
+        root_agent = Agent(
+            name="task_router",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                f"You are a router. Transfer to the appropriate agent. "
+                f"Available agents: {agent_list_str}. "
+                f"Never call tools yourself."
+            ),
+            handoffs=handoff_list,
+            **common,
+        )
+        agent_map["root"] = root_agent
+
+        return agent_map
+
+    async def _run_parallel_tasks(
+        self, subtasks: list[str], source: str,
+        display_queue, profiler, executor_progress,
+    ) -> str:
+        """Level 3: Run independent sub-tasks in parallel via asyncio.gather.
+
+        Each sub-task gets its own agent graph and executor invocation.
+        Results are collected and merged into a single output.
+        """
+        from agents import Runner
+        from agents.stream_events import RawResponsesStreamEvent
+
+        async def _run_single_subtask(subtask_query: str, index: int) -> str:
+            """Run one sub-task: route → build graph → run stream → collect output."""
+            route = RouterRules.match(subtask_query)
+            target = route.target or "executor"
+            agents = self._build_agent_graph(subtask_query, executor_progress=executor_progress, graph_mode="dynamic")
+            selected = agents.get("root")
+            if target == "chat":
+                selected = agents.get("chat", selected)
+            elif target == "code":
+                selected = agents.get("code", selected)
+            elif target == "review":
+                selected = agents.get("review", selected)
+            elif target == "research":
+                selected = agents.get("research", selected)
+            elif target == "executor":
+                selected = agents.get("executor", selected)
+
+            try:
+                result = Runner.run_streamed(selected, input=subtask_query, max_turns=50)
+                output_parts = []
+                async for event in result.stream_events():
+                    if isinstance(event, RawResponsesStreamEvent):
+                        delta = getattr(event.data, "delta", "")
+                        if delta:
+                            output_parts.append(str(delta))
+                return f"[Sub-task {index + 1}] {subtask_query}\n{''.join(output_parts).strip()}\n"
+            except Exception as e:
+                return f"[Sub-task {index + 1} ERROR] {subtask_query}: {type(e).__name__}: {e}\n"
+
+        tasks = [_run_single_subtask(q.strip(), i) for i, q in enumerate(subtasks)]
+        results = await __import__("asyncio").gather(*tasks, return_exceptions=True)
+
+        merged = f"=== Parallel Execution: {len(subtasks)} sub-tasks ===\n\n"
+        for r in results:
+            merged += str(r) + "\n"
+        merged += "=== End Parallel Execution ==="
+        return merged
 
     @staticmethod
     def _tool_name_from_item(item: Any) -> str:
@@ -1786,10 +2258,27 @@ class OpenAIOrchestratedAgent:
                 flush_progress(force=True)
 
             try:
+                # Create a shared artifact store for this run (Level 4 blackboard).
+                from core.runtime.shared_store import SharedArtifactStore
+                self._run_store = SharedArtifactStore()
+
                 # 规则快速匹配层 - 在LLM路由前进行预判
                 planning_span = _start_manual_span(profiler, "routing_and_planning", kind="agent", metadata={"attempt": attempt + 1, "source": source})
                 route_result = RouterRules.match(raw_query)
                 route_target = route_result.target
+
+                # ── Parallel sub-task detection (Level 3) ──
+                parallel_subtasks = RouterRules.try_parallel_split(raw_query) if route_target not in ("chat", None) else None
+                if parallel_subtasks and len(parallel_subtasks) >= 2 and os.environ.get("GA_PARALLEL") == "1":
+                    full_text = await self._run_parallel_tasks(
+                        parallel_subtasks, source, display_queue, profiler, executor_progress
+                    )
+                    # Cleanup and exit after parallel run
+                    self._run_store = None
+                    self._active_stream_result = None
+                    display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 0)})
+                    return
+
                 answer_quality_flag = bool(answer_quality_enabled())
                 answer_quality_query_match = should_inject_answer_quality_context(raw_query, route_target=None)
                 answer_quality_route_override = (
@@ -1800,13 +2289,20 @@ class OpenAIOrchestratedAgent:
                 route_hint = None
                 if route_result.target == "chat":
                     route_hint = "[ROUTER_HINT] This is a simple conversation request. Transfer to chat_specialist immediately."
+                elif route_result.target == "code":
+                    route_hint = "[ROUTER_HINT] This is a code writing/modification task. Transfer to code_agent immediately."
+                elif route_result.target == "review":
+                    route_hint = "[ROUTER_HINT] This is a code review/testing task. Transfer to review_agent immediately."
+                elif route_result.target == "research":
+                    route_hint = "[ROUTER_HINT] This is an information gathering/research task. Transfer to research_agent immediately."
                 elif route_result.target == "executor":
-                    route_hint = "[ROUTER_HINT] This is a task requiring file/code/browser operations. Transfer to planner_executor immediately."
+                    route_hint = "[ROUTER_HINT] This is a complex multi-step task. Transfer to planner_executor immediately."
                 if answer_quality_route_override:
                     route_target = "executor"
                     route_hint = "[ROUTER_HINT] This is a roadmap / architecture / capability-planning request. Transfer to planner_executor immediately."
             
-                agents = self._build_agent_graph(raw_query, executor_progress=executor_progress)
+                graph_mode = "dynamic" if os.environ.get("GA_DYNAMIC_GRAPH") == "1" else "full"
+                agents = self._build_agent_graph(raw_query, executor_progress=executor_progress, graph_mode=graph_mode)
                 inputs = list(self.input_items)
                 memory_span = _start_manual_span(profiler, "working_memory_prepare", kind="memory", metadata={"history_size": len(self.history)})
                 working_memory = _working_memory_message(self.history)
@@ -1816,6 +2312,12 @@ class OpenAIOrchestratedAgent:
                 selected_agent = agents["root"]
                 if route_target == "chat":
                     selected_agent = agents["chat"]
+                elif route_target == "code":
+                    selected_agent = agents["code"]
+                elif route_target == "review":
+                    selected_agent = agents["review"]
+                elif route_target == "research":
+                    selected_agent = agents["research"]
                 elif route_target == "executor":
                     selected_agent = agents["executor"]
                 selected_agent_name = getattr(selected_agent, "name", route_target)
@@ -1825,7 +2327,7 @@ class OpenAIOrchestratedAgent:
                     "matched": False,
                     "reason": "disabled",
                 }
-                if selected_agent_name in {"planner_executor", "task_router"}:
+                if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"}:
                     if answer_quality_flag:
                         if answer_quality_query_match:
                             answer_quality_context = build_answer_quality_context(
@@ -1853,7 +2355,7 @@ class OpenAIOrchestratedAgent:
                 read_prefetch_max_lines: int | None = None
                 read_prefetch_max_chars: int | None = None
                 read_prefetch_signals: list[str] = []
-                if selected_agent_name in {"planner_executor", "task_router"}:
+                if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"}:
                     prefetch_decision = detect_read_prefetch(
                         raw_query,
                         project_root=PROJECT_ROOT,
@@ -2004,7 +2506,7 @@ class OpenAIOrchestratedAgent:
                 if route_hint and selected_agent is agents["root"]:
                     inputs.append({"role": "system", "content": route_hint})
                 answer_quality_block = str(answer_quality_context.get("block") or "").strip()
-                if selected_agent_name in {"planner_executor", "task_router"} and answer_quality_block:
+                if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"} and answer_quality_block:
                     inputs.append({"role": "user", "content": answer_quality_block})
                 optional_sop_block = str(skill_sop_context.get("block") or "").strip()
                 if selected_agent_name == "planner_executor" and optional_sop_block:
@@ -2348,6 +2850,7 @@ class OpenAIOrchestratedAgent:
                 _stop_manual_span(execution_span if 'execution_span' in locals() else None)
                 _stop_manual_span(planning_span if 'planning_span' in locals() else None)
                 self._active_stream_result = None
+                self._run_store = None
 
         # 不应该到达这里
         display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 0)})
@@ -2358,9 +2861,11 @@ class OpenAIOrchestratedAgent:
         source: str,
         display_queue: queue.Queue[dict[str, Any]],
     ) -> None:
-        loop = asyncio.new_event_loop()
-        self._active_loop = loop
-        asyncio.set_event_loop(loop)
+        # Reuse a shared event loop instead of creating/destroying one per task.
+        if self._active_loop is None or self._active_loop.is_closed():
+            self._active_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._active_loop)
+        loop = self._active_loop
         task = loop.create_task(self._run_task_async(raw_query, source, display_queue))
         self._active_task = task
         try:
@@ -2370,7 +2875,6 @@ class OpenAIOrchestratedAgent:
         finally:
             self._active_stream_result = None
             self._active_task = None
-            self._active_loop = None
             try:
                 pending = [t for t in asyncio.all_tasks(loop) if not t.done()]
                 for pending_task in pending:
@@ -2379,7 +2883,6 @@ class OpenAIOrchestratedAgent:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             except Exception:
                 pass
-            loop.close()
 
     def run(self) -> None:
         while True:

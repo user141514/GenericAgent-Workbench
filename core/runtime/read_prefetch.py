@@ -48,7 +48,7 @@ _ACTION_BANS = (
 )
 
 
-@dataclass(slots=True)
+@dataclass
 class ReadPrefetchDecision:
     should_prefetch: bool
     target_file: str | None

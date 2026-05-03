@@ -98,7 +98,7 @@ def read_shortcut_enabled() -> bool:
     return str(os.environ.get(READ_SHORTCUT_ENV_VAR, "")).strip() == "1"
 
 
-@dataclass(slots=True)
+@dataclass
 class ReadShortcutDecision:
     should_shortcut: bool
     reason: str

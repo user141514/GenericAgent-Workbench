@@ -63,11 +63,22 @@ if not os.path.exists(cdp_cfg):
         print(f'[WARN] CDP config init failed: {e} 鈥?advanced web features (tmwebdriver) will be unavailable.')
 
 
+# Cached system prompt to avoid disk I/O every turn. TTL = 60s.
+_sys_prompt_cache: str | None = None
+_sys_prompt_cache_time: float = 0.0
+
+
 def get_system_prompt():
+    global _sys_prompt_cache, _sys_prompt_cache_time
+    now = time.time()
+    if _sys_prompt_cache is not None and (now - _sys_prompt_cache_time) < 60:
+        return _sys_prompt_cache
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f:
         prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
     prompt += get_global_memory()
+    _sys_prompt_cache = prompt
+    _sys_prompt_cache_time = now
     return prompt
 
 
@@ -124,6 +135,7 @@ class GeneraticAgent:
         self.task_queue = queue.Queue()
         self.is_running = False
         self.stop_sig = False
+        self._stop_event = None
         self.llm_no = 0
         self.inc_out = False
         self.handler = None
@@ -141,9 +153,12 @@ class GeneraticAgent:
         self._selected_tool_names = [_tool_name(tool) for tool in TOOLS_SCHEMA]
         self._selected_tools_schema_chars = _tool_schema_chars(TOOLS_SCHEMA)
 
-    def next_llm(self, n=-1):
-        self.llm_no = ((self.llm_no + 1) if n < 0 else n) % len(self.llmclients)
+    def switch_to_key(self, n: int) -> str:
+        """Switch directly to a specific LLM key index. Returns the new model name."""
+        if not self.llmclients or n < 0 or n >= len(self.llmclients):
+            return self.get_llm_name()
         lastc = self.llmclient
+        self.llm_no = n
         self.llmclient = self.llmclients[self.llm_no]
         self.llmclient.backend.history = lastc.backend.history
         self.llmclient.last_tools = ''
@@ -152,6 +167,10 @@ class GeneraticAgent:
             load_tool_schema('_cn')
         else:
             load_tool_schema()
+        return self.get_llm_name()
+
+    def next_llm(self, n=-1):
+        self.switch_to_key(((self.llm_no + 1) if n < 0 else n) % len(self.llmclients))
 
     def list_llms(self):
         return [(i, self.get_llm_name(b), i == self.llm_no) for i, b in enumerate(self.llmclients)]
@@ -159,6 +178,16 @@ class GeneraticAgent:
     def get_llm_name(self, b=None):
         b = self.llmclient if b is None else b
         return f"{type(b.backend).__name__}/{b.backend.name}" if not isinstance(b, dict) else "BADCONFIG_MIXIN"
+
+    def get_key_labels(self) -> list[str]:
+        """Return display labels for all configured LLMs (for UI model switcher)."""
+        labels = []
+        for i, b in enumerate(self.llmclients):
+            name = self.get_llm_name(b)
+            prefix = "Key1" if i == 0 else f"Key{i + 1}"
+            active = " *" if i == self.llm_no else ""
+            labels.append(f"{prefix}: {name}{active}")
+        return labels
 
     def _select_tools_for_task(self, query):
         available_tools = list(TOOLS_SCHEMA)
@@ -272,12 +301,19 @@ class GeneraticAgent:
             return
         print('Abort current task...')
         self.stop_sig = True
+        if self._stop_event is not None:
+            self._stop_event.set()
         if self.handler is not None:
             self.handler.code_stop_signal.append(1)
 
     def put_task(self, query, source="user", images=None, run_id=None):
         display_queue = queue.Queue()
-        self.task_queue.put({"query": query, "source": source, "images": images or [], "output": display_queue, "run_id": run_id})
+        stop_event = threading.Event()
+        self.task_queue.put({
+            "query": query, "source": source, "images": images or [],
+            "output": display_queue, "run_id": run_id,
+            "stop_event": stop_event,
+        })
         return display_queue
 
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
@@ -307,6 +343,8 @@ class GeneraticAgent:
             source = task["source"]
             display_queue = task["output"]
             run_id = task.get("run_id") or uuid.uuid4().hex
+            stop_event = task.get("stop_event")
+            self._stop_event = stop_event
             raw_query = self._handle_slash_cmd(raw_query, display_queue)
             if raw_query is None:
                 self.task_queue.task_done()
@@ -346,6 +384,7 @@ class GeneraticAgent:
                             'done': full_resp,
                             'source': source,
                             'turn': turn_value,
+                            'task_id': run_id,
                             'final_answer_ready': bool(shortcut_payload.get('final_answer_ready')),
                             'final_answer_text': shortcut_payload.get('final_answer_text') or full_resp,
                             'shortcut_type': shortcut_payload.get('shortcut_type'),
@@ -395,36 +434,57 @@ class GeneraticAgent:
                         max_turns=80,
                         verbose=self.verbose,
                         initial_user_content=initial_user_content,
+                        stop_event=stop_event,
                     )
 
                 stream_span = self.active_profiler.span('stream_output', kind='frontend', metadata={'source': source}) if self.active_profiler is not None else nullcontext()
                 with stream_span:
                     last_pos = 0
+                    prev_turn = 0
                     for chunk in gen:
                         if consume_file(self.task_dir, '_stop'):
                             self.abort()
-                        if self.stop_sig:
+                        if self.stop_sig or (stop_event and stop_event.is_set()):
                             break
                         full_resp += chunk
                         turn_value = max(1, int(getattr(handler, 'current_turn', 0) or 0))
+                        # emit turn_start/turn_end events when turn changes
+                        if turn_value != prev_turn:
+                            if prev_turn > 0:
+                                display_queue.put({'event': 'turn_end', 'turn': prev_turn, 'source': source, 'task_id': run_id})
+                            display_queue.put({'event': 'turn_start', 'turn': turn_value, 'source': source, 'task_id': run_id})
+                            prev_turn = turn_value
                         if len(full_resp) - last_pos > 50 or 'LLM Running' in chunk:
-                            display_queue.put({'next': full_resp[last_pos:] if self.inc_out else full_resp, 'source': source, 'turn': turn_value})
+                            delta_text = full_resp[last_pos:] if self.inc_out else full_resp
+                            display_queue.put({'event': 'turn_delta', 'next': delta_text, 'source': source, 'turn': turn_value, 'task_id': run_id})
+                            display_queue.put({'next': delta_text, 'source': source, 'turn': turn_value, 'task_id': run_id})
                             last_pos = len(full_resp)
                     turn_value = max(1, int(getattr(handler, 'current_turn', 0) or 0))
+                    # Put stopped marker if aborted
+                    if self.stop_sig or (stop_event and stop_event.is_set()):
+                        full_resp += '\n\n[已停止输出]\n'
+                        display_queue.put({'event': 'stopped', 'next': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id})
+                    if prev_turn > 0 and turn_value == prev_turn:
+                        display_queue.put({'event': 'turn_end', 'turn': turn_value, 'source': source, 'task_id': run_id})
                     if self.inc_out and last_pos < len(full_resp):
-                        display_queue.put({'next': full_resp[last_pos:], 'source': source, 'turn': turn_value})
+                        remaining = full_resp[last_pos:]
+                        display_queue.put({'event': 'turn_delta', 'next': remaining, 'source': source, 'turn': turn_value, 'task_id': run_id})
+                        display_queue.put({'next': remaining, 'source': source, 'turn': turn_value, 'task_id': run_id})
 
                 if '</summary>' in full_resp:
                     full_resp = full_resp.replace('</summary>', '</summary>\n\n')
                 if '</file_content>' in full_resp:
                     full_resp = re.sub(r'<file_content>\s*(.*?)\s*</file_content>', r'\n````\n<file_content>\n\1\n</file_content>\n````', full_resp, flags=re.DOTALL)
-                display_queue.put({'done': full_resp, 'source': source, 'turn': turn_value})
+                display_queue.put({'event': 'final', 'done': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id})
+                display_queue.put({'done': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id})
                 self.history = handler.history_info
             except Exception as e:
                 print(f"Backend Error: {format_error(e)}")
                 self._profile_status = 'error'
                 turn_value = max(1, int(getattr(handler, 'current_turn', 0) or 0)) if handler is not None else 1
-                display_queue.put({'done': full_resp + f'\n```\n{format_error(e)}\n```', 'source': source, 'turn': turn_value})
+                error_msg = full_resp + f'\n```\n{format_error(e)}\n```' if full_resp else f'```\n{format_error(e)}\n```'
+                display_queue.put({'event': 'error', 'error': str(e), 'source': source, 'turn': turn_value, 'task_id': run_id})
+                display_queue.put({'done': error_msg, 'source': source, 'turn': turn_value, 'task_id': run_id})
             finally:
                 if self.stop_sig:
                     print('User aborted the task.')
@@ -447,6 +507,7 @@ class GeneraticAgent:
                 self._last_early_stop = None
                 self.is_running = False
                 self.stop_sig = False
+                self._stop_event = None
                 self.task_queue.task_done()
                 if self.handler is not None:
                     self.handler.code_stop_signal.append(1)

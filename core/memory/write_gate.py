@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal
+from typing_extensions import Literal
 
 MemoryWriteSource = Literal[
     "distiller",
@@ -60,7 +60,7 @@ def _normalize_target(target: str | None) -> str:
     return value if value in _VALID_TARGETS else value
 
 
-@dataclass(slots=True)
+@dataclass
 class MemoryWriteDecision:
     allowed: bool
     source: str

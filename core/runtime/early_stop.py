@@ -148,7 +148,7 @@ def early_stop_enabled() -> bool:
     return str(os.environ.get(EARLY_STOP_ENV_VAR, "")).strip() == "1"
 
 
-@dataclass(slots=True)
+@dataclass
 class EarlyStopDecision:
     should_stop: bool
     reason: str
