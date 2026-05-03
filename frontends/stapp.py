@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime
 from urllib.parse import quote
 from urllib.request import urlopen
@@ -33,24 +34,44 @@ if BACKEND_KIND == "openai-agents":
     from core.openai_agentmain import OpenAIOrchestratedAgent as BackendAgent
 else:
     from core.agentmain import GeneraticAgent as BackendAgent
-from chatapp_common import (
-    delete_history_file,
-    distill_conversation,
-    format_restore,
-    input_items_to_backend_history,
-    input_items_to_lines,
-    input_items_to_messages,
-    restored_lines_to_backend_history,
-    restored_lines_to_messages,
-    save_distilled_memory,
-    unpack_restore_result,
-)
-from file_processor import (
-    SUPPORTED_UPLOAD_SUFFIXES,
-    build_attachment_prompt,
-    build_upload_id,
-    process_uploaded_file,
-)
+try:
+    from frontends.chatapp_common import (
+        delete_history_file,
+        distill_conversation,
+        format_restore,
+        input_items_to_backend_history,
+        input_items_to_lines,
+        input_items_to_messages,
+        restored_lines_to_backend_history,
+        restored_lines_to_messages,
+        save_distilled_memory,
+        unpack_restore_result,
+    )
+    from frontends.file_processor import (
+        SUPPORTED_UPLOAD_SUFFIXES,
+        build_attachment_prompt,
+        build_upload_id,
+        process_uploaded_file,
+    )
+except ImportError:
+    from chatapp_common import (
+        delete_history_file,
+        distill_conversation,
+        format_restore,
+        input_items_to_backend_history,
+        input_items_to_lines,
+        input_items_to_messages,
+        restored_lines_to_backend_history,
+        restored_lines_to_messages,
+        save_distilled_memory,
+        unpack_restore_result,
+    )
+    from file_processor import (
+        SUPPORTED_UPLOAD_SUFFIXES,
+        build_attachment_prompt,
+        build_upload_id,
+        process_uploaded_file,
+    )
 
 
 st.set_page_config(page_title="Cowork", layout="wide")
@@ -58,14 +79,103 @@ st.set_page_config(page_title="Cowork", layout="wide")
 st.markdown(
     """
 <style>
+/* ── Global ── */
+:root {
+  --accent: #3b82f6;
+  --accent-soft: #1e3a5f;
+  --bg-card: #181b25;
+  --border: #242836;
+  --text-muted: #64677a;
+  --radius: 10px;
+}
+.stApp { background: #0c0e14; }
+
+/* ── Sidebar ── */
+section[data-testid="stSidebar"] {
+  background: #11141c;
+}
+section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] .stCaption {
+  color: #9295a3 !important;
+}
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
-    min-height: 2.4rem;
-    padding: 0.35rem 0.6rem;
-    font-size: 0.95rem;
+  min-height: 2.2rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.9rem;
+  border-radius: 6px;
+  border: 1px solid #242836;
+  background: #181b25;
+  color: #e4e5ea;
+  transition: all 0.15s;
+}
+section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
+  background: #1e2230;
+  border-color: #64677a;
+}
+section[data-testid="stSidebar"] button[kind="primary"] {
+  background: #3b82f6 !important;
+  border-color: #3b82f6 !important;
+  color: #fff !important;
+  font-weight: 600;
+}
+section[data-testid="stSidebar"] button[kind="primary"]:hover {
+  filter: brightness(1.15);
 }
 section[data-testid="stSidebar"] div[data-testid="stExpander"] details summary p {
-    font-size: 0.98rem;
+  font-size: 0.9rem;
 }
+
+/* ── Sidebar model cards ── */
+section[data-testid="stSidebar"] .stColumns button {
+  font-size: 10px !important;
+  padding: 6px 4px !important;
+  min-height: unset !important;
+  line-height: 1.2 !important;
+  border-radius: 8px !important;
+  white-space: normal !important;
+  text-align: center !important;
+}
+section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] > div > div > div > div > div > button {
+  border: 2px solid #3b82f6 !important;
+  background: #1e3a5f !important;
+  color: #fff !important;
+}
+
+/* ── Chat messages ── */
+[data-testid="stChatMessage"] {
+  background: #181b25;
+  border: 1px solid #242836;
+  border-radius: 12px;
+  padding: 10px 16px;
+}
+[data-testid="stChatMessage"][data-testid="stChatMessageUser"] {
+  background: #1e3a5f;
+  border-color: #3b82f6;
+}
+
+/* ── Chat input ── */
+textarea[data-testid="stChatInputTextArea"] {
+  background: #0c0e14 !important;
+  border: 1px solid #242836 !important;
+  border-radius: 10px !important;
+  color: #e4e5ea !important;
+}
+textarea[data-testid="stChatInputTextArea"]:focus {
+  border-color: #3b82f6 !important;
+}
+
+/* ── Scrollbar ── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #242836; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+
+/* ── Dividers ── */
+section[data-testid="stSidebar"] hr {
+  border-color: #242836;
+  margin: 6px 0;
+}
+
 /* Ensure text is selectable */
 body, .stApp, [data-testid="stAppViewContainer"],
 [data-testid="stChatMessageContent"],
@@ -76,6 +186,11 @@ body, .stApp, [data-testid="stAppViewContainer"],
     -moz-user-select: text !important;
     -ms-user-select: text !important;
 }
+
+/* ── Status indicator ── */
+.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
+.status-active { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
+.status-idle { background: #64677a; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -88,17 +203,6 @@ def init():
     if getattr(agent, "startup_error", None):
         st.error("⚠️ 未配置任何可用的 LLM 接口，请设置mykey.py。")
         st.stop()
-    else:
-        threading.Thread(target=agent.run, daemon=True).start()
-    return agent
-
-
-@st.cache_resource
-def init():
-    agent = BackendAgent()
-    if getattr(agent, "startup_error", None):
-        st.error(agent.startup_error)
-        st.stop()
     if not getattr(agent, "ready", getattr(agent, "llmclient", None) is not None):
         st.error("Startup failed.")
         st.stop()
@@ -110,6 +214,28 @@ def init():
 
 agent = init()
 st.caption(f"Backend: {getattr(agent, 'backend_display_name', 'genericagent')}")
+
+# ── Password gate for remote access ──
+_streamlit_password = getattr(agent, "_streamlit_password", None)
+if _streamlit_password is None:
+    try:
+        from core.llmcore import mykeys
+        _streamlit_password = str(mykeys.get("streamlit_password", "")).strip()
+    except Exception:
+        _streamlit_password = ""
+if _streamlit_password:
+    if "auth_ok" not in st.session_state:
+        st.session_state.auth_ok = False
+    if not st.session_state.auth_ok:
+        st.markdown("### 🔐 GAgent Remote")
+        pwd = st.text_input("密码", type="password", placeholder="输入访问密码")
+        if st.button("登录"):
+            if pwd == _streamlit_password:
+                st.session_state.auth_ok = True
+                st.rerun()
+            else:
+                st.error("密码错误")
+        st.stop()
 
 st.title("🖥️ Cowork")
 
@@ -127,6 +253,23 @@ if "processed_upload_cache" not in st.session_state:
     st.session_state.processed_upload_cache = {}
 if "upload_widget_nonce" not in st.session_state:
     st.session_state.upload_widget_nonce = 0
+# Streaming / stop state
+if "agent_running" not in st.session_state:
+    st.session_state.agent_running = False
+if "stream_started" not in st.session_state:
+    st.session_state.stream_started = False
+if "stop_requested" not in st.session_state:
+    st.session_state.stop_requested = False
+if "task_id" not in st.session_state:
+    st.session_state.task_id = ""
+if "partial_response" not in st.session_state:
+    st.session_state.partial_response = ""
+if "current_turn" not in st.session_state:
+    st.session_state.current_turn = 0
+if "display_queue" not in st.session_state:
+    st.session_state.display_queue = None
+if "scroll_event" not in st.session_state:
+    st.session_state.scroll_event = 0
 
 
 def get_history_files():
@@ -490,6 +633,35 @@ def render_upload_panel():
 
 @st.fragment
 def render_sidebar():
+    # 新建对话按钮
+    if st.button("➕ 新建对话", key="new_conversation", use_container_width=True, type="primary"):
+        # 清空UI消息
+        st.session_state.messages = []
+        # 清空附件
+        if "uploaded_files" in st.session_state:
+            st.session_state.uploaded_files = []
+        # 重置streaming状态
+        st.session_state.agent_running = False
+        st.session_state.display_queue = None
+        st.session_state.partial_response = ""
+        st.session_state.task_id = ""
+        # 停止当前任务并清空后端历史
+        agent.abort()
+        if hasattr(agent, "history"):
+            agent.history = []
+        if (
+            hasattr(agent, "llmclient")
+            and agent.llmclient
+            and hasattr(agent.llmclient, "backend")
+            and agent.llmclient.backend
+        ):
+            agent.llmclient.backend.history = []
+            agent.llmclient.last_tools = ""
+        st.toast("✅ 已新建对话")
+        st.rerun()
+    
+    st.divider()
+    
     col1, col2 = st.columns(2)
     with col1:
         if st.button("📜 历史", key="toggle_history", use_container_width=True):
@@ -517,17 +689,35 @@ def render_sidebar():
     )
     st.divider()
 
+    # ── Model Switcher (Key1 / Key2) ──
     current_idx = getattr(agent, "llm_no", 0)
-    st.caption(f"LLM Core: {current_idx}: {agent.get_llm_name()}", help="点击切换备用链路")
+    key_labels = getattr(agent, "get_key_labels", lambda: [])()
+
+    if key_labels:
+        st.caption(f"Current: **{agent.get_llm_name()}**")
+        cols = st.columns(len(key_labels))
+        for i, label in enumerate(key_labels):
+            is_active = i == current_idx
+            btn_label = f"Key{i + 1}" + (" ✅" if is_active else "")
+            btn_help = label
+            if cols[i].button(btn_label, use_container_width=True, help=btn_help, key=f"switch_key_{i}"):
+                if not is_active:
+                    agent.switch_to_key(i)
+                    st.rerun(scope="fragment")
+    else:
+        st.caption(f"LLM Core: {current_idx}: {agent.get_llm_name()}", help="No multi-key config detected")
+        if st.button("切换备用链路", use_container_width=True):
+            agent.next_llm()
+            st.rerun(scope="fragment")
+
+    # Idle time display
     last_reply_time = st.session_state.get("last_reply_time", 0)
     if last_reply_time > 0:
-        st.caption(f"空闲时间：{int(time.time()) - last_reply_time}秒", help="当超过30分钟未收到回复时，系统会自动任务")
+        st.caption(f"空闲时间：{int(time.time()) - last_reply_time}秒")
 
-    if st.button("切换备用链路", use_container_width=True):
-        agent.next_llm()
-        st.rerun(scope="fragment")
     if st.button("强行停止任务", use_container_width=True):
         agent.abort()
+        st.session_state.stop_requested = True
         st.toast("已发送停止信号")
         st.rerun()
     if st.button("重新注入工具", use_container_width=True):
@@ -659,6 +849,11 @@ def agent_backend_stream(prompt):
         except queue.Empty:
             yield {"response": response, "turn": current_turn}
             continue
+        # structured events: consume silently, backward compat via fallthrough
+        if isinstance(item, dict) and item.get("event") in ("turn_start", "turn_end", "turn_delta", "final"):
+            pass
+        if isinstance(item, dict) and item.get("event") == "error":
+            yield {"response": response, "turn": current_turn, "error": item.get("error", "")}
         if item.get("turn") is not None:
             try:
                 current_turn = max(current_turn, int(item.get("turn") or 0))
@@ -674,14 +869,21 @@ def agent_backend_stream(prompt):
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
+    st.session_state.msg_counter = 0
+# assign stable ids to legacy messages (from prior sessions)
+for m in st.session_state.messages:
+    if "id" not in m:
+        st.session_state.msg_counter += 1
+        m["id"] = st.session_state.msg_counter
 for msg_idx, msg in enumerate(st.session_state.messages):
+    msg_id = msg.get("id", msg_idx)
     with st.chat_message(msg["role"]):
         slot = st.empty()
         with slot.container():
             if msg["role"] == "assistant":
                 render_segments(
                     fold_turns(msg["content"]),
-                    key_prefix=f"hist_{msg_idx}",
+                    key_prefix=f"hist_{msg_id}",
                     fold_expanded=not st.session_state.compact_assistant_history,
                 )
             else:
@@ -698,12 +900,30 @@ except (ImportError, AttributeError):
 
 _js_scroll_fix = (
     "!function(){var p=window.parent;if(p.__sfx)return;p.__sfx=1;"
-    "var d=p.document;setInterval(function(){"
+    "var d=p.document;"
+    "var lastScrollEvent=0;"
+    "var isNearBottom=function(){"
+    "var m=d.querySelector('section.main');if(!m)return 1;"
+    "return m.scrollTop+m.clientHeight>=m.scrollHeight-200;"
+    "};"
+    "var doScroll=function(){"
     "var m=d.querySelector('section.main');if(!m)return;"
     "var b=m.querySelector('.block-container');if(!b)return;"
-    "if(m.scrollHeight>b.scrollHeight+150){"
-    "m.style.overflow='hidden';void m.offsetHeight;m.style.overflow=''}"
-    "},3000)}()"
+    "b.scrollIntoView({block:'end',behavior:'instant'});"
+    "};"
+    "var obs=new MutationObserver(function(){"
+    "var marker=d.querySelector('#stream-marker');"
+    "if(!marker)return;"
+    "var active=marker.getAttribute('data-stream-active');"
+    "if(active!=='1')return;"
+    "var se=parseInt(marker.getAttribute('data-scroll-event')||'0',10);"
+    "if(se===lastScrollEvent)return;"
+    "lastScrollEvent=se;"
+    "if(isNearBottom())doScroll();"
+    "});"
+    "var target=d.querySelector('section.main .block-container')||d.body;"
+    "obs.observe(target,{childList:1,subtree:1,characterData:1});"
+    "}()"
 )
 _js_ime_fix = (
     ""
@@ -720,45 +940,143 @@ _js_ime_fix = (
 )
 _embed_html(f"<script>{_js_scroll_fix};{_js_ime_fix}</script>", height=0)
 
-if prompt := st.chat_input("any task?"):
-    task_prompt = build_prompt_with_attachments(prompt)
-    visible_prompt = format_user_message(prompt)
-    st.session_state.messages.append({"role": "user", "content": visible_prompt})
-    if hasattr(agent, "_pet_req") and not prompt.startswith("/"):
-        agent._pet_req("state=walk")
-    with st.chat_message("user"):
-        st.markdown(visible_prompt)
+def poll_agent_output():
+    """Non-blocking drain the display queue. Returns True when agent signals done/stopped."""
+    q = st.session_state.display_queue
+    if q is None:
+        return False
+    task_id = st.session_state.task_id
+    stop_requested = st.session_state.stop_requested
 
+    for _ in range(20):
+        try:
+            item = q.get_nowait()
+        except queue.Empty:
+            break
+
+        # Discard items from old tasks
+        item_tid = item.get("task_id", "")
+        if item_tid and item_tid != task_id:
+            continue
+
+        # ── Stop-requested path: only process terminal markers ──
+        if stop_requested:
+            if item.get("event") == "stopped":
+                st.session_state.partial_response = item.get("next", st.session_state.partial_response)
+                st.session_state.agent_running = False
+                return True
+            if "done" in item:
+                st.session_state.partial_response = item["done"]
+                st.session_state.agent_running = False
+                return True
+            continue
+
+        # ── Normal path ──
+        if item.get("turn") is not None:
+            try:
+                st.session_state.current_turn = max(
+                    st.session_state.current_turn, int(item.get("turn") or 0)
+                )
+            except Exception:
+                pass
+        if "next" in item:
+            st.session_state.partial_response = item["next"]
+            if not st.session_state.stream_started:
+                st.session_state.stream_started = True
+        if item.get("event") == "stopped":
+            st.session_state.partial_response = item.get("next", st.session_state.partial_response)
+            st.session_state.agent_running = False
+            return True
+        if "done" in item:
+            st.session_state.partial_response = item["done"]
+            st.session_state.agent_running = False
+            return True
+
+    return False
+
+
+if st.session_state.agent_running:
+    # ── Streaming UI ──
     with st.chat_message("assistant"):
-        frozen = 0
-        live = st.empty()
-        response = ""
-        current_turn = 0
-        cursor = " ▌"
-        for payload in agent_backend_stream(task_prompt):
-            response = payload["response"]
-            current_turn = payload.get("turn", current_turn)
+        # Stop button
+        can_stop = (
+            st.session_state.agent_running
+            and st.session_state.stream_started
+            and not st.session_state.stop_requested
+        )
+        if st.button(
+            "⏹ 停止输出",
+            key="stop_generation_btn",
+            disabled=not can_stop,
+            type="primary" if can_stop else "secondary",
+        ):
+            agent.abort()
+            st.session_state.stop_requested = True
+            st.rerun()
+
+        live = st.container()
+        response = st.session_state.partial_response
+        current_turn = st.session_state.current_turn
+        cursor = "" if st.session_state.stop_requested else " ▌"
+
+        with live:
             segs = fold_turns(response)
             n_done = max(0, len(segs) - 1)
-            while frozen < n_done:
-                with live.container():
-                    render_segments([segs[frozen]])
-                live = st.empty()
-                frozen += 1
-            with live.container():
-                if should_show_live_turn(response, current_turn):
-                    st.caption(f"LLM Running (Turn {current_turn}) ...")
-                render_segments([segs[-1]], suffix=cursor)
-        segs = fold_turns(response)
-        for i in range(frozen, len(segs)):
-            with live.container():
-                if i == len(segs) - 1 and should_show_live_turn(response, current_turn):
-                    st.caption(f"LLM Running (Turn {current_turn}) ...")
+            for i in range(n_done):
                 render_segments([segs[i]])
-            if i < len(segs) - 1:
-                live = st.empty()
-    st.session_state.messages.append({"role": "assistant", "content": response})
-    st.session_state.last_reply_time = int(time.time())
+            if segs:
+                if should_show_live_turn(response, current_turn):
+                    status_text = "正在停止…" if st.session_state.stop_requested else f"LLM Running (Turn {current_turn}) ..."
+                    st.caption(status_text)
+                render_segments([segs[-1]], suffix=cursor)
+                st.session_state.scroll_event += 1
+                st.markdown(
+                    f'<div id="stream-marker" data-stream-active="1" data-scroll-event="{st.session_state.scroll_event}"></div>',
+                    unsafe_allow_html=True,
+                )
+
+    # Drain queue
+    done = poll_agent_output()
+    if done:
+        final_response = st.session_state.partial_response
+        st.session_state.msg_counter += 1
+        st.session_state.messages.append({"role": "assistant", "content": final_response, "id": st.session_state.msg_counter})
+        st.session_state.last_reply_time = int(time.time())
+        # Reset streaming state
+        st.session_state.agent_running = False
+        st.session_state.stream_started = False
+        st.session_state.stop_requested = False
+        st.session_state.display_queue = None
+        st.session_state.partial_response = ""
+        st.session_state.current_turn = 0
+        st.session_state.task_id = ""
+        st.session_state.scroll_event = 0
+        st.rerun()
+
+    time.sleep(0.2)
+    st.rerun()
+
+if not st.session_state.agent_running:
+    if prompt := st.chat_input("any task?"):
+        task_prompt = build_prompt_with_attachments(prompt)
+        visible_prompt = format_user_message(prompt)
+        st.session_state.msg_counter += 1
+        st.session_state.messages.append({"role": "user", "content": visible_prompt, "id": st.session_state.msg_counter})
+        if hasattr(agent, "_pet_req") and not prompt.startswith("/"):
+            agent._pet_req("state=walk")
+        with st.chat_message("user"):
+            st.markdown(visible_prompt)
+
+        task_id = str(uuid.uuid4())
+        st.session_state.task_id = task_id
+        st.session_state.display_queue = agent.put_task(task_prompt, source="user", run_id=task_id)
+        st.session_state.agent_running = True
+        st.session_state.stream_started = False
+        st.session_state.stop_requested = False
+        st.session_state.partial_response = ""
+        st.session_state.current_turn = 0
+        st.session_state.scroll_event = 0
+        st.rerun()
 
 if st.session_state.autonomous_enabled:
     st.markdown(

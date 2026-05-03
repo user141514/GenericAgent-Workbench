@@ -1,16 +1,117 @@
 import os, json, re, time, requests, sys, threading, urllib3, base64, mimetypes, uuid
 from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+from .runtime import LLMCallCache
+
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4()) 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+_LLM_AUDIT_CACHE = LLMCallCache(Path(PROJECT_ROOT) / "temp" / "llm_cache")
+
+# Load .env file for API key configuration (preferred over mykey.py)
+try:
+    from dotenv import load_dotenv as _load_dotenv
+    _load_dotenv(os.path.join(PROJECT_ROOT, ".env"))
+except ImportError:
+    pass
+
+
+def _audit_response_text(content_blocks):
+    texts = []
+    for block in content_blocks or []:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "text" and block.get("text"):
+            texts.append(str(block.get("text")))
+        elif block.get("type") == "thinking" and block.get("thinking"):
+            texts.append(str(block.get("thinking")))
+    return "\n".join(t for t in texts if t).strip()
+
+
+def _clean_audit_metadata(metadata):
+    return {k: v for k, v in (metadata or {}).items() if v is not None}
+
+
+def _build_audit_metadata(session, *, call_site, streaming, extra=None):
+    metadata = dict(getattr(session, "_audit_context", {}) or {})
+    metadata.update(extra or {})
+    metadata["call_site"] = call_site
+    metadata["streaming"] = bool(streaming)
+    metadata["cache_type"] = "streaming_response" if streaming else "user_chat_response"
+    metadata.setdefault("backend_name", getattr(session, "name", ""))
+    metadata.setdefault("api_base", getattr(session, "api_base", ""))
+    metadata.setdefault("api_mode", getattr(session, "api_mode", ""))
+    metadata["temperature"] = getattr(session, "temperature", metadata.get("temperature"))
+    return _clean_audit_metadata(metadata)
+
+
+def _safe_audit_llm_call(*, session, call_site, messages, response, duration_ms, tools=None, streaming):
+    metadata = _build_audit_metadata(session, call_site=call_site, streaming=streaming)
+    try:
+        _LLM_AUDIT_CACHE.audit(
+            model=getattr(session, "model", "") or getattr(session, "name", ""),
+            messages=messages,
+            response=response,
+            duration_ms=duration_ms,
+            tools=tools,
+            metadata=metadata,
+        )
+    except Exception as exc:
+        print(f"[LLM AUDIT] {call_site} failed: {exc}")
+
+def _load_mykeys_from_env():
+    """Build a mykeys-compatible config dict from GA_* / GA_KEY1_* / GA_KEY2_* env vars."""
+    result = {}
+    # ── Key1 (primary model) ──
+    key1_api = os.environ.get("GA_KEY1_API_KEY", "").strip() or os.environ.get("GA_API_KEY", "").strip()
+    if key1_api:
+        result["key1_config"] = {
+            "name": os.environ.get("GA_KEY1_NAME", os.environ.get("GA_BACKEND_NAME", "key1")),
+            "apikey": key1_api,
+            "apibase": os.environ.get("GA_KEY1_API_BASE", os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com")).rstrip("/"),
+            "model": os.environ.get("GA_KEY1_MODEL", os.environ.get("GA_MODEL", "deepseek-chat")),
+            "stream": os.environ.get("GA_KEY1_STREAM", os.environ.get("GA_STREAM", "true")).lower() != "false",
+            "max_retries": int(os.environ.get("GA_KEY1_MAX_RETRIES", os.environ.get("GA_MAX_RETRIES", "3"))),
+            "connect_timeout": int(os.environ.get("GA_KEY1_CONNECT_TIMEOUT", os.environ.get("GA_CONNECT_TIMEOUT", "10"))),
+            "read_timeout": int(os.environ.get("GA_KEY1_READ_TIMEOUT", os.environ.get("GA_READ_TIMEOUT", "120"))),
+        }
+    # ── Key2 (secondary model) ──
+    key2_api = os.environ.get("GA_KEY2_API_KEY", "").strip()
+    if key2_api:
+        result["key2_config"] = {
+            "name": os.environ.get("GA_KEY2_NAME", "key2"),
+            "apikey": key2_api,
+            "apibase": os.environ.get("GA_KEY2_API_BASE", "https://api.deepseek.com").rstrip("/"),
+            "model": os.environ.get("GA_KEY2_MODEL", "deepseek-chat"),
+            "stream": os.environ.get("GA_KEY2_STREAM", "true").lower() != "false",
+            "max_retries": int(os.environ.get("GA_KEY2_MAX_RETRIES", "3")),
+            "connect_timeout": int(os.environ.get("GA_KEY2_CONNECT_TIMEOUT", "10")),
+            "read_timeout": int(os.environ.get("GA_KEY2_READ_TIMEOUT", "120")),
+        }
+    return result
 
 def _load_mykeys():
+    # 1. Try importing mykey.py (legacy, gitignored)
     try:
-        import mykey; return {k: v for k, v in vars(mykey).items() if not k.startswith('_')}
-    except ImportError: pass
-    p = os.path.join(PROJECT_ROOT, 'mykey.json')
-    if not os.path.exists(p): raise Exception('[ERROR] mykey.py or mykey.json not found, please create one from mykey_template.')
-    with open(p, encoding='utf-8') as f: return json.load(f)
+        import mykey
+        return {k: v for k, v in vars(mykey).items() if not k.startswith("_")}
+    except ImportError:
+        pass
+    # 2. Try mykey.json (legacy)
+    p = os.path.join(PROJECT_ROOT, "mykey.json")
+    if os.path.exists(p):
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    # 3. Fall back to environment variables (preferred new approach)
+    keys = _load_mykeys_from_env()
+    if keys:
+        return keys
+    raise Exception(
+        "[ERROR] No API key configuration found. "
+        "Set GA_API_KEY environment variable, or create mykey.py from mykey_template.py."
+    )
 
 def __getattr__(name):
     if name in ('mykeys', 'proxies'):
@@ -230,6 +331,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
         return blocks
     else:
         tc_buf = {}  # index -> {id, name, args}
+        reasoning_text = ""
         for line in resp_lines:
             if not line: continue
             line = line.decode('utf-8', errors='replace') if isinstance(line, bytes) else line
@@ -240,6 +342,8 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
             except: continue
             ch = (evt.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
+            if delta.get("reasoning_content"):
+                reasoning_text += delta["reasoning_content"]
             if delta.get("content"):
                 text = delta["content"]; content_text += text; yield text
             for tc in (delta.get("tool_calls") or []):
@@ -252,6 +356,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
                 cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
                 print(f"[Cache] input={usage.get('prompt_tokens',0)} cached={cached}")
         blocks = []
+        if reasoning_text: blocks.append({"type": "thinking", "thinking": reasoning_text})
         if content_text: blocks.append({"type": "text", "text": content_text})
         for idx in sorted(tc_buf):
             tc = tc_buf[idx]
@@ -285,6 +390,7 @@ def _parse_openai_json(data, api_mode="chat_completions"):
     cached = (usage.get("prompt_tokens_details") or {}).get("cached_tokens", 0)
     if usage: print(f"[Cache] input={usage.get('prompt_tokens',0)} cached={cached}")
     msg = ((data.get("choices") or [{}])[0]).get("message") or {}
+    reasoning_content = msg.get("reasoning_content", "")
     content = msg.get("content", "")
     text = ""
     if isinstance(content, str): text = content
@@ -292,7 +398,9 @@ def _parse_openai_json(data, api_mode="chat_completions"):
         for part in content:
             if isinstance(part, dict) and part.get("type") in ("text", "output_text") and part.get("text"):
                 text += part["text"]
-    blocks = [{"type": "text", "text": text}] if text else []
+    blocks = []
+    if reasoning_content: blocks.append({"type": "thinking", "thinking": reasoning_content})
+    if text: blocks.append({"type": "text", "text": text})
     for tc in (msg.get("tool_calls") or []):
         fn = tc.get("function", {})
         args = fn.get("arguments", "")
@@ -316,8 +424,11 @@ def _stamp_oai_cache_markers(messages, model):
 
 def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completions', *,
                    temperature=0.5, max_tokens=None, tools=None, reasoning_effort=None,
-                   max_retries=0, connect_timeout=10, read_timeout=300, proxies=None, stream=True):
+                   max_retries=0, connect_timeout=10, read_timeout=300, proxies=None, stream=True,
+                   audit_session=None, call_site="llmcore._openai_stream"):
     """Shared OpenAI-compatible request with retry. Yields text chunks, returns list[content_block]."""
+    start_perf = time.perf_counter()
+    response_parts = []
     ml = model.lower()
     if 'kimi' in ml or 'moonshot' in ml: temperature = 1
     elif 'minimax' in ml: temperature = max(0.01, min(temperature, 1.0))  # MiniMax requires temp in (0, 1]
@@ -376,14 +487,41 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
                 if stream:
                     gen = _parse_openai_sse(r.iter_lines(), api_mode)
                     try:
-                        while True: streamed = True; yield next(gen)
+                        while True:
+                            chunk = next(gen)
+                            streamed = True
+                            if chunk:
+                                response_parts.append(str(chunk))
+                            yield chunk
                     except StopIteration as e:
-                        return e.value or []
+                        blocks = e.value or []
+                        if audit_session is not None:
+                            _safe_audit_llm_call(
+                                session=audit_session,
+                                call_site=call_site,
+                                messages=messages,
+                                response="".join(response_parts) or blocks,
+                                duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                                tools=tools,
+                                streaming=stream,
+                            )
+                        return blocks
                 else:
                     blocks = _parse_openai_json(r.json(), api_mode)
                     for b in blocks:
                         if b.get("type") == "text" and b.get("text"):
+                            response_parts.append(str(b["text"]))
                             yield b["text"]
+                    if audit_session is not None:
+                        _safe_audit_llm_call(
+                            session=audit_session,
+                            call_site=call_site,
+                            messages=messages,
+                            response="".join(response_parts) or blocks,
+                            duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                            tools=tools,
+                            streaming=stream,
+                        )
                     return blocks
         except requests.HTTPError as e:
             resp = getattr(e, "response", None); status = getattr(resp, "status_code", None)
@@ -397,17 +535,50 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
             try: h = resp.headers or {}; rid = h.get("x-request-id","") or h.get("request-id",""); ra = h.get("retry-after",""); ct = h.get("content-type","")
             except: pass
             err = f"Error: HTTP {status} {e}; content_type: {ct or '<empty>'}; retry_after: {ra or '<empty>'}; request_id: {rid or '<empty>'}; body: {body or '<empty>'}"
-            yield err; return [{"type": "text", "text": err}]
+            yield err
+            if audit_session is not None:
+                _safe_audit_llm_call(
+                    session=audit_session,
+                    call_site=call_site,
+                    messages=messages,
+                    response=err,
+                    duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                    tools=tools,
+                    streaming=stream,
+                )
+            return [{"type": "text", "text": err}]
         except (requests.Timeout, requests.ConnectionError) as e:
             if attempt < max_retries and not streamed:
                 d = _delay(None, attempt)
                 print(f"[LLM Retry] {type(e).__name__}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
                 time.sleep(d); continue
             err = f"Error: {type(e).__name__}: {e}"
-            yield err; return [{"type": "text", "text": err}]
+            yield err
+            if audit_session is not None:
+                _safe_audit_llm_call(
+                    session=audit_session,
+                    call_site=call_site,
+                    messages=messages,
+                    response=err,
+                    duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                    tools=tools,
+                    streaming=stream,
+                )
+            return [{"type": "text", "text": err}]
         except Exception as e:
             err = f"Error: {e}"
-            yield err; return [{"type": "text", "text": err}]
+            yield err
+            if audit_session is not None:
+                _safe_audit_llm_call(
+                    session=audit_session,
+                    call_site=call_site,
+                    messages=messages,
+                    response=err,
+                    duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                    tools=tools,
+                    streaming=stream,
+                )
+            return [{"type": "text", "text": err}]
 
 def _to_responses_input(messages):
     result = []
@@ -449,9 +620,12 @@ def _msgs_claude2oai(messages):
         blocks = content if isinstance(content, list) else [{"type": "text", "text": str(content)}]
         if role == "assistant":
             text_parts, tool_calls = [], []
+            reasoning_parts = []
             for b in blocks:
                 if not isinstance(b, dict): continue
                 if b.get("type") == "text": text_parts.append({"type": "text", "text": b.get("text", "")})
+                elif b.get("type") == "thinking":
+                    reasoning_parts.append(b.get("thinking", ""))
                 elif b.get("type") == "tool_use":
                     tool_calls.append({
                         "id": b.get("id", ""), "type": "function",
@@ -461,6 +635,7 @@ def _msgs_claude2oai(messages):
             if text_parts: m["content"] = text_parts
             else: m["content"] = ""
             if tool_calls: m["tool_calls"] = tool_calls
+            if reasoning_parts: m["reasoning_content"] = "\n".join(reasoning_parts)
             result.append(m)
         elif role == "user":
             text_parts = []
@@ -512,6 +687,7 @@ class BaseSession:
         self.api_mode = 'responses' if mode in ('responses', 'response') else 'chat_completions'
         self.temperature = cfg.get('temperature', 1)
         self.max_tokens = cfg.get('max_tokens', 8192)
+        self._audit_context = {}
     def _apply_claude_thinking(self, payload):
         if self.thinking_type:
             thinking = {"type": self.thinking_type}
@@ -545,6 +721,7 @@ class BaseSession:
 
 class ClaudeSession(BaseSession):
     def raw_ask(self, messages):
+        start_perf = time.perf_counter()
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01", "anthropic-beta": "prompt-caching-2024-07-31"}
         payload = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens, "stream": True}
         if self.temperature != 1: payload["temperature"] = self.temperature
@@ -556,9 +733,28 @@ class ClaudeSession(BaseSession):
                 with sess.post(auto_make_url(self.api_base, "messages"), headers=headers, json=payload, stream=True,
                                timeout=(self.connect_timeout, self.read_timeout), proxies=self.proxies) as r:
                     if r.status_code != 200: raise Exception(f"HTTP {r.status_code} {r.content.decode('utf-8', errors='replace')[:500]}")
-                    return (yield from _parse_claude_sse(r.iter_lines())) or []
+                    blocks = (yield from _parse_claude_sse(r.iter_lines())) or []
+                    _safe_audit_llm_call(
+                        session=self,
+                        call_site="llmcore.ClaudeSession.raw_ask",
+                        messages=messages,
+                        response=_audit_response_text(blocks) or blocks,
+                        duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                        tools=None,
+                        streaming=True,
+                    )
+                    return blocks
         except Exception as e:
             yield (err := f"Error: {e}")
+            _safe_audit_llm_call(
+                session=self,
+                call_site="llmcore.ClaudeSession.raw_ask",
+                messages=messages,
+                response=err,
+                duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                tools=None,
+                streaming=True,
+            )
             return [{"type": "text", "text": err}]
     def make_messages(self, raw_list):
         msgs = [{"role": m['role'], "content": _normalize_content_blocks(m.get('content'))} for m in raw_list]
@@ -573,7 +769,8 @@ class LLMSession(BaseSession):
                                   temperature=self.temperature, reasoning_effort=self.reasoning_effort,
                                   max_tokens=self.max_tokens, max_retries=self.max_retries, 
                                   connect_timeout=self.connect_timeout, read_timeout=self.read_timeout,
-                                  proxies=self.proxies, stream=self.stream))
+                                  proxies=self.proxies, stream=self.stream,
+                                  audit_session=self, call_site="llmcore.LLMSession.raw_ask"))
     def make_messages(self, raw_list): return _msgs_claude2oai(raw_list)
 
 def _fix_messages(messages):
@@ -603,6 +800,7 @@ class NativeClaudeSession(BaseSession):
         self._device_id = uuid.uuid4().hex + uuid.uuid4().hex[:32]
         self.tools = None
     def raw_ask(self, messages):
+        start_perf = time.perf_counter()
         messages = _fix_messages(messages)
         model = self.model
         beta_parts = ["claude-code-20250219", "interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12", "prompt-caching-scope-2026-01-05"]
@@ -636,7 +834,18 @@ class NativeClaudeSession(BaseSession):
                 with sess.post(auto_make_url(self.api_base, "messages")+'?beta=true', headers=headers, json=payload,
                                stream=self.stream, timeout=(self.connect_timeout, self.read_timeout), proxies=self.proxies) as resp:
                     if resp.status_code != 200: raise Exception(f"HTTP {resp.status_code} {resp.content.decode('utf-8', errors='replace')[:500]}")
-                    if self.stream: return (yield from _parse_claude_sse(resp.iter_lines())) or []
+                    if self.stream:
+                        blocks = (yield from _parse_claude_sse(resp.iter_lines())) or []
+                        _safe_audit_llm_call(
+                            session=self,
+                            call_site="llmcore.NativeClaudeSession.raw_ask",
+                            messages=messages,
+                            response=_audit_response_text(blocks) or blocks,
+                            duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                            tools=self.tools,
+                            streaming=True,
+                        )
+                        return blocks
                     else:
                         data = resp.json(); content_blocks = data.get("content", [])
                         usage = data.get("usage", {})
@@ -644,9 +853,27 @@ class NativeClaudeSession(BaseSession):
                         for b in content_blocks:
                             if b.get("type") == "text": yield b.get("text", "")
                             elif b.get("type") == "thinking": yield ""
+                        _safe_audit_llm_call(
+                            session=self,
+                            call_site="llmcore.NativeClaudeSession.raw_ask",
+                            messages=messages,
+                            response=_audit_response_text(content_blocks) or content_blocks,
+                            duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                            tools=self.tools,
+                            streaming=False,
+                        )
                         return content_blocks
         except Exception as e:
             yield (err := f"Error: {e}")
+            _safe_audit_llm_call(
+                session=self,
+                call_site="llmcore.NativeClaudeSession.raw_ask",
+                messages=messages,
+                response=err,
+                duration_ms=(time.perf_counter() - start_perf) * 1000.0,
+                tools=self.tools,
+                streaming=self.stream,
+            )
             return [{"type": "text", "text": err}]
 
     def ask(self, msg):
@@ -686,7 +913,8 @@ class NativeOAISession(NativeClaudeSession):
                                           temperature=self.temperature, max_tokens=self.max_tokens, 
                                           tools=self.tools, reasoning_effort=self.reasoning_effort,
                                           max_retries=self.max_retries, connect_timeout=self.connect_timeout,
-                                          read_timeout=self.read_timeout, proxies=self.proxies, stream=self.stream))
+                                          read_timeout=self.read_timeout, proxies=self.proxies, stream=self.stream,
+                                          audit_session=self, call_site="llmcore.NativeOAISession.raw_ask"))
 
 def openai_tools_to_claude(tools):
     """[{type:'function', function:{name,description,parameters}}] → [{name,description,input_schema}]."""
@@ -951,7 +1179,7 @@ class MixinSession:
         self.model = getattr(self._sessions[0], 'model', None)
         self._cur_idx, self._switched_at = 0, 0.0
     def __getattr__(self, name): return getattr(self._sessions[0], name)
-    _BROADCAST_ATTRS = frozenset({'system', 'tools', 'temperature', 'max_tokens', 'reasoning_effort'})
+    _BROADCAST_ATTRS = frozenset({'system', 'tools', 'temperature', 'max_tokens', 'reasoning_effort', '_audit_context'})
     def __setattr__(self, name, value):
         if name in self._BROADCAST_ATTRS:
             for s in self._sessions:

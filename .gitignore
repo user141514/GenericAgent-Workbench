@@ -1,24 +1,80 @@
 # Local secrets
 mykey.py
 mykey.json
+*.env
+.env
+.env.*
+*_key*
+*secret*
+*token*
+.streamlit/secrets.toml
 
 # Python cache
 __pycache__/
 *.py[cod]
+.pytest_cache/
 
 # Local runtime artifacts
 temp/
+temp/**
+profiles/
+*.log
+records.jsonl
+skill_activations.jsonl
 
 # Memory/runtime state
+memory/chat_history.json
 memory/file_access_stats.json
 memory/global_mem.txt
 memory/global_mem_insight.txt
 memory/history_memory_inbox.md
 memory/L4_raw_sessions/
+memory/catalog.sqlite
 
 # Local backups
 *.backup_*
 
+# Local databases / caches
+*.db
+*.sqlite
+*.sqlite3
+temp/llm_cache/
+temp/profiles/
+temp/skill_activations/
+
 # OS/editor noise
 .DS_Store
 Thumbs.db
+
+# Keep source and docs tracked
+!docs/
+!docs/**
+!core/
+!core/**
+!assets/
+!assets/**
+!memory/*.md
+!memory/*.py
+!.env.template
+
+# Re-exclude build artifacts (must follow negations above to override !core/**)
+__pycache__/
+*.py[cod]
+*.pyc
+*.pyo
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+core/graphify-out/
+memory/graphify-out/
+graphify-out/
+
+# Re-exclude runtime memory files overridden by !memory/*.md above
+memory/history_memory_inbox.md
+
+# Local launcher/setup scripts (machine-specific, not for distribution)
+*.bat
+
+# Claude Code local state
+.claude/
