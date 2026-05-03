@@ -23,6 +23,7 @@ records.jsonl
 skill_activations.jsonl
 
 # Memory/runtime state
+memory/chat_history.json
 memory/file_access_stats.json
 memory/global_mem.txt
 memory/global_mem_insight.txt
@@ -65,6 +66,15 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+core/graphify-out/
+memory/graphify-out/
+graphify-out/
+
+# Re-exclude runtime memory files overridden by !memory/*.md above
+memory/history_memory_inbox.md
+
+# Local launcher/setup scripts (machine-specific, not for distribution)
+*.bat
 
 # Claude Code local state
 .claude/
