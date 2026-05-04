@@ -1179,13 +1179,21 @@ _js_scroll_fix = (
     # ── MutationObserver for stream updates ──
     "var obs=new MutationObserver(function(){"
     "var marker=d.querySelector('#stream-marker');"
-    "if(!marker)return;"
+    "var contentEnd=d.querySelector('#content-end');"
+    "if(marker){"
     "var active=marker.getAttribute('data-stream-active');"
-    "if(active!=='1'){updateCursorUI();return;}"
+    "if(active==='1'){"
     "var se=parseInt(marker.getAttribute('data-scroll-event')||'0',10);"
-    "if(se===lastScrollEvent)return;"
+    "if(se!==lastScrollEvent){"
     "lastScrollEvent=se;"
     "if(isNearBottom())doScroll();"
+    "}"
+    "}"
+    "}"
+    "if(contentEnd&&contentEnd.getAttribute('data-force-scroll')==='1'){"
+    "contentEnd.setAttribute('data-force-scroll','0');"
+    "setTimeout(function(){doScroll();},80);"
+    "}"
     "updateCursorUI();"
     "});"
     "var target=d.querySelector('section.main .block-container')||d.body;"
@@ -1400,6 +1408,10 @@ if not st.session_state.agent_running:
                     st.rerun()
             with c3:
                 st.caption("Planner 会先规划再执行，适合复杂任务。直接执行跳过规划步骤，更快但缺少验证闭环。")
+            st.markdown(
+                '<div id="content-end" data-force-scroll="1"></div>',
+                unsafe_allow_html=True,
+            )
         st.stop()
 
     if prompt := st.chat_input("any task?"):
