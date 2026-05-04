@@ -218,6 +218,7 @@ def archive_inbox_to_structured(
     *,
     dry_run: bool = True,
     backup_first: bool = True,
+    truncate_after_write: bool = False,
 ) -> dict[str, Any]:
     """Archive history_memory_inbox.md entries to structured memory tables.
 
@@ -232,19 +233,26 @@ def archive_inbox_to_structured(
     dry_run=False:
         Writes to memory_candidates + evidence_chunks.
         If backup_first=True, copies inbox to a .bak file first.
-        Does NOT truncate the inbox (truncation is P2b).
+
+    truncate_after_write=True (P2b):
+        After verified write, truncate only the archived entries from inbox.
+        Requires backup_first=True (backup is mandatory before truncation).
+        Non-archived entries (skipped duplicates) are preserved.
 
     Returns:
         {
             "dry_run": bool,
-            "total_entries": int,        # entries found in inbox
-            "new_entries": int,          # entries not yet archived
-            "skipped_duplicates": int,   # entries already archived
-            "written_chunks": int,       # chunks written (0 if dry_run)
-            "written_candidates": int,   # candidates written (0 if dry_run)
+            "total_entries": int,
+            "new_entries": int,
+            "skipped_duplicates": int,
+            "written_chunks": int,
+            "written_candidates": int,
             "backup_path": str | None,
+            "truncated": bool,
+            "truncated_entries": int,
+            "remaining_entries": int,
             "errors": list[str],
-            "preview_entries": [...],    # first 5 new entries (dry_run only)
+            "preview_entries": [...],
         }
     """
     root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
@@ -259,6 +267,9 @@ def archive_inbox_to_structured(
         "written_chunks": 0,
         "written_candidates": 0,
         "backup_path": None,
+        "truncated": False,
+        "truncated_entries": 0,
+        "remaining_entries": 0,
         "errors": [],
         "preview_entries": [],
     }
@@ -417,6 +428,75 @@ def archive_inbox_to_structured(
 
     except Exception as e:
         report["errors"].append(f"write failed: {e}")
+        return report
+
+    # ── Truncate (P2b): only remove what was archived ──
+    if not truncate_after_write:
+        return report
+
+    if not report["backup_path"]:
+        report["errors"].append("truncation requires backup_first=True")
+        return report
+
+    if report["errors"]:
+        report["errors"].append("truncation skipped due to write errors")
+        return report
+
+    if report["new_entries"] == 0:
+        return report  # nothing to truncate
+
+    try:
+        # Re-read the inbox
+        current_content = inbox_path.read_text(encoding="utf-8", errors="replace")
+        current_entries = re.split(r"\n(?=## )", current_content)
+
+        # Separate header from entries
+        header_lines: list[str] = []
+        entry_lines: list[str] = []
+        for part in current_entries:
+            part = part.strip()
+            if part.startswith("## "):
+                entry_lines.append(part)
+            elif not entry_lines:  # before first ## entry — this is the header
+                header_lines.append(part)
+
+        # Build set of archived hashes
+        archived_hashes: set[str] = seen_hashes  # from dedup phase
+
+        # Keep entries NOT in the archived set
+        kept_entries: list[str] = []
+        truncated_count = 0
+        for entry in entry_lines:
+            entry_hash = hashlib.sha256(entry.encode("utf-8")).hexdigest()
+            if entry_hash in archived_hashes:
+                truncated_count += 1
+            else:
+                kept_entries.append(entry)
+
+        # Write back: header + remaining entries
+        new_content = "\n".join(header_lines).strip()
+        if kept_entries:
+            new_content += "\n\n" + "\n\n".join(kept_entries)
+        new_content = new_content.strip() + "\n"
+
+        inbox_path.write_text(new_content, encoding="utf-8")
+
+        report["truncated"] = True
+        report["truncated_entries"] = truncated_count
+        report["remaining_entries"] = len(kept_entries)
+
+        # Verify: re-read and count
+        verify_content = inbox_path.read_text(encoding="utf-8", errors="replace")
+        verify_entries = [e for e in re.split(r"\n(?=## )", verify_content) if e.strip().startswith("## ")]
+        expected_remaining = report["total_entries"] - truncated_count
+        if len(verify_entries) != expected_remaining:
+            report["errors"].append(
+                f"truncation verify failed: expected {expected_remaining} remaining, "
+                f"got {len(verify_entries)}"
+            )
+
+    except Exception as e:
+        report["errors"].append(f"truncation failed: {e}")
 
     return report
 
