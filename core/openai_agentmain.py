@@ -2429,7 +2429,7 @@ class OpenAIOrchestratedAgent:
                 memory_span = _start_manual_span(profiler, "working_memory_prepare", kind="memory", metadata={"history_size": len(self.history)})
                 working_memory = _working_memory_message(self.history)
                 if working_memory:
-                    inputs.append({"role": "system", "content": working_memory})
+                    inputs.append({"role": "user", "content": working_memory})
                 _stop_manual_span(memory_span)
                 # ── Context Runtime injection (route-gated, env-var-controlled) ──
                 context_span = _start_manual_span(profiler, "context_runtime", kind="memory", metadata={"route": route_target})
@@ -2440,7 +2440,7 @@ class OpenAIOrchestratedAgent:
                     profiler=profiler,
                 )
                 if context_packet_text:
-                    inputs.append({"role": "system", "content": context_packet_text})
+                    inputs.append({"role": "user", "content": context_packet_text})
                 _stop_manual_span(context_span)
                 selected_agent = agents["root"]
                 if route_target == "chat":
@@ -2639,7 +2639,7 @@ class OpenAIOrchestratedAgent:
                 )
                 # 如果规则匹配命中，添加路由提示
                 if route_hint and selected_agent is agents["root"]:
-                    inputs.append({"role": "system", "content": route_hint})
+                    inputs.append({"role": "user", "content": route_hint})
                 answer_quality_block = str(answer_quality_context.get("block") or "").strip()
                 if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"} and answer_quality_block:
                     inputs.append({"role": "user", "content": answer_quality_block})
