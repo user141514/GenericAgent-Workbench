@@ -197,6 +197,11 @@ section[data-testid="stSidebar"] button[kind="primary"]:hover {
   border-radius: var(--radius-lg) !important;
   transition: border-color 0.25s ease, box-shadow 0.25s ease;
 }
+/* Kill backgrounds on ALL inner children — they inherit from the container */
+[data-testid="stChatInput"] > div > *,
+[data-testid="stChatInput"] > div > * > * {
+  background: transparent !important;
+}
 [data-testid="stChatInput"] > div:focus-within {
   border-color: var(--border-focus) !important;
   box-shadow: 0 0 0 4px var(--accent-glow) !important;
@@ -208,10 +213,21 @@ textarea[data-testid="stChatInputTextArea"] {
   font-family: var(--font-body) !important;
   font-size: 0.95rem !important;
   line-height: 1.6 !important;
+  -webkit-appearance: none !important;
+  box-shadow: none !important;
 }
 textarea[data-testid="stChatInputTextArea"]::placeholder {
   color: var(--text-muted) !important;
   font-style: italic;
+  opacity: 1 !important;
+}
+/* Override browser autofill — the #1 cause of cool-tinted input patches */
+textarea[data-testid="stChatInputTextArea"]:-webkit-autofill,
+textarea[data-testid="stChatInputTextArea"]:-webkit-autofill:hover,
+textarea[data-testid="stChatInputTextArea"]:-webkit-autofill:focus {
+  -webkit-box-shadow: 0 0 0 40px var(--bg-card) inset !important;
+  -webkit-text-fill-color: var(--text-primary) !important;
+  transition: background-color 5000s ease-in-out 0s;
 }
 [data-testid="stBottomBlockContainer"] {
   background: var(--bg-root) !important;
