@@ -79,26 +79,54 @@ st.set_page_config(page_title="Cowork", layout="wide")
 st.markdown(
     """
 <style>
+/* ── Fonts ── */
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,600;1,500&display=swap');
+
 /* ── Design tokens ── */
 :root {
   --bg-root: #faf8f5;
-  --bg-sidebar: #f3f0ea;
-  --bg-card: #fff;
-  --border: #e0dbd2;
-  --border-focus: #cc8864;
-  --text-primary: #1d1b18;
-  --text-secondary: #6b6560;
-  --accent: #cc785c;
-  --accent-hover: #b5654a;
-  --accent-soft: #fdf5ee;
-  --shadow: 0 1px 3px rgba(0,0,0,0.04);
-  --radius-sm: 8px;
-  --radius: 12px;
+  --bg-sidebar: #f4f0e8;
+  --bg-card: #fefdfb;
+  --border: #e2dbcf;
+  --border-focus: #c8845c;
+  --text-primary: #1e1b17;
+  --text-secondary: #6b6358;
+  --text-muted: #9a9388;
+  --accent: #c87854;
+  --accent-hover: #ae6543;
+  --accent-soft: #fef7f2;
+  --accent-glow: rgba(200, 120, 84, 0.10);
+  --shadow: 0 1px 2px rgba(60, 40, 20, 0.04);
+  --shadow-card: 0 2px 8px rgba(60, 40, 20, 0.05);
+  --radius-sm: 10px;
+  --radius: 14px;
+  --radius-lg: 18px;
+  --font-display: 'Cormorant Garamond', 'Noto Serif SC', 'Source Han Serif SC', serif;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+}
+
+/* ── Paper texture ── */
+.stApp::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+  background-repeat: repeat;
+  background-size: 256px 256px;
 }
 
 /* ── Global ── */
 .stApp {
   background: var(--bg-root);
+  color: var(--text-primary);
+  font-family: var(--font-body);
+}
+h1, h2, h3, h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  letter-spacing: -0.01em;
   color: var(--text-primary);
 }
 
@@ -112,28 +140,35 @@ section[data-testid="stSidebar"] .stCaption {
   color: var(--text-secondary) !important;
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
-  min-height: 2.2rem;
-  padding: 0.35rem 0.6rem;
-  font-size: 0.9rem;
+  min-height: 2.3rem;
+  padding: 0.4rem 0.7rem;
+  font-size: 0.88rem;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--bg-card);
   color: var(--text-primary);
-  transition: all 0.15s;
+  transition: all 0.2s ease;
+  font-family: var(--font-body);
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
-  background: #f0ebe0;
-  border-color: #c4b99e;
+  background: #f0e8db;
+  border-color: #d4c4ab;
+  transform: translateY(-1px);
+  box-shadow: 0 2px 6px rgba(140, 100, 60, 0.08);
 }
 section[data-testid="stSidebar"] button[kind="primary"] {
   background: var(--accent) !important;
   border-color: var(--accent) !important;
   color: #fff !important;
   font-weight: 600;
+  border-radius: var(--radius-sm) !important;
+  transition: all 0.2s ease;
 }
 section[data-testid="stSidebar"] button[kind="primary"]:hover {
   background: var(--accent-hover) !important;
   border-color: var(--accent-hover) !important;
+  box-shadow: 0 3px 12px var(--accent-glow);
+  transform: translateY(-1px);
 }
 
 /* ── Chat messages ── */
@@ -141,12 +176,15 @@ section[data-testid="stSidebar"] button[kind="primary"]:hover {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  padding: 10px 16px;
+  padding: 14px 18px;
   box-shadow: var(--shadow);
+  font-family: var(--font-body);
+  line-height: 1.65;
 }
 [data-testid="stChatMessage"][data-testid="stChatMessageUser"] {
   background: var(--accent-soft);
-  border-color: #e8c9a0;
+  border-color: #edd5be;
+  box-shadow: var(--shadow-card);
 }
 
 /* ── Chat input ── */
@@ -156,16 +194,24 @@ section[data-testid="stSidebar"] button[kind="primary"]:hover {
 [data-testid="stChatInput"] > div {
   background: var(--bg-card) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 12px !important;
+  border-radius: var(--radius-lg) !important;
+  transition: border-color 0.25s ease, box-shadow 0.25s ease;
 }
 [data-testid="stChatInput"] > div:focus-within {
   border-color: var(--border-focus) !important;
-  box-shadow: 0 0 0 3px rgba(204,136,100,0.12) !important;
+  box-shadow: 0 0 0 4px var(--accent-glow) !important;
 }
 textarea[data-testid="stChatInputTextArea"] {
   background: transparent !important;
   border: none !important;
   color: var(--text-primary) !important;
+  font-family: var(--font-body) !important;
+  font-size: 0.95rem !important;
+  line-height: 1.6 !important;
+}
+textarea[data-testid="stChatInputTextArea"]::placeholder {
+  color: var(--text-muted) !important;
+  font-style: italic;
 }
 [data-testid="stBottomBlockContainer"] {
   background: var(--bg-root) !important;
@@ -174,19 +220,44 @@ textarea[data-testid="stChatInputTextArea"] {
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d4cfc7; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #b0a99f; }
+::-webkit-scrollbar-thumb { background: #d8d0c3; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b8ac99; }
 
 /* ── Dividers ── */
 section[data-testid="stSidebar"] hr {
-  border-color: var(--border);
-  margin: 6px 0;
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 4px;
 }
 
 /* ── Expand / collapsible details ── */
 section[data-testid="stSidebar"] div[data-testid="stExpander"] details summary p {
-  font-size: 0.9rem;
+  font-size: 0.88rem;
   color: var(--text-secondary) !important;
+}
+
+/* ── Code blocks ── */
+pre, code {
+  font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
+  font-size: 0.85rem;
+}
+pre {
+  background: #f7f4ee !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 14px 16px !important;
+  line-height: 1.55 !important;
+}
+
+/* ── Links ── */
+a {
+  color: var(--accent) !important;
+  text-decoration: none;
+  transition: color 0.15s;
+}
+a:hover {
+  color: var(--accent-hover) !important;
+  text-decoration: underline;
 }
 
 /* Ensure text is selectable */
@@ -202,8 +273,20 @@ body, .stApp, [data-testid="stAppViewContainer"],
 
 /* ── Status indicator ── */
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.status-active { background: #5a8a5e; box-shadow: 0 0 6px rgba(90,138,94,0.4); }
-.status-idle { background: #a09888; }
+.status-active { background: #7a9a6e; box-shadow: 0 0 6px rgba(122,154,110,0.35); }
+.status-idle { background: #b8aa98; }
+
+/* ── Title refinement ── */
+h1 {
+  font-size: 2.2rem !important;
+  font-style: italic;
+  color: var(--text-primary) !important;
+  animation: titleIn 0.8s ease both;
+}
+@keyframes titleIn {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
 </style>
 """,
     unsafe_allow_html=True,
