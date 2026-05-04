@@ -422,6 +422,55 @@ if "pending_routing" not in st.session_state:
     st.session_state.pending_routing = None  # {"prompt": ..., "task_prompt": ..., "visible": ..., "route": ...}
 if "orchestrator" not in st.session_state:
     st.session_state.orchestrator = None  # lazy-init OpenAIOrchestratedAgent
+if "last_submitted_input" not in st.session_state:
+    st.session_state.last_submitted_input = ""
+
+
+def get_agent_state():
+    """Derive explicit agent state from session_state flags.
+
+    Returns one of:
+        idle      — no task active
+        running   — task queued, waiting for first output (backend thinking / tool exec)
+        streaming — output chunks arriving
+        stopping  — user requested stop, waiting for backend to confirm
+        error     — backend reported an error
+    """
+    if not st.session_state.agent_running:
+        return "idle"
+    if st.session_state.stop_requested:
+        return "stopping"
+    if st.session_state.stream_started:
+        return "streaming"
+    return "running"
+
+
+def reset_agent_state():
+    """Reset all agent-related session_state flags to idle defaults."""
+    st.session_state.agent_running = False
+    st.session_state.stream_started = False
+    st.session_state.stop_requested = False
+    st.session_state.stop_requested_at = 0
+    st.session_state.display_queue = None
+    st.session_state.partial_response = ""
+    st.session_state.current_turn = 0
+    st.session_state.task_id = ""
+    st.session_state.scroll_event = 0
+
+
+def start_agent_task(display_queue):
+    """Initialize agent state for a new task — guards against duplicate submit."""
+    if st.session_state.agent_running:
+        return False  # already running, reject duplicate
+    st.session_state.display_queue = display_queue
+    st.session_state.agent_running = True
+    st.session_state.stream_started = False
+    st.session_state.stop_requested = False
+    st.session_state.partial_response = ""
+    st.session_state.current_turn = 0
+    st.session_state.scroll_event = 0
+    st.session_state.pending_routing = None
+    return True
 
 
 def get_history_files():
@@ -792,11 +841,8 @@ def render_sidebar():
         # 清空附件
         if "uploaded_files" in st.session_state:
             st.session_state.uploaded_files = []
-        # 重置streaming状态
-        st.session_state.agent_running = False
-        st.session_state.display_queue = None
-        st.session_state.partial_response = ""
-        st.session_state.task_id = ""
+        # 重置agent状态
+        reset_agent_state()
         # 停止当前任务并清空后端历史
         agent.abort()
         if hasattr(agent, "history"):
@@ -1126,6 +1172,10 @@ def poll_agent_output():
                 st.session_state.partial_response = item.get("next", st.session_state.partial_response)
                 st.session_state.agent_running = False
                 return True
+            if item.get("event") == "error":
+                st.session_state.partial_response = item.get("error", st.session_state.partial_response)
+                st.session_state.agent_running = False
+                return True
             if "done" in item:
                 st.session_state.partial_response = item["done"]
                 st.session_state.agent_running = False
@@ -1148,6 +1198,10 @@ def poll_agent_output():
             st.session_state.partial_response = item.get("next", st.session_state.partial_response)
             st.session_state.agent_running = False
             return True
+        if item.get("event") == "error":
+            st.session_state.partial_response = item.get("error", st.session_state.partial_response)
+            st.session_state.agent_running = False
+            return True
         if "done" in item:
             st.session_state.partial_response = item["done"]
             st.session_state.agent_running = False
@@ -1158,37 +1212,46 @@ def poll_agent_output():
 
 if st.session_state.agent_running:
     # ── Streaming UI ──
+    state = get_agent_state()
     with st.chat_message("assistant"):
-        # Stop button
-        can_stop = (
-            st.session_state.agent_running
-            and st.session_state.stream_started
-            and not st.session_state.stop_requested
-        )
+        # Stop button — enabled when running (thinking/tool-exec) or streaming
+        can_stop = state in ("running", "streaming")
+        stop_label = {"running": "⏹ 停止", "streaming": "⏹ 停止输出", "stopping": "⏹ 正在停止…"}.get(state, "⏹ 停止输出")
         if st.button(
-            "⏹ 停止输出",
+            stop_label,
             key="stop_generation_btn",
             disabled=not can_stop,
             type="primary" if can_stop else "secondary",
         ):
             agent.abort()
             st.session_state.stop_requested = True
+            st.session_state.stop_requested_at = time.time()
             st.rerun()
 
         live = st.container()
         response = st.session_state.partial_response
         current_turn = st.session_state.current_turn
-        cursor = "" if st.session_state.stop_requested else " ▌"
+        cursor = "" if state == "stopping" else " ▌"
 
         with live:
+            # ── State indicator (routing / thinking / streaming / stopping) ──
+            if state == "running":
+                st.caption("🤔 正在分析任务…")
+            elif state == "stopping" and not response:
+                st.caption("⏳ 正在停止…")
+            elif state == "stopping":
+                st.caption("⏳ 正在停止，已保留部分输出…")
+
             segs = fold_turns(response)
             n_done = max(0, len(segs) - 1)
             for i in range(n_done):
                 render_segments([segs[i]])
             if segs:
-                if should_show_live_turn(response, current_turn):
-                    status_text = "正在停止…" if st.session_state.stop_requested else f"LLM Running (Turn {current_turn}) ..."
-                    st.caption(status_text)
+                if state == "streaming" and should_show_live_turn(response, current_turn):
+                    st.caption(f"LLM Running (Turn {current_turn}) ...")
+                elif state == "running" and not response:
+                    # No output yet — show thinking state without empty fold
+                    pass
                 render_segments([segs[-1]], suffix=cursor)
                 st.session_state.scroll_event += 1
                 st.markdown(
@@ -1198,20 +1261,21 @@ if st.session_state.agent_running:
 
     # Drain queue
     done = poll_agent_output()
+
+    # ── Force-complete after stop timeout (bypass waiting for agent confirmation) ──
+    if not done and st.session_state.stop_requested:
+        elapsed = time.time() - st.session_state.get("stop_requested_at", time.time())
+        if elapsed > 1.5:
+            done = True
+
     if done:
         final_response = st.session_state.partial_response
+        if not final_response:
+            final_response = "(已停止)"
         st.session_state.msg_counter += 1
         st.session_state.messages.append({"role": "assistant", "content": final_response, "id": st.session_state.msg_counter})
         st.session_state.last_reply_time = int(time.time())
-        # Reset streaming state
-        st.session_state.agent_running = False
-        st.session_state.stream_started = False
-        st.session_state.stop_requested = False
-        st.session_state.display_queue = None
-        st.session_state.partial_response = ""
-        st.session_state.current_turn = 0
-        st.session_state.task_id = ""
-        st.session_state.scroll_event = 0
+        reset_agent_state()
         st.rerun()
 
     time.sleep(0.2)
@@ -1235,29 +1299,17 @@ if not st.session_state.agent_running:
                     else:
                         dispatch_agent = agent
                         st.toast("编排器不可用，使用经典模式")
-                    st.session_state.display_queue = dispatch_agent.put_task(
+                    dq = dispatch_agent.put_task(
                         pending["task_prompt"], source="user", run_id=st.session_state.task_id
                     )
-                    st.session_state.agent_running = True
-                    st.session_state.stream_started = False
-                    st.session_state.stop_requested = False
-                    st.session_state.partial_response = ""
-                    st.session_state.current_turn = 0
-                    st.session_state.scroll_event = 0
-                    st.session_state.pending_routing = None
+                    start_agent_task(dq)
                     st.rerun()
             with c2:
                 if st.button("直接执行", key="route_classic", use_container_width=True):
-                    st.session_state.display_queue = agent.put_task(
+                    dq = agent.put_task(
                         pending["task_prompt"], source="user", run_id=st.session_state.task_id
                     )
-                    st.session_state.agent_running = True
-                    st.session_state.stream_started = False
-                    st.session_state.stop_requested = False
-                    st.session_state.partial_response = ""
-                    st.session_state.current_turn = 0
-                    st.session_state.scroll_event = 0
-                    st.session_state.pending_routing = None
+                    start_agent_task(dq)
                     st.rerun()
             with c3:
                 st.caption("Planner 会先规划再执行，适合复杂任务。直接执行跳过规划步骤，更快但缺少验证闭环。")
@@ -1266,6 +1318,8 @@ if not st.session_state.agent_running:
     if prompt := st.chat_input("any task?"):
         task_prompt = build_prompt_with_attachments(prompt)
         visible_prompt = format_user_message(prompt)
+        # Preserve input for potential retry after failure
+        st.session_state.last_submitted_input = prompt
         st.session_state.msg_counter += 1
         st.session_state.messages.append({"role": "user", "content": visible_prompt, "id": st.session_state.msg_counter})
         if hasattr(agent, "_pet_req") and not prompt.startswith("/"):
@@ -1289,13 +1343,8 @@ if not st.session_state.agent_running:
             st.rerun()
         else:
             # Simple chat or routing disabled — dispatch directly to classic
-            st.session_state.display_queue = agent.put_task(task_prompt, source="user", run_id=task_id)
-            st.session_state.agent_running = True
-            st.session_state.stream_started = False
-            st.session_state.stop_requested = False
-            st.session_state.partial_response = ""
-            st.session_state.current_turn = 0
-            st.session_state.scroll_event = 0
+            dq = agent.put_task(task_prompt, source="user", run_id=task_id)
+            start_agent_task(dq)
             st.rerun()
 
 if st.session_state.autonomous_enabled:
