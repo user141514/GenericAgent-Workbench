@@ -75,6 +75,7 @@ memory/history_memory_inbox.md
 
 # Local launcher/setup scripts (machine-specific, not for distribution)
 *.bat
+start_streamlit_public.py
 
 # Claude Code local state
 .claude/
