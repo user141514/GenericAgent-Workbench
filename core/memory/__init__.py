@@ -1,6 +1,12 @@
 """Structured memory ledger package."""
 
 from .indexer import MemoryIndexer, chunk_text
+from .maintenance import (
+    build_scoped_memory_context,
+    dedup_inbox,
+    run_memory_maintenance,
+    score_inbox_entries,
+)
 from .reader import (
     STRUCTURED_MEMORY_ENV_VAR,
     build_memory_source_report,
@@ -32,8 +38,12 @@ __all__ = [
     "MemoryWriteTarget",
     "STRUCTURED_MEMORY_ENV_VAR",
     "build_memory_source_report",
+    "build_scoped_memory_context",
+    "dedup_inbox",
     "read_global_memory",
     "read_working_memory",
+    "run_memory_maintenance",
+    "score_inbox_entries",
     "search_structured_memory",
     "structured_memory_enabled",
 ]

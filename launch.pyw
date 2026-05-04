@@ -52,10 +52,24 @@ def get_last_reply_time():
 
 def idle_monitor():
     last_trigger_time = 0
+    last_maintenance_time = 0
     while True:
         time.sleep(5)
         try:
             now = time.time()
+            # ── Memory maintenance: runs every 10 min when idle (silent, no LLM) ──
+            if now - last_maintenance_time > 600:
+                try:
+                    from core.memory.maintenance import run_memory_maintenance
+                    report = run_memory_maintenance()
+                    if report["tasks"].get("dedup", {}).get("removed", 0) > 0:
+                        print(f'[Memory Maintenance] Dedup removed {report["tasks"]["dedup"]["removed"]} inbox duplicates')
+                    top = report["tasks"].get("top_entries", [])
+                    if top:
+                        print(f'[Memory Maintenance] Top entry: {top[0]["title"]} (score={top[0]["score"]})')
+                    last_maintenance_time = now
+                except Exception as e:
+                    print(f'[Memory Maintenance] Error: {e}')
             if now - last_trigger_time < 120: continue
             last_reply = get_last_reply_time()
             if now - last_reply > 1800:
