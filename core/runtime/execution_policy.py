@@ -215,8 +215,17 @@ def get_policy_mode() -> str:
     return _POLICY_MODE_DEFAULT
 
 
-def evaluate_operation(user_request: str, execution_plan: str = "", mode: str | None = None) -> PolicyDecision:
-    """Evaluate a task against high-risk patterns. Always returns allowed=True in observe mode."""
+def evaluate_operation(
+    user_request: str,
+    execution_plan: str = "",
+    mode: str | None = None,
+    policy: dict | None = None,
+) -> PolicyDecision:
+    """Evaluate a task against high-risk patterns AND optional skill ExecutionPolicy.
+
+    policy: dict from build_execution_policy_from_skills() / skill_activation.execution_policy.
+            disabled_tools, max_turns, max_prompt_chars, and route_override are merged.
+    """
     mode = mode or get_policy_mode()
     if mode == "off":
         return PolicyDecision(True, "none", [], "policy is off", mode)
@@ -226,23 +235,55 @@ def evaluate_operation(user_request: str, execution_plan: str = "", mode: str | 
     highest_risk = "none"
     _risk_order = {"none": 0, "medium": 1, "high": 2, "critical": 3}
 
+    # ── Phase 1: text-pattern risk scan (P2-3) ──
     for pattern, risk_level, description in _HIGH_RISK_PATTERNS:
         if re.search(pattern, combined, re.IGNORECASE):
             matched.append(f"{risk_level}:{description}")
             if _risk_order.get(risk_level, 0) > _risk_order.get(highest_risk, 0):
                 highest_risk = risk_level
 
+    # ── Phase 2: SkillEffects policy merge (P2-4) ──
+    policy = policy or {}
+    skill_warnings = []
+
+    disabled_tools = list(policy.get("disabled_tools") or [])
+    if disabled_tools:
+        skill_warnings.append(f"skill_disabled_tools: {', '.join(disabled_tools[:5])}")
+
+    max_turns = policy.get("max_turns")
+    if max_turns is not None:
+        skill_warnings.append(f"skill_max_turns: {max_turns}")
+
+    route_override = policy.get("route_override")
+    if route_override:
+        skill_warnings.append(f"skill_route_override: {route_override}")
+
+    policy_source_skills = list(policy.get("source_skills") or [])
+    if policy_source_skills:
+        skill_warnings.append(f"source_skills: {', '.join(policy_source_skills[:5])}")
+
+    # Policy warnings from build (e.g. conflicts, unknown skills)
+    build_warnings = list(policy.get("warnings") or [])
+    if build_warnings:
+        skill_warnings.extend(build_warnings)
+
+    matched.extend(skill_warnings)
+
+    # Merge: if policy has constraints, consider them in risk level
+    if policy_source_skills and highest_risk == "none":
+        highest_risk = "medium"  # having active skill policy raises baseline awareness
+
     if not matched:
-        return PolicyDecision(True, "none", [], "no risk patterns matched", mode)
+        return PolicyDecision(True, "none", [], "no risk patterns matched" if not policy_source_skills else f"policy active ({len(policy_source_skills)} skills), no additional risk", mode)
 
     if mode == "observe":
-        return PolicyDecision(True, highest_risk, matched, f"observed {len(matched)} risk pattern(s), not blocked", mode)
+        return PolicyDecision(True, highest_risk, matched, f"observed {len(matched)} signal(s), not blocked", mode)
     elif mode == "soft":
         if highest_risk in ("critical", "high"):
-            return PolicyDecision(False, highest_risk, matched, f"soft-blocked: {len(matched)} high/critical pattern(s)", mode)
+            return PolicyDecision(False, highest_risk, matched, f"soft-blocked: {len(matched)} high/critical signal(s)", mode)
         return PolicyDecision(True, highest_risk, matched, f"allowed in soft mode: risk level {highest_risk}", mode)
     elif mode == "hard":
         if highest_risk != "none":
-            return PolicyDecision(False, highest_risk, matched, f"hard-blocked: {len(matched)} risk pattern(s)", mode)
+            return PolicyDecision(False, highest_risk, matched, f"hard-blocked: {len(matched)} signal(s)", mode)
         return PolicyDecision(True, "none", [], "no risk patterns matched", mode)
     return PolicyDecision(True, highest_risk, matched, "fallback: allowed", mode)

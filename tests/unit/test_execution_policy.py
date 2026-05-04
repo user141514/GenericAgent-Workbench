@@ -145,6 +145,84 @@ def test_mykey_access_in_plan(monkeypatch):
     assert decision.risk_level == "high"
 
 
+# ── P2-4: SkillEffects policy merge ──────────────────────────────
+
+
+def test_evaluate_with_empty_policy_no_effect(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    decision = evaluate_operation("帮我写个 hello world", "", policy={})
+    assert decision.allowed is True
+    assert decision.risk_level == "none"
+
+
+def test_evaluate_with_policy_records_source_skills(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    policy = {"source_skills": ["code_review_skill"], "disabled_tools": [], "warnings": []}
+    decision = evaluate_operation("帮我写个 hello world", "", policy=policy)
+    assert decision.allowed is True
+    assert any("source_skills" in m for m in decision.matched_patterns)
+
+
+def test_evaluate_with_disabled_tools(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    policy = {
+        "source_skills": ["security_skill"],
+        "disabled_tools": ["code_run", "shell_exec"],
+        "warnings": [],
+    }
+    decision = evaluate_operation("读取 README.md", "", policy=policy)
+    assert decision.allowed is True
+    assert any("disabled_tools" in m for m in decision.matched_patterns)
+
+
+def test_evaluate_with_max_turns_policy(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    policy = {"source_skills": ["bounded_skill"], "max_turns": 5, "warnings": []}
+    decision = evaluate_operation("重构整个项目", "", policy=policy)
+    assert any("max_turns" in m for m in decision.matched_patterns)
+
+
+def test_evaluate_with_route_override(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    policy = {"source_skills": ["router_skill"], "route_override": "planner_executor", "warnings": []}
+    decision = evaluate_operation("test query", "", policy=policy)
+    assert any("route_override" in m for m in decision.matched_patterns)
+
+
+def test_evaluate_policy_warnings_merged(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    policy = {
+        "source_skills": ["conflict_skill"],
+        "warnings": ["route_override conflict: kept planner, ignored chat from skill_b"],
+    }
+    decision = evaluate_operation("test", "", policy=policy)
+    assert any("route_override conflict" in m for m in decision.matched_patterns)
+
+
+def test_policy_raises_baseline_risk(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    # Having active skill policy raises baseline from "none" to "medium"
+    policy = {"source_skills": ["test_skill"], "warnings": []}
+    decision = evaluate_operation("普通问题", "", policy=policy)
+    assert decision.risk_level == "medium"
+
+
+def test_policy_plus_text_risk_keeps_higher(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "observe")
+    # Text pattern is critical (rm -rf), policy is medium → keeps critical
+    policy = {"source_skills": ["test_skill"], "warnings": []}
+    decision = evaluate_operation("rm -rf /tmp/build", "", policy=policy)
+    assert decision.risk_level == "critical"
+
+
+def test_soft_block_with_policy(monkeypatch):
+    monkeypatch.setenv(POLICY_ENV_VAR, "soft")
+    policy = {"source_skills": ["security_skill"], "disabled_tools": ["pip"], "warnings": []}
+    decision = evaluate_operation("git reset --hard HEAD", "", policy=policy)
+    assert decision.allowed is False  # critical + soft = block
+    assert "soft-blocked" in decision.reason
+
+
 # ── PolicyDecision dataclass ──────────────────────────────────────
 
 

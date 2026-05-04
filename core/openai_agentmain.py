@@ -1468,10 +1468,11 @@ class OpenAIOrchestratedAgent:
         original_user_request: str | None = None,
         store: Any | None = None,
     ) -> str:
-        # ── P2-3: ExecutionPolicy evaluation ──
+        # ── P2-3 + P2-4: ExecutionPolicy evaluation with skill effects ──
         from .runtime.execution_policy import evaluate_operation, get_policy_mode as _get_policy_mode
         policy_mode = _get_policy_mode()
-        policy_decision = evaluate_operation(user_request, execution_plan, mode=policy_mode)
+        active_policy = getattr(self, "_active_policy", None) or {}
+        policy_decision = evaluate_operation(user_request, execution_plan, mode=policy_mode, policy=active_policy)
         if self._active_span_id is not None and self.active_profiler is not None:
             self.active_profiler.record_event(
                 "execution_policy_check",
@@ -1706,6 +1707,7 @@ class OpenAIOrchestratedAgent:
         self, original_user_request: str, executor_progress=None,
         graph_mode: str = "full",
     ) -> dict[str, Any]:
+        self._active_policy = None  # P2-4: reset per-run
         if graph_mode == "dynamic":
             return self._build_dynamic_graph(original_user_request, executor_progress)
         # Return cached graph if model hasn't changed since last build.
@@ -2468,6 +2470,8 @@ class OpenAIOrchestratedAgent:
                         skill_policy_max_prompt_chars = skill_activation.execution_policy.get("max_prompt_chars")
                         skill_policy_warnings = list(skill_activation.policy_warnings or [])
                         skill_memory_write_allowed = bool(skill_activation.memory_write_allowed)
+                        # ── P2-4: store policy for runtime enforcement ──
+                        self._active_policy = skill_activation.execution_policy
                         skill_policy_preview = {
                             "source_skills": skill_policy_source_skills,
                             "disabled_tools": skill_policy_disabled_tools,
