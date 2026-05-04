@@ -1473,7 +1473,7 @@ class OpenAIOrchestratedAgent:
         policy_mode = _get_policy_mode()
         active_policy = getattr(self, "_active_policy", None) or {}
         policy_decision = evaluate_operation(user_request, execution_plan, mode=policy_mode, policy=active_policy)
-        if self._active_span_id is not None and self.active_profiler is not None:
+        if getattr(self, "_active_span_id", None) is not None and self.active_profiler is not None:
             self.active_profiler.record_event(
                 "execution_policy_check",
                 kind="policy",
