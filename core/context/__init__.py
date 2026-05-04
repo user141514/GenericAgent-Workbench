@@ -9,8 +9,11 @@ import os
 
 
 def _context_enabled() -> bool:
-    """Master kill-switch. Checked by every module entry point."""
-    return os.environ.get("GA_CONTEXT_RUNTIME_ENABLED", "0") == "1"
+    """Master kill-switch. Checked by every module entry point.
+
+    Default enabled (preview mode). Set GA_CONTEXT_RUNTIME_ENABLED=0 to disable.
+    """
+    return os.environ.get("GA_CONTEXT_RUNTIME_ENABLED", "1") == "1"
 
 
 def _context_mode() -> str:
