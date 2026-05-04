@@ -1605,12 +1605,23 @@ class OpenAIOrchestratedAgent:
                     f"To reference an existing artifact, use its key name.\n"
                     f"To create or update an artifact, write the file and mention [artifact: <key>] in your output.\n"
                 )
+            # ── Short recent context for Classic handoff (P0c) ──
+            recent_context_block = ""
+            if os.environ.get("GENERIC_AGENT_RECENT_TURNS", "1") != "0":
+                from core.context.recent_turns import build_recent_conversation_block as _build_short
+                recent_context_block = _build_short(self.input_items, max_turns=3, max_chars=3000)
+                if recent_context_block:
+                    recent_context_block = (
+                        "[RECENT CONTEXT — the conversation leading up to this handoff]\n"
+                        f"{recent_context_block}\n"
+                    )
             prompt = (
                 "You are the execution engine inside a multi-agent workflow.\n"
                 "Execute the task with your normal GenericAgent tools and internal loop.\n"
                 "Focus on doing the work, not re-routing or re-explaining the workflow.\n"
                 "When you finish, provide a concise execution report with actions taken, evidence gathered, and remaining gaps.\n"
-                f"{workspace_block}\n"
+                f"{workspace_block}"
+                f"{recent_context_block}"
                 f"Original user request:\n{original_request}\n\n"
                 f"Execution plan or corrective follow-up:\n{execution_plan}"
             )
