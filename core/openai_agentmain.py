@@ -141,6 +141,100 @@ def _extract_summary_line(text: str) -> str:
     return ""
 
 
+def _build_context_runtime(
+    raw_query: str = "",
+    route: str | None = None,
+    project_root: str | None = None,
+    profiler=None,
+) -> str:
+    """Build and optionally inject a Context Packet for the current task.
+
+    Gated by GA_CONTEXT_RUNTIME_ENABLED and GA_CONTEXT_RUNTIME_MODE.
+    Chat route always returns empty string.
+    Preview mode writes JSON to disk, does NOT inject.
+    Inject mode returns the serialized packet for injection.
+    """
+    import os as _os
+    import json as _json
+    import time as _time
+
+    enabled = _os.environ.get("GA_CONTEXT_RUNTIME_ENABLED", "0") == "1"
+    if not enabled:
+        return ""
+
+    mode = _os.environ.get("GA_CONTEXT_RUNTIME_MODE", "preview")
+    if mode == "off":
+        return ""
+
+    # Chat route never gets context
+    if not route or route == "chat":
+        return ""
+
+    try:
+        from core.context.workspace_probe import WorkspaceProbe
+        from core.context.project_identity import detect_project
+        from core.context.runtime_identity import detect_runtime
+        from core.context.memory_reader import MemoryReader
+        from core.context.context_builder import ContextBuilder
+
+        max_chars = int(_os.environ.get("GA_CONTEXT_PACKET_MAX_CHARS", "4000"))
+        resolved_root = project_root or _os.path.abspath(
+            _os.path.join(_os.path.dirname(__file__), "..")
+        )
+
+        snap = WorkspaceProbe.probe()
+        pid = detect_project(snap.git_root) if snap and snap.git_root else detect_project(resolved_root)
+        rt = detect_runtime(agent_backend="openai-agents")
+        reader = MemoryReader(project_root=resolved_root)
+        bundle = reader.scoped_query(raw_query or "", max_chars=2000)
+
+        builder = ContextBuilder(max_chars=max_chars, policy_mode=mode)
+        packet = builder.build(
+            workspace=snap,
+            project=pid,
+            runtime=rt,
+            memory_bundle=bundle,
+            target_route=route,
+        )
+
+        if packet is None:
+            return ""
+
+        # Write preview JSON in all modes except off
+        preview_dir = _os.environ.get(
+            "GA_CONTEXT_PREVIEW_DIR",
+            _os.path.join(resolved_root, "temp", "context_previews"),
+        )
+        _os.makedirs(preview_dir, exist_ok=True)
+        run_id = _os.environ.get("GA_PROFILE_RUN_ID", "") or f"ctx_{int(_time.time())}"
+        preview_path = _os.path.join(preview_dir, f"{run_id}.json")
+        try:
+            preview_data = {
+                "generated_at": packet.generated_at,
+                "target_route": packet.target_route,
+                "policy_mode": packet.policy_mode,
+                "total_chars": packet.total_chars,
+                "source_breakdown": packet.source_breakdown,
+                "workspace_cwd": packet.workspace.cwd if packet.workspace else None,
+                "project_id": packet.project.project_id if packet.project else None,
+                "project_name": packet.project.project_name if packet.project else None,
+                "session_id": packet.runtime.session_id if packet.runtime else None,
+            }
+            with open(preview_path, "w", encoding="utf-8") as f:
+                _json.dump(preview_data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+        if mode == "preview":
+            return ""  # preview: log only, no injection
+
+        # Inject mode
+        return builder.serialize(packet)
+
+    except Exception:
+        return ""
+
+
 def _working_memory_message(history: list[str]) -> str:
     if not history:
         return ""
@@ -2337,6 +2431,17 @@ class OpenAIOrchestratedAgent:
                 if working_memory:
                     inputs.append({"role": "system", "content": working_memory})
                 _stop_manual_span(memory_span)
+                # ── Context Runtime injection (route-gated, env-var-controlled) ──
+                context_span = _start_manual_span(profiler, "context_runtime", kind="memory", metadata={"route": route_target})
+                context_packet_text = _build_context_runtime(
+                    raw_query=raw_query,
+                    route=route_target,
+                    project_root=PROJECT_ROOT,
+                    profiler=profiler,
+                )
+                if context_packet_text:
+                    inputs.append({"role": "system", "content": context_packet_text})
+                _stop_manual_span(context_span)
                 selected_agent = agents["root"]
                 if route_target == "chat":
                     selected_agent = agents["chat"]

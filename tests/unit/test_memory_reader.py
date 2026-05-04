@@ -1,98 +1,132 @@
-"""Unit tests for core/memory/reader.py (P2-2)."""
-
+"""Phase 4: MemoryReader unit tests."""
 import os
-
+import time
 import pytest
-
-from core.memory.reader import (
-    STRUCTURED_MEMORY_ENV_VAR,
-    build_memory_source_report,
-    read_global_memory,
-    read_working_memory,
-    search_structured_memory,
-    structured_memory_enabled,
-)
+from core.context.memory_reader import MemoryReader, MemoryBlock, MemoryBundle
 
 
-# ── structured_memory_enabled ─────────────────────────────────────
+@pytest.fixture
+def project_root():
+    """Use the actual project root for L1/L2 reads."""
+    return os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 
 
-def test_structured_disabled_by_default(monkeypatch):
-    monkeypatch.delenv(STRUCTURED_MEMORY_ENV_VAR, raising=False)
-    assert structured_memory_enabled() is False
+@pytest.fixture
+def reader(project_root):
+    return MemoryReader(project_root=project_root)
 
 
-def test_structured_enabled_via_env(monkeypatch):
-    monkeypatch.setenv(STRUCTURED_MEMORY_ENV_VAR, "1")
-    assert structured_memory_enabled() is True
+class TestReadGlobalMemory:
+    """L1/L2 reads — always available, not gated by env var."""
+
+    def test_read_global_memory_returns_l1_l2(self, reader):
+        mem = reader.read_global_memory()
+        assert "l1" in mem
+        assert "l2" in mem
+        assert len(mem["l1"]) > 0
+        assert len(mem["l2"]) > 0
+
+    def test_read_global_memory_blocks(self, reader):
+        blocks = reader.read_global_memory_blocks()
+        assert len(blocks) >= 1
+        for b in blocks:
+            assert b.source_priority == "primary"
+            assert b.source in ("L1", "L2")
+            assert b.relevance_score > 0.0
+
+    def test_global_memory_readable_even_when_disabled(self, reader):
+        """L1/L2 reads work regardless of env var."""
+        saved = os.environ.pop("GA_CONTEXT_RUNTIME_ENABLED", None)
+        try:
+            mem = reader.read_global_memory()
+            assert len(mem["l1"]) > 0  # still readable
+        finally:
+            if saved:
+                os.environ["GA_CONTEXT_RUNTIME_ENABLED"] = saved
 
 
-# ── read_global_memory ────────────────────────────────────────────
+class TestReadStructuredMemory:
+    """Structured memory reads — gated, supplementary."""
+
+    def test_read_structured_returns_supplementary(self, reader):
+        os.environ["GA_CONTEXT_RUNTIME_ENABLED"] = "1"
+        try:
+            blocks = reader.read_structured_memory("python project")
+            for b in blocks:
+                assert b.source == "structured:supplementary"
+                assert b.source_priority == "supplementary"
+        finally:
+            os.environ.pop("GA_CONTEXT_RUNTIME_ENABLED", None)
+
+    def test_read_structured_empty_when_disabled(self, reader):
+        os.environ.pop("GA_CONTEXT_RUNTIME_ENABLED", None)
+        blocks = reader.read_structured_memory("anything")
+        assert blocks == []
 
 
-def test_read_global_memory_from_real_project():
-    """Read the actual project memory files — they exist on disk."""
-    result = read_global_memory()
-    assert result["global_mem_insight"] is not None
-    assert isinstance(result["sources"], list)
-    assert len(result["sources"]) >= 1
-    assert result["total_chars"] > 0
+class TestMemoryBundle:
+    """MemoryBundle dataclass invariants."""
+
+    def test_bundle_sorted_by_priority_then_score(self):
+        blocks = [
+            MemoryBlock(source="task", source_priority="volatile", content="v1", relevance_score=0.9),
+            MemoryBlock(source="L1", source_priority="primary", content="p1", relevance_score=0.5),
+            MemoryBlock(source="structured:supplementary", source_priority="supplementary", content="s1", relevance_score=0.8),
+            MemoryBlock(source="L2", source_priority="primary", content="p2", relevance_score=0.9),
+        ]
+        bundle = MemoryBundle(blocks=blocks)
+        priorities = [b.source_priority for b in bundle.blocks]
+        assert priorities == ["primary", "primary", "supplementary", "volatile"]
+
+    def test_bundle_total_chars(self):
+        blocks = [
+            MemoryBlock(source="L1", source_priority="primary", content="hello"),
+            MemoryBlock(source="L2", source_priority="primary", content="world"),
+        ]
+        bundle = MemoryBundle(blocks=blocks)
+        assert bundle.total_chars == 10
+
+    def test_bundle_source_counts(self):
+        blocks = [
+            MemoryBlock(source="L1", source_priority="primary", content="a"),
+            MemoryBlock(source="L1", source_priority="primary", content="b"),
+            MemoryBlock(source="L2", source_priority="primary", content="c"),
+        ]
+        bundle = MemoryBundle(blocks=blocks)
+        assert bundle.source_counts.get("L1") == 2
+        assert bundle.source_counts.get("L2") == 1
+
+    def test_bundle_queried_at_recent(self):
+        bundle = MemoryBundle(blocks=[])
+        assert abs(bundle.queried_at - time.time()) < 2.0
 
 
-def test_read_global_memory_has_l1_l2_labels():
-    result = read_global_memory()
-    labels = {s["label"] for s in result["sources"]}
-    assert "L1" in labels
+class TestMemoryBlock:
+    """MemoryBlock dataclass invariants."""
+
+    def test_chars_auto_computed(self):
+        b = MemoryBlock(source="L1", source_priority="primary", content="hello world")
+        assert b.chars == 11
+
+    def test_relevance_score_clamped(self):
+        b1 = MemoryBlock(source="L1", source_priority="primary", content="x", relevance_score=1.5)
+        assert b1.relevance_score == 1.0
+        b2 = MemoryBlock(source="L1", source_priority="primary", content="x", relevance_score=-0.5)
+        assert b2.relevance_score == 0.0
+
+    def test_metadata_defaults_empty(self):
+        b = MemoryBlock(source="L1", source_priority="primary", content="x")
+        assert b.metadata == {}
 
 
-# ── read_working_memory ────────────────────────────────────────────
+class TestScopedQuery:
+    """End-to-end scoped_query with project root."""
 
+    def test_scoped_query_includes_primary(self, reader):
+        bundle = reader.scoped_query("test", max_chars=2000)
+        sources = {b.source for b in bundle.blocks}
+        assert "L1" in sources or "L2" in sources
 
-def test_read_working_memory_empty():
-    assert read_working_memory([]) == ""
-
-
-def test_read_working_memory_with_items():
-    result = read_working_memory(["turn 1", "turn 2"], max_items=2)
-    assert "[WORKING MEMORY]" in result
-    assert "turn 1" in result
-    assert "turn 2" in result
-
-
-def test_read_working_memory_truncates():
-    result = read_working_memory([f"line {i}" for i in range(100)], max_items=5)
-    assert "line 0" not in result
-    assert "line 95" in result
-
-
-# ── search_structured_memory ──────────────────────────────────────
-
-
-def test_search_disabled_by_default():
-    result = search_structured_memory("test query")
-    assert result["disabled"] is True
-    assert result["results"] == []
-
-
-def test_search_missing_db(monkeypatch):
-    monkeypatch.setenv(STRUCTURED_MEMORY_ENV_VAR, "1")
-    result = search_structured_memory("test", db_path="/nonexistent/catalog.sqlite")
-    assert result["disabled"] is False
-    assert result["error"] == "database not found"
-
-
-# ── build_memory_source_report ────────────────────────────────────
-
-
-def test_report_has_expected_keys():
-    report = build_memory_source_report()
-    assert "l1_chars" in report
-    assert "l2_chars" in report
-    assert "structured_enabled" in report
-    assert "total_sources" in report
-
-
-def test_report_values_are_positive():
-    report = build_memory_source_report()
-    assert report["total_sources"] >= 1
-    assert isinstance(report["l1_chars"], int)
+    def test_scoped_query_respects_max_chars(self, reader):
+        bundle = reader.scoped_query("test", max_chars=200)
+        assert bundle.total_chars <= 200
