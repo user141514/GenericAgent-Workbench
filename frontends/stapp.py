@@ -294,6 +294,34 @@ body, .stApp, [data-testid="stAppViewContainer"],
 .status-active { background: #7a9a6e; box-shadow: 0 0 6px rgba(122,154,110,0.35); }
 .status-idle { background: #b8aa98; }
 
+/* ── Stream cursor blink ── */
+@keyframes cursor-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0; }
+}
+#stream-cursor { font-weight: 200; color: var(--accent); }
+
+/* ── Jump-to-bottom button ── */
+#jump-to-bottom {
+  position: fixed;
+  bottom: 100px;
+  right: 30px;
+  z-index: 9999;
+  background: var(--accent);
+  color: #fff;
+  padding: 6px 14px;
+  border-radius: 20px;
+  cursor: pointer;
+  display: none;
+  font-size: 0.85rem;
+  font-family: var(--font-body);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+  transition: opacity 0.2s;
+}
+#jump-to-bottom:hover {
+  background: var(--accent-hover);
+}
+
 /* ── Title refinement ── */
 h1 {
   font-size: 2.2rem !important;
@@ -424,6 +452,8 @@ if "orchestrator" not in st.session_state:
     st.session_state.orchestrator = None  # lazy-init OpenAIOrchestratedAgent
 if "last_submitted_input" not in st.session_state:
     st.session_state.last_submitted_input = ""
+if "task_start_time" not in st.session_state:
+    st.session_state.task_start_time = 0
 
 
 def get_agent_state():
@@ -456,6 +486,7 @@ def reset_agent_state():
     st.session_state.current_turn = 0
     st.session_state.task_id = ""
     st.session_state.scroll_event = 0
+    st.session_state.task_start_time = 0
 
 
 def start_agent_task(display_queue):
@@ -470,6 +501,7 @@ def start_agent_task(display_queue):
     st.session_state.current_turn = 0
     st.session_state.scroll_event = 0
     st.session_state.pending_routing = None
+    st.session_state.task_start_time = time.time()
     return True
 
 
@@ -1118,15 +1150,43 @@ _js_scroll_fix = (
     "var b=m.querySelector('.block-container');if(!b)return;"
     "b.scrollIntoView({block:'end',behavior:'instant'});"
     "};"
+    # ── Create jump-to-bottom button (once) ──
+    "var jumpBtn=d.createElement('div');"
+    "jumpBtn.id='jump-to-bottom';"
+    "jumpBtn.textContent='↓ 回到底部';"
+    "jumpBtn.onclick=function(){doScroll();};"
+    "d.body.appendChild(jumpBtn);"
+    # ── Cursor & jump-button control ──
+    "var updateCursorUI=function(){"
+    "var cursor=d.querySelector('#stream-cursor');"
+    "var marker=d.querySelector('#stream-marker');"
+    "var active=marker&&marker.getAttribute('data-stream-active')==='1';"
+    "var near=isNearBottom();"
+    "if(cursor){"
+    "cursor.style.opacity=(active&&near)?'1':'0';"
+    "}"
+    "if(jumpBtn){"
+    "jumpBtn.style.display=(active&&!near)?'block':'none';"
+    "}"
+    "};"
+    # ── User scroll listener ──
+    "var scrollContainer=d.querySelector('section.main');"
+    "if(scrollContainer){"
+    "scrollContainer.addEventListener('scroll',function(){"
+    "updateCursorUI();"
+    "},{passive:true});"
+    "}"
+    # ── MutationObserver for stream updates ──
     "var obs=new MutationObserver(function(){"
     "var marker=d.querySelector('#stream-marker');"
     "if(!marker)return;"
     "var active=marker.getAttribute('data-stream-active');"
-    "if(active!=='1')return;"
+    "if(active!=='1'){updateCursorUI();return;}"
     "var se=parseInt(marker.getAttribute('data-scroll-event')||'0',10);"
     "if(se===lastScrollEvent)return;"
     "lastScrollEvent=se;"
     "if(isNearBottom())doScroll();"
+    "updateCursorUI();"
     "});"
     "var target=d.querySelector('section.main .block-container')||d.body;"
     "obs.observe(target,{childList:1,subtree:1,characterData:1});"
@@ -1234,9 +1294,29 @@ if st.session_state.agent_running:
         cursor = "" if state == "stopping" else " ▌"
 
         with live:
-            # ── State indicator (routing / thinking / streaming / stopping) ──
+            # ── Elapsed-aware status text ──
+            elapsed = time.time() - st.session_state.get("task_start_time", time.time())
+            esec = int(elapsed)
+
             if state == "running":
-                st.caption("🤔 正在分析任务…")
+                if esec < 8:
+                    st.caption("🤔 正在分析任务…")
+                elif esec < 25:
+                    st.caption(f"🧐 还在思考… ({esec}s)")
+                elif esec < 60:
+                    st.caption(f"⏳ 复杂任务，需要更多时间… ({esec}s)")
+                else:
+                    st.caption(f"🐢 仍在处理，可以等待或点击停止重试 ({esec}s)")
+            elif state == "streaming":
+                turn_tag = f"Turn {current_turn} · " if current_turn else ""
+                if esec < 10:
+                    st.caption(f"💭 {turn_tag}输出中…")
+                elif esec < 30:
+                    st.caption(f"📝 {turn_tag}处理中… ({esec}s)")
+                elif esec < 90:
+                    st.caption(f"☕ {turn_tag}仍在处理… ({esec}s)")
+                else:
+                    st.caption(f"🐢 {turn_tag}复杂任务处理中… ({esec}s)")
             elif state == "stopping" and not response:
                 st.caption("⏳ 正在停止…")
             elif state == "stopping":
@@ -1248,11 +1328,18 @@ if st.session_state.agent_running:
                 render_segments([segs[i]])
             if segs:
                 if state == "streaming" and should_show_live_turn(response, current_turn):
-                    st.caption(f"LLM Running (Turn {current_turn}) ...")
-                elif state == "running" and not response:
-                    # No output yet — show thinking state without empty fold
+                    # Keep classic turn marker in stream content for fold_turns parsing
                     pass
-                render_segments([segs[-1]], suffix=cursor)
+                elif state == "running" and not response:
+                    # No output yet — only show status text above
+                    pass
+                render_segments([segs[-1]])
+                # Cursor rendered as a separate HTML element so JS can control visibility
+                if cursor:
+                    st.markdown(
+                        f'<span id="stream-cursor" style="animation: cursor-blink 1s step-end infinite;">{cursor}</span>',
+                        unsafe_allow_html=True,
+                    )
                 st.session_state.scroll_event += 1
                 st.markdown(
                     f'<div id="stream-marker" data-stream-active="1" data-scroll-event="{st.session_state.scroll_event}"></div>',
