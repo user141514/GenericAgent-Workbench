@@ -63,3 +63,10 @@ ljqCtrl.Click(px, py)
 - **⚠️ 窗口坐标转换陷阱**：使用 `win32gui.GetWindowRect(hwnd)` 获取的矩形包含标题栏和边框，而截图内容是客户区。点击截图内元素时，必须用 `win32gui.ClientToScreen(hwnd, (0, 0))` 获取客户区原点的屏幕坐标，再加上截图内坐标。禁止直接用 GetWindowRect 左上角 + 截图坐标。
 - **⚠️ win32 DPI 坐标陷阱**：未调用 `SetProcessDPIAware()` 时，`GetWindowRect/ClientToScreen/GetClientRect` 等拿到的窗口/客户区坐标通常是**逻辑坐标**；若后续截图或 `ljqCtrl` 使用的是物理像素，必须统一做 `坐标 / ljqCtrl.dpi_scale`。等价方案：先 `SetProcessDPIAware()`，之后全流程直接使用 raw 物理坐标，禁止逻辑/物理坐标混用。
 - **文本输入**：ljqCtrl 无 TypeText/SendKeys。向输入框键入文本：先点击/三击选中字段，再 `pyperclip.copy('文本'); ljqCtrl.Press('ctrl+v')`。
+
+## Learnings
+- 2026-05-03: 一律使用物理坐标传给 `ljqCtrl.Click/SetCursorPos`，禁止传入逻辑坐标；从 `pygetwindow` 获取的逻辑坐标需先 `/ dpi_scale` 转换
+- 2026-05-03: `win32gui.GetWindowRect(hwnd)` 返回包含标题栏+边框的矩形，截图内容是客户区；点击截图内元素必须用 `win32gui.ClientToScreen(hwnd, (0,0))` 获取客户区原点再加截图内坐标，禁止直接用 GetWindowRect 左上角+截图坐标
+- 2026-05-03: 未调用 `SetProcessDPIAware()` 时 win32 API 返回逻辑坐标，与 ljqCtrl 物理坐标混用造成偏移；方案一：先 `SetProcessDPIAware()` 统一物理坐标；方案二：所有 win32 坐标 `/ dpi_scale`
+- 2026-05-03: 模拟操作前必须 `gw.getWindowsWithTitle('标题')[0].activate()` 确保窗口在前台，否则点击可能落到错误窗口
+- 2026-05-03: 所有相对偏移像素值（如"向右移动 10 像素"）同样需要 `/ dpi_scale`，高 DPI 下逻辑像素与物理像素不一致

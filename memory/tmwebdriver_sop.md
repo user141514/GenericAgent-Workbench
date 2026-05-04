@@ -119,3 +119,9 @@ web_scan失败时按序排查（自动检测优先，用户参与放最后）：
 ③扩展没装？→读Chrome用户目录下`Secure Preferences`→`extensions.settings`中找`path`含`tmwd_cdp_bridge`的条目
   找到→扩展已装，排查其他原因；没找到→走web_setup_sop
 ④以上都正常仍连不上→请求用户协助
+
+## Learnings
+- 2026-05-03: web_execute_js 中使用 `await` 时必须显式 `return` 才能拿到返回值，底层 async 包裹不自动返回最后表达式结果
+- 2026-05-03: CDP batch 命令中前序命令失败时，后续 `$N` 引用会静默变成 undefined，必须检查 results 数组中每项的 ok 状态再做链式引用
+- 2026-05-03: autofill 释放的前置条件：必须先 CDP `Page.bringToFront` 切 tab 到前台，Chrome 仅在前台 tab 释放 autofill 保护值，后台 tab 物理点击无效
+- 2026-05-03: batch 文件上传缩小时窗原则：缩短"发现 input → setFileInputFiles"的时间窗，优先同 batch 完成；瞬态 input 不可靠时用 DOM 事件监听，猴子补丁仅作兜底

@@ -93,3 +93,13 @@
 ---
 
 **准则生效指标：** diff中不必要变更减少，过度复杂导致的重写减少，澄清问题在实现前而非错误后出现，验证工具输出可追溯。
+
+## Learnings
+
+### 项目特有验证坑点
+
+- 2026-05-03: **Streamlit 前端改动**：必须先 `file_read memory/streamlit_pitfalls.md` 再动手，dialog/fragment/session_state 的交互规则极易踩坑（参考 streamlit_pitfalls.md §Learnings 的 6 条历史踩坑记录）
+- 2026-05-03: **core/ 下任何改动**：必须跑 `pytest tests/unit/ -v` 全量 + `python -m tests.evaluation.eval_runner` 路由精度，两者全部通过才算验证完成
+- 2026-05-03: **接口变更（函数签名/返回值）**：修改前必须 grep 所有调用点，同步修改或提供兼容层；不静默假设"没有其他调用者"
+- 2026-05-03: **God Node 改动**（ga.py 37边 / agent_loop.py 28+边 / TMWebDriver.py 31边 / agentmain.py）：先查边数，>20边先写测试描述预期行为，再最小化修改，最后全量回归
+- 2026-05-03: **前端改动验证**：不能只看"语法验证通过"，还必须验证 state key 幂等性（同操作两次不冲突）和 fragment 作用域（dialog 定义位置检查）
