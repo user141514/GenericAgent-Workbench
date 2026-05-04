@@ -1,13 +1,35 @@
-"""Dry-run detector for analysis-oriented single-file prefetch suggestions."""
+"""Read-prefetch detector and safe file pre-loader for context injection.
+
+Phase 1 (existing): detect analysis-oriented single-file prefetch candidates.
+Phase 2 (added):  safe file content reading + context builder for injection.
+"""
 
 from __future__ import annotations
 
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+READ_PREFETCH_ENV_VAR = "GENERIC_AGENT_READ_PREFETCH"
+_READ_PREFETCH_ENABLED_DEFAULT = False
 
 _ALLOWED_SUFFIXES = {".py", ".md", ".txt", ".json", ".yaml", ".yml", ".toml"}
+_MAX_FILE_SIZE_BYTES = 512 * 1024  # 512KB — skip files larger than this
+
+_SENSITIVE_PATH_PATTERNS = [
+    re.compile(p, re.IGNORECASE)
+    for p in (
+        r"(^|[/\\])\.env(\..*)?$",
+        r"(^|[/\\])mykey\.py$",
+        r"(^|[/\\])mykey\.json$",
+        r"(^|[/\\])credentials",
+        r"(^|[/\\])secrets?[/\\]",
+        r"(^|[/\\])\.git[/\\]",
+        r"(^|[/\\])__pycache__[/\\]",
+        r"(^|[/\\])\.claude[/\\]",
+    )
+]
 
 _ANALYSIS_HINTS = (
     "分析",
@@ -223,7 +245,6 @@ def detect_read_prefetch(
 
     relative_target = target.relative_to(root).as_posix()
     signals.append(f"target_file:{relative_target}")
-    signals.append("dry_run_only")
     return ReadPrefetchDecision(
         True,
         target_file=relative_target,
@@ -233,3 +254,128 @@ def detect_read_prefetch(
         max_chars=max_chars,
         signals=signals,
     )
+
+
+# ── Phase 2: safe file reading + context builder ──────────────────
+
+
+def is_read_prefetch_enabled() -> bool:
+    return os.environ.get(READ_PREFETCH_ENV_VAR, "").strip() == "1"
+
+
+def _is_sensitive_path(target: str | Path) -> bool:
+    path_str = str(target).replace("\\", "/")
+    for pattern in _SENSITIVE_PATH_PATTERNS:
+        if pattern.search(path_str):
+            return True
+    return False
+
+
+def _is_binary_content(first_bytes: bytes) -> bool:
+    """Check for null bytes or high ratio of non-printable characters.
+    UTF-8 multi-byte sequences are treated as text if they decode cleanly.
+    """
+    if b"\x00" in first_bytes:
+        return True
+    # Try UTF-8 decode — if it succeeds, treat as text (covers CJK, emoji, etc.)
+    try:
+        first_bytes.decode("utf-8")
+        return False
+    except UnicodeDecodeError:
+        pass
+    text_chars = sum(1 for b in first_bytes if 32 <= b < 127 or b in (9, 10, 13))
+    return (text_chars / max(len(first_bytes), 1)) < 0.85
+
+
+def safe_read_prefetch_content(
+    target_file: str,
+    project_root: str | Path,
+    max_lines: int = 200,
+    max_chars: int = 12000,
+) -> tuple[str | None, str, dict]:
+    """Safely read file content for prefetch injection.
+
+    Returns (content, reason, metadata).
+    content is None if the file should not be injected.
+    """
+    metadata: dict = {"target": target_file}
+
+    root = Path(project_root).resolve()
+    target_path = (root / target_file).resolve()
+
+    # Safety gate 1: path containment
+    try:
+        target_path.relative_to(root)
+    except ValueError:
+        return None, "path_escape", {**metadata, "reason": "path not within project root"}
+
+    # Safety gate 2: sensitive path
+    if _is_sensitive_path(target_file):
+        return None, "sensitive_path", {**metadata, "reason": "sensitive file path"}
+
+    # Safety gate 3: file existence
+    if not target_path.is_file():
+        return None, "file_not_found", {**metadata, "reason": "file does not exist"}
+
+    # Safety gate 4: file size
+    file_size = target_path.stat().st_size
+    metadata["file_size"] = file_size
+    if file_size > _MAX_FILE_SIZE_BYTES:
+        return None, "file_too_large", {**metadata, "reason": f"file size {file_size} > {_MAX_FILE_SIZE_BYTES}"}
+
+    # Safety gate 5: binary check (first 4KB)
+    try:
+        with open(target_path, "rb") as fh:
+            head = fh.read(4096)
+    except Exception:
+        return None, "read_error", {**metadata, "reason": "could not open file"}
+
+    if _is_binary_content(head):
+        return None, "binary_content", {**metadata, "reason": "binary file detected"}
+
+    # Safe read: decode as UTF-8, apply line/char limits
+    try:
+        raw = head.decode("utf-8", errors="replace")
+    except Exception:
+        return None, "decode_error", {**metadata, "reason": "utf-8 decode failed"}
+
+    lines = raw.split("\n")
+    total_lines = len(lines)
+    metadata["total_lines"] = total_lines
+
+    truncated = total_lines > max_lines
+    if truncated:
+        lines = lines[:max_lines]
+
+    text = "\n".join(lines)
+    total_chars = len(text)
+    metadata["total_chars"] = total_chars
+
+    if total_chars > max_chars:
+        text = text[:max_chars]
+        truncated = True
+
+    metadata["truncated"] = truncated
+    metadata["injected_lines"] = len(lines) if not truncated else min(len(lines), max_lines)
+    metadata["injected_chars"] = len(text)
+
+    return text, "ok", metadata
+
+
+def build_read_prefetch_context(
+    content: str,
+    target_file: str,
+    reason: str,
+    confidence: float,
+    truncated: bool,
+) -> str:
+    """Format read_prefetch content as a clearly-bounded user context block."""
+    header = (
+        f"### [READ PREFETCH CONTEXT]\n"
+        f"source_file: {target_file}\n"
+        f"reason: {reason}\n"
+        f"confidence: {confidence:.2f}\n"
+    )
+    if truncated:
+        header += "truncated: true (file exceeded line/char limit)\n"
+    return f"{header}\nexcerpt:\n```\n{content}\n```"

@@ -28,9 +28,12 @@ from .quality import (
 from .runtime import (
     RuntimeProfiler,
     build_profile_path,
+    build_read_prefetch_context,
     detect_read_prefetch,
     format_profile_summary,
+    is_read_prefetch_enabled,
     profiling_enabled,
+    safe_read_prefetch_content,
 )
 from .skills import (
     build_optional_sop_context,
@@ -2511,6 +2514,45 @@ class OpenAIOrchestratedAgent:
                 optional_sop_block = str(skill_sop_context.get("block") or "").strip()
                 if selected_agent_name == "planner_executor" and optional_sop_block:
                     inputs.append({"role": "user", "content": optional_sop_block})
+                # ── Read prefetch context injection (P2-1) ──
+                prefetch_injected = False
+                prefetch_chars = 0
+                prefetch_skip_reason = "disabled"
+                if is_read_prefetch_enabled() and read_prefetch_should_prefetch and read_prefetch_target_file:
+                    content, status, prefetch_meta = safe_read_prefetch_content(
+                        read_prefetch_target_file,
+                        PROJECT_ROOT,
+                        max_lines=read_prefetch_max_lines or 200,
+                        max_chars=read_prefetch_max_chars or 12000,
+                    )
+                    if content is not None and status == "ok":
+                        prefetch_block = build_read_prefetch_context(
+                            content,
+                            read_prefetch_target_file,
+                            read_prefetch_reason,
+                            read_prefetch_confidence,
+                            bool(prefetch_meta.get("truncated")),
+                        )
+                        inputs.append({"role": "user", "content": prefetch_block})
+                        prefetch_injected = True
+                        prefetch_chars = len(prefetch_block)
+                    else:
+                        prefetch_skip_reason = f"{status}: {prefetch_meta.get('reason', 'unknown')}"
+                    if profiler is not None:
+                        profiler.record_event(
+                            "read_prefetch_injection",
+                            kind="io",
+                            metadata={
+                                "injected": prefetch_injected,
+                                "target_file": read_prefetch_target_file,
+                                "chars": prefetch_chars,
+                                "lines": prefetch_meta.get("injected_lines"),
+                                "reason": read_prefetch_reason,
+                                "confidence": read_prefetch_confidence,
+                                "truncated": prefetch_meta.get("truncated"),
+                                "skip_reason": prefetch_skip_reason if not prefetch_injected else None,
+                            },
+                        )
                 inputs.append({"role": "user", "content": raw_query})
                 if profiler is not None:
                     profiler.record_event(

@@ -25,7 +25,14 @@ from .profiler import (
     format_profile_summary,
     profiling_enabled,
 )
-from .read_prefetch import ReadPrefetchDecision, detect_read_prefetch
+from .read_prefetch import (
+    READ_PREFETCH_ENV_VAR,
+    ReadPrefetchDecision,
+    build_read_prefetch_context,
+    detect_read_prefetch,
+    is_read_prefetch_enabled,
+    safe_read_prefetch_content,
+)
 from .read_shortcut import (
     READ_SHORTCUT_ENV_VAR,
     ReadShortcutDecision,
@@ -42,6 +49,7 @@ __all__ = [
     "LLMCallCache",
     "LLMCallRecord",
     "PROFILE_ENV_VAR",
+    "READ_PREFETCH_ENV_VAR",
     "READ_SHORTCUT_ENV_VAR",
     "ReadPrefetchDecision",
     "ReadShortcutDecision",
@@ -49,15 +57,18 @@ __all__ = [
     "ExecutionPolicy",
     "build_profile_path",
     "build_execution_policy_from_skills",
-    "execution_policy_to_dict",
+    "build_read_prefetch_context",
     "detect_read_prefetch",
     "detect_read_shortcut",
     "direct_answer_enabled",
     "early_stop_enabled",
+    "execution_policy_to_dict",
     "format_profile_summary",
     "is_cache_safe",
+    "is_read_prefetch_enabled",
     "profiling_enabled",
     "read_shortcut_enabled",
+    "safe_read_prefetch_content",
     "should_stop_classic_executor",
     "try_direct_answer_from_tool_result",
     "Artifact",
