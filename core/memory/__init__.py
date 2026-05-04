@@ -7,6 +7,7 @@ from .maintenance import (
     run_memory_maintenance,
     score_inbox_entries,
 )
+from .legacy_global import build_legacy_memory_block, read_legacy_l1_l2
 from .reader import (
     STRUCTURED_MEMORY_ENV_VAR,
     build_memory_source_report,
@@ -25,6 +26,8 @@ from .write_gate import (
 )
 
 __all__ = [
+    "build_legacy_memory_block",
+    "read_legacy_l1_l2",
     "MemoryStore",
     "MemoryIndexer",
     "chunk_text",

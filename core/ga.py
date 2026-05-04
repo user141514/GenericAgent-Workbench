@@ -640,23 +640,5 @@ class GenericAgentHandler(BaseHandler):
         return next_prompt
 
 def get_global_memory():
-    prompt = "\n"
-    try:
-        script_dir = PROJECT_ROOT
-        suffix = '_en' if os.environ.get('GA_LANG', '') == 'en' else ''
-        with open(os.path.join(script_dir, 'memory/global_mem_insight.txt'), 'r', encoding='utf-8', errors='replace') as f: insight = f.read()
-        with open(os.path.join(script_dir, f'assets/insight_fixed_structure{suffix}.txt'), 'r', encoding='utf-8') as f: structure = f.read()
-        prompt += f'cwd = {os.path.join(script_dir, "temp")} (./)\n'
-        prompt += f'project_root = {script_dir} (../)\n'
-        prompt += "Interpret user-facing 'current folder/current project/current repository' as project_root (../), unless the user explicitly asks for temp/scratch cwd.\n"
-        prompt += f"\n[Memory] (../memory)\n"
-        prompt += structure + '\n../memory/global_mem_insight.txt:\n'
-        prompt += insight + "\n"
-        # L2: 注入全局记忆
-        l2_path = os.path.join(script_dir, 'memory/global_mem.txt')
-        if os.path.exists(l2_path):
-            with open(l2_path, 'r', encoding='utf-8', errors='replace') as f: l2_content = f.read()
-            if l2_content.strip():
-                prompt += "\n../memory/global_mem.txt (L2环境事实):\n" + l2_content + "\n"
-    except FileNotFoundError: pass
-    return prompt
+    from .memory.legacy_global import build_legacy_memory_block
+    return build_legacy_memory_block(PROJECT_ROOT)
