@@ -7,6 +7,13 @@ from .maintenance import (
     run_memory_maintenance,
     score_inbox_entries,
 )
+from .distillation import (
+    build_distillation_candidate,
+    format_inbox_entry,
+    get_distillation_mode,
+    trigger_distillation,
+    write_distillation_candidate,
+)
 from .legacy_global import build_legacy_memory_block, read_legacy_l1_l2
 from .reader import (
     STRUCTURED_MEMORY_ENV_VAR,
@@ -26,8 +33,13 @@ from .write_gate import (
 )
 
 __all__ = [
+    "build_distillation_candidate",
     "build_legacy_memory_block",
+    "format_inbox_entry",
+    "get_distillation_mode",
     "read_legacy_l1_l2",
+    "trigger_distillation",
+    "write_distillation_candidate",
     "MemoryStore",
     "MemoryIndexer",
     "chunk_text",
