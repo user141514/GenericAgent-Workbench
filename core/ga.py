@@ -382,7 +382,69 @@ class GenericAgentHandler(BaseHandler):
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         result = json.dumps(result, ensure_ascii=False, default=json_default)
         return StepOutcome(smart_format(result, max_str_len=8000), next_prompt=next_prompt)
-    
+
+    # ── browser-use sub-agent integration ──────────────────────────────
+
+    def do_browser_agent(self, args, response):
+        """Delegate complex multi-step browser tasks to a browser-use sub-Agent.
+
+        The sub-Agent controls an independent Playwright browser,
+        autonomously screenshot → analyze → act, until the task is done
+        or max_steps is reached.
+
+        Suitable for: form filling, post-login navigation, multi-page data collection.
+        Not suitable for: simple JS injection (use web_execute_js), single-page scan (use web_scan).
+        """
+        task = args.get("task", "").strip()
+        if not task:
+            return StepOutcome({"error": "task parameter cannot be empty"}, next_prompt="\n")
+
+        max_steps = int(args.get("max_steps", 20))
+        headless = bool(args.get("headless", True))
+
+        llm_config = self._get_browser_llm_config()
+        yield f"[BrowserAgent] Starting sub-Agent, task: {task[:120]}\n"
+
+        def _progress(msg):
+            pass  # progress logged, not yielded (avoids breaking the generator chain)
+
+        try:
+            from .browser_agent import run_browser_agent
+        except ImportError:
+            return StepOutcome(
+                {"error": "browser_agent module missing — check core/browser_agent.py"},
+                next_prompt="\n",
+            )
+
+        result = run_browser_agent(
+            task, llm_config,
+            max_steps=max_steps,
+            headless=headless,
+            progress_cb=_progress,
+        )
+
+        status = "OK" if result.get("success") else "FAILED"
+        steps = result.get("steps_taken", "?")
+        yield f"[BrowserAgent] {status}, executed {steps} steps\n"
+        return StepOutcome(result, next_prompt=self._get_anchor_prompt())
+
+    def _get_browser_llm_config(self) -> dict:
+        """Extract LLM info from the current session for browser-use.
+        Falls back to env vars if extraction fails.
+        """
+        try:
+            backend = self.parent.llmclient.backend
+            cfg = getattr(backend, "cfg", {}) or {}
+            name = type(backend).__name__.lower()
+            provider = "anthropic" if "claude" in name or "anthropic" in name else "openai"
+            return {
+                "provider": provider,
+                "model": cfg.get("model", ""),
+                "api_key": cfg.get("api_key", ""),
+            }
+        except Exception:
+            return {"provider": "openai"}  # let browser-use read OPENAI_API_KEY
+
     def do_file_patch(self, args, response):
         path = self._get_abs_path(args.get("path", ""))
         yield f"[Action] Patching file: {path}\n"
