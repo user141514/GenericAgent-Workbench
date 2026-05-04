@@ -21,6 +21,12 @@ def _context_mode() -> str:
 from .workspace_probe import WorkspaceProbe, WorkspaceSnapshot
 from .project_identity import ProjectIdentity, detect_project
 from .runtime_identity import RuntimeIdentity, detect_runtime
+from .recent_turns import (
+    build_recent_conversation_block,
+    build_clarification_request,
+    is_ambiguous_followup,
+    recent_turns_enabled,
+)
 
 __all__ = [
     "_context_enabled",
@@ -31,4 +37,8 @@ __all__ = [
     "detect_project",
     "RuntimeIdentity",
     "detect_runtime",
+    "build_recent_conversation_block",
+    "build_clarification_request",
+    "is_ambiguous_followup",
+    "recent_turns_enabled",
 ]

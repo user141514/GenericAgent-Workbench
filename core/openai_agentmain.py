@@ -2442,6 +2442,20 @@ class OpenAIOrchestratedAgent:
                 if context_packet_text:
                     inputs.append({"role": "user", "content": context_packet_text})
                 _stop_manual_span(context_span)
+                # ── Recent conversation context injection (hotfix) ──
+                recent_block = ""
+                recent_block_chars = 0
+                ambiguous_query = False
+                recent_span = _start_manual_span(profiler, "recent_turns", kind="memory", metadata={"history_items": len(self.input_items)})
+                from core.context.recent_turns import build_recent_conversation_block as _build_recent_block, recent_turns_enabled as _recent_enabled
+                if _recent_enabled():
+                    recent_block = _build_recent_block(self.input_items, max_turns=5, max_chars=6000)
+                    if recent_block:
+                        inputs.append({"role": "user", "content": recent_block})
+                        recent_block_chars = len(recent_block)
+                from core.context.recent_turns import is_ambiguous_followup as _is_ambiguous
+                ambiguous_query = _is_ambiguous(raw_query)
+                _stop_manual_span(recent_span)
                 selected_agent = agents["root"]
                 if route_target == "chat":
                     selected_agent = agents["chat"]
@@ -2636,6 +2650,9 @@ class OpenAIOrchestratedAgent:
                     skill_policy_max_prompt_chars=skill_policy_max_prompt_chars,
                     skill_policy_warnings=skill_policy_warnings or None,
                     skill_memory_write_allowed=skill_memory_write_allowed,
+                    recent_turns_injected=bool(recent_block),
+                    recent_turns_chars=recent_block_chars,
+                    ambiguous_followup=ambiguous_query,
                 )
                 # 如果规则匹配命中，添加路由提示
                 if route_hint and selected_agent is agents["root"]:
@@ -2685,6 +2702,22 @@ class OpenAIOrchestratedAgent:
                                 "skip_reason": prefetch_skip_reason if not prefetch_injected else None,
                             },
                         )
+                if profiler is not None:
+                    profiler.record_event(
+                        "recent_turns_injection",
+                        kind="memory",
+                        metadata={
+                            "injected": bool(recent_block),
+                            "chars": recent_block_chars,
+                            "history_items": len(self.input_items),
+                            "ambiguous_followup": ambiguous_query,
+                            "clarification_injected": bool(ambiguous_query and not recent_block),
+                        },
+                    )
+                # ── Ambiguous follow-up guard ──
+                if ambiguous_query and not recent_block:
+                    from core.context.recent_turns import build_clarification_request as _clarify
+                    inputs.append({"role": "user", "content": _clarify()})
                 inputs.append({"role": "user", "content": raw_query})
                 if profiler is not None:
                     profiler.record_event(
