@@ -2,6 +2,7 @@
 
 from .indexer import MemoryIndexer, chunk_text
 from .maintenance import (
+    archive_inbox_to_structured,
     build_scoped_memory_context,
     dedup_inbox,
     run_memory_maintenance,
@@ -53,6 +54,7 @@ __all__ = [
     "MemoryWriteTarget",
     "STRUCTURED_MEMORY_ENV_VAR",
     "build_memory_source_report",
+    "archive_inbox_to_structured",
     "build_scoped_memory_context",
     "dedup_inbox",
     "read_global_memory",

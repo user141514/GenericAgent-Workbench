@@ -9,9 +9,11 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 
 def _utc_now_iso() -> str:
@@ -204,6 +206,217 @@ def run_memory_maintenance(project_root: str | Path | None = None) -> dict:
         fpath = memory_dir / fname
         if fpath.is_file():
             report["tasks"][f"size_{fname}"] = fpath.stat().st_size
+
+    return report
+
+
+# ── Inbox archive ──────────────────────────────────────────────────
+
+
+def archive_inbox_to_structured(
+    project_root: str | Path | None = None,
+    *,
+    dry_run: bool = True,
+    backup_first: bool = True,
+) -> dict[str, Any]:
+    """Archive history_memory_inbox.md entries to structured memory tables.
+
+    Reads the inbox, chunks entries, SHA256-deduplicates against existing
+    evidence_chunks, and (if dry_run=False) inserts into memory_candidates
+    and evidence_chunks.
+
+    dry_run=True (default):
+        Preview only. Returns a report of what WOULD be written.
+        Does NOT modify the database or inbox.
+
+    dry_run=False:
+        Writes to memory_candidates + evidence_chunks.
+        If backup_first=True, copies inbox to a .bak file first.
+        Does NOT truncate the inbox (truncation is P2b).
+
+    Returns:
+        {
+            "dry_run": bool,
+            "total_entries": int,        # entries found in inbox
+            "new_entries": int,          # entries not yet archived
+            "skipped_duplicates": int,   # entries already archived
+            "written_chunks": int,       # chunks written (0 if dry_run)
+            "written_candidates": int,   # candidates written (0 if dry_run)
+            "backup_path": str | None,
+            "errors": list[str],
+            "preview_entries": [...],    # first 5 new entries (dry_run only)
+        }
+    """
+    root = Path(project_root) if project_root else Path(__file__).resolve().parent.parent.parent
+    memory_dir = root / "memory"
+    inbox_path = memory_dir / "history_memory_inbox.md"
+    db_path = memory_dir / "catalog.sqlite"
+    report: dict[str, Any] = {
+        "dry_run": dry_run,
+        "total_entries": 0,
+        "new_entries": 0,
+        "skipped_duplicates": 0,
+        "written_chunks": 0,
+        "written_candidates": 0,
+        "backup_path": None,
+        "errors": [],
+        "preview_entries": [],
+    }
+
+    if not inbox_path.is_file():
+        report["errors"].append("inbox not found")
+        return report
+
+    # ── Read inbox ──
+    content = inbox_path.read_text(encoding="utf-8", errors="replace")
+    entries = re.split(r"\n(?=## )", content)
+    # Filter out the header line (starts with "# " not "## ")
+    entries = [e.strip() for e in entries if e.strip().startswith("## ")]
+    report["total_entries"] = len(entries)
+
+    if not entries:
+        return report
+
+    # ── Collect existing hashes ──
+    existing_hashes: set[str] = set()
+    if db_path.is_file():
+        try:
+            from .store import MemoryStore
+            store = MemoryStore(db_path)
+            store.init_db()
+            with store._connection() as conn:
+                rows = conn.execute(
+                    "SELECT content_hash FROM evidence_chunks WHERE content_hash IS NOT NULL"
+                ).fetchall()
+                existing_hashes = {r["content_hash"] for r in rows if r["content_hash"]}
+        except Exception as e:
+            report["errors"].append(f"failed to read existing hashes: {e}")
+
+    # ── Chunk and dedup ──
+    new_entries_data: list[dict[str, Any]] = []
+    seen_hashes: set[str] = set()
+    for entry in entries:
+        entry_hash = hashlib.sha256(entry.encode("utf-8")).hexdigest()
+        if entry_hash in existing_hashes or entry_hash in seen_hashes:
+            report["skipped_duplicates"] += 1
+            continue
+        seen_hashes.add(entry_hash)
+
+        # Extract metadata
+        title_match = re.search(r"^## (.+)", entry)
+        title = title_match.group(1).strip()[:120] if title_match else "Untitled"
+        saved_match = re.search(r"Saved At:\s*(.+)", entry)
+        saved_at = saved_match.group(1).strip() if saved_match else _utc_now_iso()
+        source_match = re.search(r"Source File:\s*(.+)", entry)
+        source = source_match.group(1).strip() if source_match else "inbox"
+        run_match = re.search(r"Run:\s*(.+)", entry)
+        run_id = run_match.group(1).strip() if run_match else ""
+
+        # Chunk: split entry into paragraphs
+        paragraphs = re.split(r"\n\n+", entry)
+        chunks: list[dict[str, Any]] = []
+        for i, para in enumerate(paragraphs):
+            para = para.strip()
+            if not para:
+                continue
+            chunk_hash = hashlib.sha256(para.encode("utf-8")).hexdigest()
+            chunks.append({
+                "index": i,
+                "content": para[:4000],
+                "content_hash": chunk_hash,
+            })
+
+        new_entries_data.append({
+            "title": title,
+            "source": source,
+            "run_id": run_id,
+            "saved_at": saved_at,
+            "entry_hash": entry_hash,
+            "full_content": entry[:8000],
+            "chunks": chunks,
+        })
+
+    report["new_entries"] = len(new_entries_data)
+
+    # ── Preview (dry_run) ──
+    if dry_run:
+        report["preview_entries"] = [
+            {
+                "title": e["title"],
+                "source": e["source"],
+                "run_id": e["run_id"],
+                "saved_at": e["saved_at"],
+                "chunks_count": len(e["chunks"]),
+                "content_preview": e["full_content"][:300],
+            }
+            for e in new_entries_data[:5]
+        ]
+        return report
+
+    # ── Write (not dry_run) ──
+    # Backup first
+    if backup_first:
+        backup_path = inbox_path.with_suffix(".md.bak")
+        try:
+            import shutil
+            shutil.copy2(inbox_path, backup_path)
+            report["backup_path"] = str(backup_path)
+        except Exception as e:
+            report["errors"].append(f"backup failed: {e}")
+            return report
+
+    if not db_path.is_file():
+        from .store import MemoryStore
+        store = MemoryStore(db_path)
+        store.init_db()
+
+    try:
+        from .store import MemoryStore
+        store = MemoryStore(db_path)
+
+        with store._connection() as conn:
+            for entry_data in new_entries_data:
+                chunk_id = str(uuid4())
+                now = _utc_now_iso()
+
+                # Insert evidence_chunks (one per chunk)
+                for chunk in entry_data["chunks"]:
+                    conn.execute(
+                        """INSERT OR IGNORE INTO evidence_chunks
+                           (id, source_path, content, content_hash, summary,
+                            run_id, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            str(uuid4()),
+                            f"inbox:{entry_data['title'][:80]}",
+                            chunk["content"],
+                            chunk["content_hash"],
+                            entry_data["title"][:200],
+                            entry_data["run_id"] or "",
+                            now,
+                        ),
+                    )
+                    report["written_chunks"] += 1
+
+                # Insert memory_candidate
+                conn.execute(
+                    """INSERT OR IGNORE INTO memory_candidates
+                       (id, source, content, kind, status, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        chunk_id,
+                        entry_data["source"],
+                        entry_data["full_content"],
+                        "inbox_archive",
+                        "pending",
+                        now,
+                        now,
+                    ),
+                )
+                report["written_candidates"] += 1
+
+    except Exception as e:
+        report["errors"].append(f"write failed: {e}")
 
     return report
 
