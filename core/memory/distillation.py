@@ -148,14 +148,25 @@ def build_distillation_candidate(
 def format_inbox_entry(candidate: dict[str, Any]) -> str:
     """Format a distillation candidate as a history_memory_inbox.md entry.
 
-    Matches the Classic path inbox format:
+    Matches the Classic path inbox format for compatibility with maintenance
+    tools (dedup_inbox, score_inbox_entries):
+
         ## <title>
-        Saved At: <date>
-        Source: <source>
-        Run: <run_id>
-        Session: <session>
-        Task: <task>
-        <summary>
+        <!-- source: <run_id> -->
+        - Saved At: <datetime>
+        - Source File: <source>
+        - Run: <run_id>
+        - Session: <session>
+        - Task: <task>
+        - Dialogue Rounds: <N>
+        - User Questions:
+          - q1
+          - q2
+        - Files Touched:
+          - file1
+          - file2
+        - Key Replies:
+          - <summary>
 
     Returns empty string if candidate is marked as proposed (not executed).
     """
@@ -163,37 +174,57 @@ def format_inbox_entry(candidate: dict[str, Any]) -> str:
         return ""  # Never write proposed changes to inbox
 
     title = candidate.get("title", "Untitled")
-    saved_at = candidate.get("generated_at", _utc_now_iso())[:10]
+    # Strip leading markdown headings to avoid "## ## ..."
+    title = title.lstrip("#").strip()[:80]
+    saved_at = candidate.get("generated_at", _utc_now_iso())[:19]
     source = candidate.get("source", "unknown")
     run_id = candidate.get("run_id", "")
     session = candidate.get("session", "")
     task = candidate.get("task", "")
     summary = candidate.get("summary", "")
+    questions = candidate.get("questions") or []
+    files = candidate.get("files_touched") or []
 
     lines = [
         f"## {title}",
-        f"Saved At: {saved_at}",
-        f"Source: {source}",
+        f"<!-- source: {run_id or source} -->",
+        f"- Saved At: {saved_at}",
+        f"- Source File: {source}",
     ]
     if run_id:
-        lines.append(f"Run: {run_id}")
+        lines.append(f"- Run: {run_id}")
     if session:
-        lines.append(f"Session: {session}")
+        lines.append(f"- Session: {session}")
     if task:
-        lines.append(f"Task: {task}")
+        lines.append(f"- Task: {task}")
 
-    files = candidate.get("files_touched") or []
+    # Extract questions from summary if none provided
+    if not questions:
+        import re
+        q_matches = re.findall(r"(?:^|\n)\s*[-*]\s+(.+?)(?:\n|$)", summary or "")
+        questions = [q.strip()[:120] for q in q_matches if q.strip()][:10]
+
+    rounds = max(1, len(questions) or 1)
+    lines.append(f"- Dialogue Rounds: {rounds}")
+
+    if questions:
+        lines.append("- User Questions:")
+        for q in questions:
+            lines.append(f"  - {q}")
+
     if files:
-        lines.append(f"Files Touched: {', '.join(files[:10])}")
+        lines.append("- Files Touched:")
+        for f in files:
+            lines.append(f"  - {f}")
 
-    questions = candidate.get("questions") or []
-    for q in questions:
-        lines.append(f"- {q}")
+    lines.append("- Key Replies:")
+    reply_lines = (summary or "").strip().split("\n")
+    for rl in reply_lines[:10]:
+        rl = rl.strip()
+        if rl:
+            lines.append(f"  - {rl}")
 
     lines.append("")
-    lines.append(summary)
-    lines.append("")
-
     return "\n".join(lines)
 
 

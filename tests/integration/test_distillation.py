@@ -148,7 +148,7 @@ class TestFormatInboxEntry:
         entry = format_inbox_entry(candidate)
         assert "## Updated port config" in entry
         assert "Saved At:" in entry
-        assert "Source: openai" in entry
+        assert "Source File: openai" in entry
         assert "Run: run_001" in entry
 
     def test_refuses_proposed_candidate(self):
@@ -167,6 +167,54 @@ class TestFormatInboxEntry:
         entry = format_inbox_entry(candidate)
         assert "Files Touched:" in entry
         assert "a.py" in entry
+
+    def test_format_compatible_with_maintenance_tools(self):
+        """Entry must be parseable by dedup_inbox and score_inbox_entries."""
+        from core.memory.maintenance import dedup_inbox, score_inbox_entries
+
+        candidate = build_distillation_candidate(
+            summary="- Fixed config port\n- Updated nginx\n- Verified deployment",
+            source="openai",
+            run_id="run_compat",
+            task="Verify compatibility",
+            files_touched=["config.yaml", "nginx.conf"],
+            questions=["What port should we use?", "Is nginx configured?"],
+        )
+        entry = format_inbox_entry(candidate)
+        assert len(entry) > 0
+
+        # Write to temp inbox and run maintenance tools
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            inbox = os.path.join(td, "history_memory_inbox.md")
+            with open(inbox, "w", encoding="utf-8") as f:
+                f.write(entry + "\n")
+
+            # dedup_inbox should work
+            dedup_result = dedup_inbox(inbox)
+            assert dedup_result["removed"] == 0  # single entry, no dups
+
+            # score_inbox_entries should extract age and score
+            scores = score_inbox_entries(inbox)
+            assert len(scores) >= 1
+            assert "score" in scores[0]
+
+    def test_format_matches_classic_structure(self):
+        """Key markers that Classic maintenance tools depend on."""
+        candidate = build_distillation_candidate(
+            summary="Key fix applied.",
+            source="openai",
+            run_id="r1",
+            files_touched=["x.py"],
+            questions=["what to fix?"],
+        )
+        entry = format_inbox_entry(candidate)
+        # Must have ## heading
+        assert entry.startswith("## ")
+        # Must have Saved At for age extraction
+        assert "- Saved At:" in entry
+        # Must have Files Touched for file counting
+        assert "- Files Touched:" in entry
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -239,7 +287,7 @@ class TestWriteDistillationCandidate:
         assert inbox_path.exists()
         content = inbox_path.read_text(encoding="utf-8")
         assert "Executed fact" in content
-        assert "Source: openai" in content
+        assert "Source File: openai" in content
         assert "config.yaml" in content
 
     def test_off_mode_does_nothing(self, tmp_path):
