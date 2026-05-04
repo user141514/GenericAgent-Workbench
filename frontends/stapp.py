@@ -79,101 +79,104 @@ st.set_page_config(page_title="Cowork", layout="wide")
 st.markdown(
     """
 <style>
-/* ── Global ── */
+/* ── Design tokens ── */
 :root {
-  --accent: #3b82f6;
-  --accent-soft: #1e3a5f;
-  --bg-card: #181b25;
-  --border: #242836;
-  --text-muted: #64677a;
-  --radius: 10px;
+  --bg-root: #faf8f5;
+  --bg-sidebar: #f3f0ea;
+  --bg-card: #fff;
+  --border: #e0dbd2;
+  --border-focus: #cc8864;
+  --text-primary: #1d1b18;
+  --text-secondary: #6b6560;
+  --accent: #cc785c;
+  --accent-hover: #b5654a;
+  --accent-soft: #fdf5ee;
+  --shadow: 0 1px 3px rgba(0,0,0,0.04);
+  --radius-sm: 8px;
+  --radius: 12px;
 }
-.stApp { background: #0c0e14; }
+
+/* ── Global ── */
+.stApp {
+  background: var(--bg-root);
+  color: var(--text-primary);
+}
 
 /* ── Sidebar ── */
 section[data-testid="stSidebar"] {
-  background: #11141c;
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
 }
 section[data-testid="stSidebar"] .stMarkdown,
 section[data-testid="stSidebar"] .stCaption {
-  color: #9295a3 !important;
+  color: var(--text-secondary) !important;
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
   min-height: 2.2rem;
   padding: 0.35rem 0.6rem;
   font-size: 0.9rem;
-  border-radius: 6px;
-  border: 1px solid #242836;
-  background: #181b25;
-  color: #e4e5ea;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--bg-card);
+  color: var(--text-primary);
   transition: all 0.15s;
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button:hover {
-  background: #1e2230;
-  border-color: #64677a;
+  background: #f0ebe0;
+  border-color: #c4b99e;
 }
 section[data-testid="stSidebar"] button[kind="primary"] {
-  background: #3b82f6 !important;
-  border-color: #3b82f6 !important;
+  background: var(--accent) !important;
+  border-color: var(--accent) !important;
   color: #fff !important;
   font-weight: 600;
 }
 section[data-testid="stSidebar"] button[kind="primary"]:hover {
-  filter: brightness(1.15);
-}
-section[data-testid="stSidebar"] div[data-testid="stExpander"] details summary p {
-  font-size: 0.9rem;
-}
-
-/* ── Sidebar model cards ── */
-section[data-testid="stSidebar"] .stColumns button {
-  font-size: 10px !important;
-  padding: 6px 4px !important;
-  min-height: unset !important;
-  line-height: 1.2 !important;
-  border-radius: 8px !important;
-  white-space: normal !important;
-  text-align: center !important;
-}
-section[data-testid="stSidebar"] div[data-testid="stVerticalBlock"] > div > div > div > div > div > button {
-  border: 2px solid #3b82f6 !important;
-  background: #1e3a5f !important;
-  color: #fff !important;
+  background: var(--accent-hover) !important;
+  border-color: var(--accent-hover) !important;
 }
 
 /* ── Chat messages ── */
 [data-testid="stChatMessage"] {
-  background: #181b25;
-  border: 1px solid #242836;
-  border-radius: 12px;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 10px 16px;
+  box-shadow: var(--shadow);
 }
 [data-testid="stChatMessage"][data-testid="stChatMessageUser"] {
-  background: #1e3a5f;
-  border-color: #3b82f6;
+  background: var(--accent-soft);
+  border-color: #e8c9a0;
 }
 
 /* ── Chat input ── */
 textarea[data-testid="stChatInputTextArea"] {
-  background: #0c0e14 !important;
-  border: 1px solid #242836 !important;
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
   border-radius: 10px !important;
-  color: #e4e5ea !important;
+  color: var(--text-primary) !important;
 }
 textarea[data-testid="stChatInputTextArea"]:focus {
-  border-color: #3b82f6 !important;
+  border-color: var(--border-focus) !important;
+  box-shadow: 0 0 0 3px rgba(204,136,100,0.12) !important;
 }
 
 /* ── Scrollbar ── */
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #242836; border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: #3f3f46; }
+::-webkit-scrollbar-thumb { background: #d4cfc7; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #b0a99f; }
 
 /* ── Dividers ── */
 section[data-testid="stSidebar"] hr {
-  border-color: #242836;
+  border-color: var(--border);
   margin: 6px 0;
+}
+
+/* ── Expand / collapsible details ── */
+section[data-testid="stSidebar"] div[data-testid="stExpander"] details summary p {
+  font-size: 0.9rem;
+  color: var(--text-secondary) !important;
 }
 
 /* Ensure text is selectable */
@@ -189,8 +192,8 @@ body, .stApp, [data-testid="stAppViewContainer"],
 
 /* ── Status indicator ── */
 .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.status-active { background: #22c55e; box-shadow: 0 0 6px #22c55e; }
-.status-idle { background: #64677a; }
+.status-active { background: #5a8a5e; box-shadow: 0 0 6px rgba(90,138,94,0.4); }
+.status-idle { background: #a09888; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -237,7 +240,7 @@ if _streamlit_password:
                 st.error("密码错误")
         st.stop()
 
-st.title("🖥️ Cowork")
+st.title("What can I help you?")
 
 if "autonomous_enabled" not in st.session_state:
     st.session_state.autonomous_enabled = False
