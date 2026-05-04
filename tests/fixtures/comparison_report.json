@@ -1,0 +1,379 @@
+{
+  "total_queries": 20,
+  "improvements": [
+    {
+      "query": "检查这段代码有没有 SQL 注入风险",
+      "baseline_target": null,
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "",
+      "current_rule": "keywords:review(2e/0c)",
+      "status": "improved"
+    },
+    {
+      "query": "查一下 Flask 和 FastAPI 的区别",
+      "baseline_target": null,
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "",
+      "current_rule": "keywords:research(2e/0c)",
+      "status": "improved"
+    },
+    {
+      "query": "帮我查查 PostgreSQL 的 JSON 字段怎么用",
+      "baseline_target": null,
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "",
+      "current_rule": "action_start:帮我->research",
+      "status": "improved"
+    },
+    {
+      "query": "搜索 Python asyncio 的用法",
+      "baseline_target": null,
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "",
+      "current_rule": "action_start:搜索->research",
+      "status": "improved"
+    }
+  ],
+  "regressions": [],
+  "still_correct": [
+    {
+      "query": "你好，今天天气怎么样？",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "什么是 Python 的 GIL？",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "谢谢你的帮助",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "你觉得 Rust 和 Go 哪个更好？",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "hello, how are you?",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我写一个快速排序的 Python 实现",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "action_start:帮我->code",
+      "current_rule": "action_start:帮我->code",
+      "status": "correct_both"
+    },
+    {
+      "query": "修改这个文件把日志级别改成 DEBUG",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "keywords:code(5e/0c)",
+      "current_rule": "keywords:code(5e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "重构这段代码，提取公共方法",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "keywords:code(1e/0c)",
+      "current_rule": "keywords:code(1e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我在这个类里加一个单例模式",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "action_start:帮我->code",
+      "current_rule": "action_start:帮我->code",
+      "status": "correct_both"
+    },
+    {
+      "query": "实现一个 LRU 缓存装饰器",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "keywords:code(2e/0c)",
+      "current_rule": "keywords:code(2e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我审查这段代码的安全性",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "action_start:帮我->review",
+      "current_rule": "action_start:帮我->review",
+      "status": "correct_both"
+    },
+    {
+      "query": "检查这个函数有没有内存泄漏",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "keywords:review(2e/0c)",
+      "current_rule": "keywords:review(2e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "运行 pytest 并修复失败的测试",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "action_start:运行->review",
+      "current_rule": "action_start:运行->review",
+      "status": "correct_both"
+    },
+    {
+      "query": "review 一下这个 PR 的代码质量",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "keywords:review(1e/0c)",
+      "current_rule": "keywords:review(1e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "搜索一下 Django 5.0 的新特性",
+      "baseline_target": "research",
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "action_start:搜索->research",
+      "current_rule": "action_start:搜索->research",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我查查 Redis Stream 的用法",
+      "baseline_target": "research",
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "action_start:帮我->research",
+      "current_rule": "action_start:帮我->research",
+      "status": "correct_both"
+    }
+  ],
+  "still_incorrect": [],
+  "summary": {
+    "improved": "4/20 (20.0%)",
+    "regressions": "0/20",
+    "correct_both": "16/20",
+    "incorrect_both": "0/20",
+    "accuracy_before": "16/20",
+    "accuracy_after": "20/20"
+  },
+  "details": [
+    {
+      "query": "你好，今天天气怎么样？",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "什么是 Python 的 GIL？",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "谢谢你的帮助",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "你觉得 Rust 和 Go 哪个更好？",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "hello, how are you?",
+      "baseline_target": "chat",
+      "current_target": "chat",
+      "expected_target": "chat",
+      "baseline_rule": "keywords:chat(1)",
+      "current_rule": "keywords:chat(1)",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我写一个快速排序的 Python 实现",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "action_start:帮我->code",
+      "current_rule": "action_start:帮我->code",
+      "status": "correct_both"
+    },
+    {
+      "query": "修改这个文件把日志级别改成 DEBUG",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "keywords:code(5e/0c)",
+      "current_rule": "keywords:code(5e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "重构这段代码，提取公共方法",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "keywords:code(1e/0c)",
+      "current_rule": "keywords:code(1e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我在这个类里加一个单例模式",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "action_start:帮我->code",
+      "current_rule": "action_start:帮我->code",
+      "status": "correct_both"
+    },
+    {
+      "query": "实现一个 LRU 缓存装饰器",
+      "baseline_target": "code",
+      "current_target": "code",
+      "expected_target": "code",
+      "baseline_rule": "keywords:code(2e/0c)",
+      "current_rule": "keywords:code(2e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我审查这段代码的安全性",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "action_start:帮我->review",
+      "current_rule": "action_start:帮我->review",
+      "status": "correct_both"
+    },
+    {
+      "query": "检查这个函数有没有内存泄漏",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "keywords:review(2e/0c)",
+      "current_rule": "keywords:review(2e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "运行 pytest 并修复失败的测试",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "action_start:运行->review",
+      "current_rule": "action_start:运行->review",
+      "status": "correct_both"
+    },
+    {
+      "query": "review 一下这个 PR 的代码质量",
+      "baseline_target": "review",
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "keywords:review(1e/0c)",
+      "current_rule": "keywords:review(1e/0c)",
+      "status": "correct_both"
+    },
+    {
+      "query": "检查这段代码有没有 SQL 注入风险",
+      "baseline_target": null,
+      "current_target": "review",
+      "expected_target": "review",
+      "baseline_rule": "",
+      "current_rule": "keywords:review(2e/0c)",
+      "status": "improved"
+    },
+    {
+      "query": "搜索一下 Django 5.0 的新特性",
+      "baseline_target": "research",
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "action_start:搜索->research",
+      "current_rule": "action_start:搜索->research",
+      "status": "correct_both"
+    },
+    {
+      "query": "帮我查查 Redis Stream 的用法",
+      "baseline_target": "research",
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "action_start:帮我->research",
+      "current_rule": "action_start:帮我->research",
+      "status": "correct_both"
+    },
+    {
+      "query": "查一下 Flask 和 FastAPI 的区别",
+      "baseline_target": null,
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "",
+      "current_rule": "keywords:research(2e/0c)",
+      "status": "improved"
+    },
+    {
+      "query": "帮我查查 PostgreSQL 的 JSON 字段怎么用",
+      "baseline_target": null,
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "",
+      "current_rule": "action_start:帮我->research",
+      "status": "improved"
+    },
+    {
+      "query": "搜索 Python asyncio 的用法",
+      "baseline_target": null,
+      "current_target": "research",
+      "expected_target": "research",
+      "baseline_rule": "",
+      "current_rule": "action_start:搜索->research",
+      "status": "improved"
+    }
+  ]
+}

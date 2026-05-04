@@ -1,0 +1,67 @@
+{
+  "root": {
+    "name": "task_router",
+    "has_tools": false,
+    "tool_names": [],
+    "handoff_count": 5,
+    "handoff_names": [
+      "chat_specialist",
+      "code_agent",
+      "planner_executor",
+      "research_agent",
+      "review_agent"
+    ]
+  },
+  "chat": {
+    "name": "chat_specialist",
+    "has_tools": false,
+    "tool_names": [],
+    "handoff_count": 0,
+    "handoff_names": []
+  },
+  "executor": {
+    "name": "planner_executor",
+    "has_tools": true,
+    "tool_names": [
+      "run_genericagent_executor"
+    ],
+    "handoff_count": 0,
+    "handoff_names": []
+  },
+  "code": {
+    "name": "code_agent",
+    "has_tools": true,
+    "tool_names": [
+      "run_genericagent_executor"
+    ],
+    "handoff_count": 2,
+    "handoff_names": [
+      "research_agent",
+      "review_agent"
+    ]
+  },
+  "review": {
+    "name": "review_agent",
+    "has_tools": true,
+    "tool_names": [
+      "run_genericagent_executor"
+    ],
+    "handoff_count": 2,
+    "handoff_names": [
+      "code_agent",
+      "research_agent"
+    ]
+  },
+  "research": {
+    "name": "research_agent",
+    "has_tools": true,
+    "tool_names": [
+      "run_genericagent_executor"
+    ],
+    "handoff_count": 2,
+    "handoff_names": [
+      "code_agent",
+      "review_agent"
+    ]
+  }
+}

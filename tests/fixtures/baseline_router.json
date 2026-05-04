@@ -1,0 +1,122 @@
+{
+  "你好，今天天气怎么样？": {
+    "target": "chat",
+    "matched_rule": "keywords:chat(1)",
+    "confidence": 0.7,
+    "expected": "chat"
+  },
+  "什么是 Python 的 GIL？": {
+    "target": "chat",
+    "matched_rule": "keywords:chat(1)",
+    "confidence": 0.7,
+    "expected": "chat"
+  },
+  "谢谢你的帮助": {
+    "target": "chat",
+    "matched_rule": "keywords:chat(1)",
+    "confidence": 0.7,
+    "expected": "chat"
+  },
+  "你觉得 Rust 和 Go 哪个更好？": {
+    "target": "chat",
+    "matched_rule": "keywords:chat(1)",
+    "confidence": 0.7,
+    "expected": "chat"
+  },
+  "hello, how are you?": {
+    "target": "chat",
+    "matched_rule": "keywords:chat(1)",
+    "confidence": 0.7,
+    "expected": "chat"
+  },
+  "帮我写一个快速排序的 Python 实现": {
+    "target": "code",
+    "matched_rule": "action_start:帮我->code",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "修改这个文件把日志级别改成 DEBUG": {
+    "target": "code",
+    "matched_rule": "keywords:code(5e/0c)",
+    "confidence": 0.9,
+    "expected": "executor"
+  },
+  "重构这段代码，提取公共方法": {
+    "target": "code",
+    "matched_rule": "keywords:code(1e/0c)",
+    "confidence": 0.58,
+    "expected": "executor"
+  },
+  "帮我在这个类里加一个单例模式": {
+    "target": "code",
+    "matched_rule": "action_start:帮我->code",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "实现一个 LRU 缓存装饰器": {
+    "target": "code",
+    "matched_rule": "keywords:code(2e/0c)",
+    "confidence": 0.66,
+    "expected": "executor"
+  },
+  "帮我审查这段代码的安全性": {
+    "target": "review",
+    "matched_rule": "action_start:帮我->review",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "检查这个函数有没有内存泄漏": {
+    "target": "review",
+    "matched_rule": "keywords:review(2e/0c)",
+    "confidence": 0.66,
+    "expected": "executor"
+  },
+  "运行 pytest 并修复失败的测试": {
+    "target": "review",
+    "matched_rule": "action_start:运行->review",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "验证这个 API 的输入参数是否做了校验": {
+    "target": "research",
+    "matched_rule": "action_start:验证->research",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "review 一下这个 PR 的代码质量": {
+    "target": "review",
+    "matched_rule": "keywords:review(1e/0c)",
+    "confidence": 0.58,
+    "expected": "executor"
+  },
+  "搜索一下 Django 5.0 的新特性": {
+    "target": "research",
+    "matched_rule": "action_start:搜索->research",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "帮我查查 Redis Stream 的用法": {
+    "target": "research",
+    "matched_rule": "action_start:帮我->research",
+    "confidence": 0.95,
+    "expected": "executor"
+  },
+  "看一下这个项目的 README 文档": {
+    "target": "executor",
+    "matched_rule": "keywords:executor(1e/0c)",
+    "confidence": 0.58,
+    "expected": "executor"
+  },
+  "这个错误日志是什么意思：ConnectionRefusedError": {
+    "target": "executor",
+    "matched_rule": "keywords:executor(1e/1c)",
+    "confidence": 0.58,
+    "expected": "executor"
+  },
+  "找到所有引用了 deprecated API 的文件": {
+    "target": "research",
+    "matched_rule": "keywords:research(2e/0c)",
+    "confidence": 0.66,
+    "expected": "executor"
+  }
+}

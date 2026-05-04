@@ -1,0 +1,161 @@
+{
+  "summary": "Router: 12/12 correct (100.0%), avg 18.3us/query",
+  "total_queries": 12,
+  "route_accuracy": 1.0,
+  "avg_latency_ms": 0.01828333333333346,
+  "category_breakdown": {
+    "chat": {
+      "total": 2,
+      "correct": 2,
+      "accuracy": "100.0%",
+      "targets": [
+        "chat"
+      ]
+    },
+    "code": {
+      "total": 4,
+      "correct": 4,
+      "accuracy": "100.0%",
+      "targets": [
+        "code",
+        "executor"
+      ]
+    },
+    "review": {
+      "total": 2,
+      "correct": 2,
+      "accuracy": "100.0%",
+      "targets": [
+        "review"
+      ]
+    },
+    "research": {
+      "total": 1,
+      "correct": 1,
+      "accuracy": "100.0%",
+      "targets": [
+        "research"
+      ]
+    },
+    "multi": {
+      "total": 3,
+      "correct": 3,
+      "accuracy": "100.0%",
+      "targets": [
+        "code",
+        "executor",
+        "research"
+      ]
+    }
+  },
+  "results": [
+    {
+      "id": "code-01",
+      "category": "code",
+      "target": "code",
+      "rule": "action_start:帮我->code",
+      "correct": true,
+      "latency_us": 32.20000000000306,
+      "error": ""
+    },
+    {
+      "id": "code-02",
+      "category": "code",
+      "target": "executor",
+      "rule": "action_start:写->executor",
+      "correct": true,
+      "latency_us": 17.90000000000125,
+      "error": ""
+    },
+    {
+      "id": "code-03",
+      "category": "code",
+      "target": "code",
+      "rule": "keywords:code(4e/0c)",
+      "correct": true,
+      "latency_us": 15.899999999999249,
+      "error": ""
+    },
+    {
+      "id": "review-01",
+      "category": "review",
+      "target": "review",
+      "rule": "action_start:帮我->review",
+      "correct": true,
+      "latency_us": 14.100000000003,
+      "error": ""
+    },
+    {
+      "id": "review-02",
+      "category": "review",
+      "target": "review",
+      "rule": "keywords:review(1e/0c)",
+      "correct": true,
+      "latency_us": 14.899999999998247,
+      "error": ""
+    },
+    {
+      "id": "research-01",
+      "category": "research",
+      "target": "research",
+      "rule": "action_start:搜索->research",
+      "correct": true,
+      "latency_us": 12.699999999997436,
+      "error": ""
+    },
+    {
+      "id": "research-02",
+      "category": "multi",
+      "target": "research",
+      "rule": "action_start:帮我->research",
+      "correct": true,
+      "latency_us": 13.399999999996748,
+      "error": ""
+    },
+    {
+      "id": "multi-01",
+      "category": "multi",
+      "target": "executor",
+      "rule": "action_start:帮我->executor",
+      "correct": true,
+      "latency_us": 12.400000000002686,
+      "error": ""
+    },
+    {
+      "id": "multi-02",
+      "category": "multi",
+      "target": "code",
+      "rule": "keywords:code(5e/0c)",
+      "correct": true,
+      "latency_us": 16.39999999999975,
+      "error": ""
+    },
+    {
+      "id": "chat-01",
+      "category": "chat",
+      "target": "chat",
+      "rule": "keywords:chat(1)",
+      "correct": true,
+      "latency_us": 11.799999999999311,
+      "error": ""
+    },
+    {
+      "id": "chat-02",
+      "category": "chat",
+      "target": "chat",
+      "rule": "keywords:chat(2)",
+      "correct": true,
+      "latency_us": 11.099999999999998,
+      "error": ""
+    },
+    {
+      "id": "boundary-04",
+      "category": "code",
+      "target": "code",
+      "rule": "action_start:帮我->code",
+      "correct": true,
+      "latency_us": 46.600000000000804,
+      "error": ""
+    }
+  ]
+}

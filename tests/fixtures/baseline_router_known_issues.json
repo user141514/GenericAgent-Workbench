@@ -1,0 +1,80 @@
+[
+  {
+    "query": "帮我写一个快速排序的 Python 实现",
+    "expected": "executor",
+    "actual": "code",
+    "rule": "action_start:帮我->code"
+  },
+  {
+    "query": "修改这个文件把日志级别改成 DEBUG",
+    "expected": "executor",
+    "actual": "code",
+    "rule": "keywords:code(5e/0c)"
+  },
+  {
+    "query": "重构这段代码，提取公共方法",
+    "expected": "executor",
+    "actual": "code",
+    "rule": "keywords:code(1e/0c)"
+  },
+  {
+    "query": "帮我在这个类里加一个单例模式",
+    "expected": "executor",
+    "actual": "code",
+    "rule": "action_start:帮我->code"
+  },
+  {
+    "query": "实现一个 LRU 缓存装饰器",
+    "expected": "executor",
+    "actual": "code",
+    "rule": "keywords:code(2e/0c)"
+  },
+  {
+    "query": "帮我审查这段代码的安全性",
+    "expected": "executor",
+    "actual": "review",
+    "rule": "action_start:帮我->review"
+  },
+  {
+    "query": "检查这个函数有没有内存泄漏",
+    "expected": "executor",
+    "actual": "review",
+    "rule": "keywords:review(2e/0c)"
+  },
+  {
+    "query": "运行 pytest 并修复失败的测试",
+    "expected": "executor",
+    "actual": "review",
+    "rule": "action_start:运行->review"
+  },
+  {
+    "query": "验证这个 API 的输入参数是否做了校验",
+    "expected": "executor",
+    "actual": "research",
+    "rule": "action_start:验证->research"
+  },
+  {
+    "query": "review 一下这个 PR 的代码质量",
+    "expected": "executor",
+    "actual": "review",
+    "rule": "keywords:review(1e/0c)"
+  },
+  {
+    "query": "搜索一下 Django 5.0 的新特性",
+    "expected": "executor",
+    "actual": "research",
+    "rule": "action_start:搜索->research"
+  },
+  {
+    "query": "帮我查查 Redis Stream 的用法",
+    "expected": "executor",
+    "actual": "research",
+    "rule": "action_start:帮我->research"
+  },
+  {
+    "query": "找到所有引用了 deprecated API 的文件",
+    "expected": "executor",
+    "actual": "research",
+    "rule": "keywords:research(2e/0c)"
+  }
+]
