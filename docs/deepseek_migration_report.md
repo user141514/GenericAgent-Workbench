@@ -7,7 +7,7 @@
 ```python
 native_claude_config = {
     'name': 'glm-5',
-    'apikey': 'sk-sp-e6ba5c2059c948a384ec44a2709f42ce',
+    'apikey': 'sk-YOUR_DEEPSEEK_API_KEY',
     'apibase': 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     'model': 'glm-5',
     'stream': False,
@@ -216,7 +216,7 @@ native_oai_config = {
 # 保留原 GLM-5 配置
 native_claude_config = {
     'name': 'glm-5',
-    'apikey': 'sk-sp-e6ba5c2059c948a384ec44a2709f42ce',
+    'apikey': 'sk-YOUR_DEEPSEEK_API_KEY',
     'apibase': 'https://coding.dashscope.aliyuncs.com/apps/anthropic',
     'model': 'glm-5',
     'stream': False,
