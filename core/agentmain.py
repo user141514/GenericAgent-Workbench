@@ -95,6 +95,66 @@ def _tool_schema_chars(tools):
     return len(json.dumps(tools or [], ensure_ascii=False, separators=(",", ":")))
 
 
+_AMBIGUOUS_PATTERNS = [
+    "...", "。。。", "…", "继续", "接着", "然后呢", "然后",
+    "上一个", "刚才那个", "你刚才说的", "按你说的做", "照做",
+    "怎么改回去", "怎么撤销", "如何回滚", "undo", "rollback",
+    "继续执行", "继续做", "还有呢", "接着说",
+]
+
+
+def _is_ambiguous_followup(user_query: str) -> bool:
+    """Detect queries that need recent context to be understood."""
+    if not user_query or not user_query.strip():
+        return True
+    s = user_query.strip().lower()
+    return any(s == p or s.startswith(p) for p in _AMBIGUOUS_PATTERNS)
+
+
+def _build_recent_context(history: list[str], current_query: str, max_lines: int = 12, max_chars: int = 3000) -> str:
+    """Build a [RECENT CONVERSATION CONTEXT] block from self.history.
+
+    Uses existing history entries — no new data structures.
+    When current query is ambiguous and history is empty, adds a clarification instruction.
+    """
+    ambiguous = _is_ambiguous_followup(current_query)
+
+    if not history:
+        if ambiguous:
+            return (
+                "### [RECENT CONVERSATION CONTEXT]\n"
+                "No recent conversation history is available. "
+                "The user's message is ambiguous. Ask the user to clarify "
+                "what task or topic they are referring to.\n"
+                "[/RECENT CONVERSATION CONTEXT]"
+            )
+        return ""
+
+    recent_lines = history[-max_lines:]
+    parts = ["### [RECENT CONVERSATION CONTEXT]"]
+    if ambiguous:
+        parts.append(
+            "The user's current message is ambiguous (e.g. '...', '继续', '怎么改回去'). "
+            "Use the context below to understand what the user is referring to."
+        )
+    parts.append("")
+
+    budget = max_chars - len("\n".join(parts))
+    included = []
+    for line in reversed(recent_lines):
+        if budget - len(line) < 100 and included:
+            break
+        included.append(line)
+        budget -= len(line) + 1
+    included.reverse()
+
+    for line in included:
+        parts.append(line)
+
+    parts.append("[/RECENT CONVERSATION CONTEXT]")
+    return "\n".join(parts)
+
+
 class GeneraticAgent:
     def __init__(self):
         script_dir = PROJECT_ROOT
@@ -422,6 +482,11 @@ class GeneraticAgent:
                             handler.working['key_info'] += f'\n[SYSTEM] 姝や负 {ps} 涓璇濆墠璁剧疆鐨刱ey_info锛岃嫢宸插湪鏂颁换鍔★紝鍏堟洿鏂版垨娓呴櫎宸ヤ綔璁板繂銆俓n'
                     self.handler = handler
                     user_input = raw_query
+                    # ── Inject recent conversation history for ALL sources ──
+                    if os.environ.get("GENERIC_AGENT_RECENT_TURNS", "1") == "1":
+                        recent = _build_recent_context(self.history, raw_query)
+                        if recent:
+                            user_input = recent + "\n\n" + user_input
                     if source == 'feishu' and len(self.history) > 1:
                         user_input = handler._get_anchor_prompt() + f"\n\n### 鐢ㄦ埛褰撳墠娑堟伅\n{raw_query}"
                     initial_user_content = None
