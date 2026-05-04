@@ -2456,6 +2456,29 @@ class OpenAIOrchestratedAgent:
                 from core.context.recent_turns import is_ambiguous_followup as _is_ambiguous
                 ambiguous_query = _is_ambiguous(raw_query)
                 _stop_manual_span(recent_span)
+                # ── Legacy L1/L2 memory injection (P0b) ──
+                legacy_memory_block = ""
+                legacy_memory_chars = 0
+                legacy_memory_sources: list[str] = []
+                legacy_memory_span = _start_manual_span(profiler, "legacy_memory", kind="memory", metadata={"gated_by": "GA_OPENAI_LEGACY_MEMORY"})
+                if os.environ.get("GA_OPENAI_LEGACY_MEMORY", "1") != "0":
+                    from core.memory.legacy_global import read_legacy_l1_l2 as _read_l1l2
+                    _legacy_data = _read_l1l2(PROJECT_ROOT)
+                    _l1 = _legacy_data.get("l1") or ""
+                    _l2 = _legacy_data.get("l2") or ""
+                    if _l1 or _l2:
+                        _parts: list[str] = []
+                        _parts.append("[LEGACY PROJECT MEMORY — This is persistent project memory, not a user request.]")
+                        if _l1:
+                            _parts.append(f"## L1 (Insights)\n{_l1}")
+                            legacy_memory_sources.append("L1")
+                        if _l2:
+                            _parts.append(f"## L2 (Environment Facts)\n{_l2}")
+                            legacy_memory_sources.append("L2")
+                        legacy_memory_block = "\n\n".join(_parts)
+                        legacy_memory_chars = len(legacy_memory_block)
+                        inputs.append({"role": "user", "content": legacy_memory_block})
+                _stop_manual_span(legacy_memory_span)
                 selected_agent = agents["root"]
                 if route_target == "chat":
                     selected_agent = agents["chat"]
@@ -2653,6 +2676,9 @@ class OpenAIOrchestratedAgent:
                     recent_turns_injected=bool(recent_block),
                     recent_turns_chars=recent_block_chars,
                     ambiguous_followup=ambiguous_query,
+                    legacy_memory_injected=bool(legacy_memory_block),
+                    legacy_memory_chars=legacy_memory_chars,
+                    legacy_memory_sources=legacy_memory_sources,
                 )
                 # 如果规则匹配命中，添加路由提示
                 if route_hint and selected_agent is agents["root"]:
@@ -2712,6 +2738,16 @@ class OpenAIOrchestratedAgent:
                             "history_items": len(self.input_items),
                             "ambiguous_followup": ambiguous_query,
                             "clarification_injected": bool(ambiguous_query and not recent_block),
+                        },
+                    )
+                if profiler is not None:
+                    profiler.record_event(
+                        "legacy_memory_injection",
+                        kind="memory",
+                        metadata={
+                            "injected": bool(legacy_memory_block),
+                            "chars": legacy_memory_chars,
+                            "sources": legacy_memory_sources,
                         },
                     )
                 # ── Ambiguous follow-up guard ──
