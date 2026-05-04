@@ -218,27 +218,27 @@ def init():
 agent = init()
 st.caption(f"Backend: {getattr(agent, 'backend_display_name', 'genericagent')}")
 
-# ── Password gate for remote access ──
-_streamlit_password = getattr(agent, "_streamlit_password", None)
-if _streamlit_password is None:
-    try:
-        from core.llmcore import mykeys
-        _streamlit_password = str(mykeys.get("streamlit_password", "")).strip()
-    except Exception:
-        _streamlit_password = ""
-if _streamlit_password:
-    if "auth_ok" not in st.session_state:
-        st.session_state.auth_ok = False
-    if not st.session_state.auth_ok:
-        st.markdown("### 🔐 GAgent Remote")
-        pwd = st.text_input("密码", type="password", placeholder="输入访问密码")
-        if st.button("登录"):
-            if pwd == _streamlit_password:
-                st.session_state.auth_ok = True
-                st.rerun()
-            else:
-                st.error("密码错误")
-        st.stop()
+# ── Password gate (disabled: mobile not live yet) ──
+# _streamlit_password = getattr(agent, "_streamlit_password", None)
+# if _streamlit_password is None:
+#     try:
+#         from core.llmcore import mykeys
+#         _streamlit_password = str(mykeys.get("streamlit_password", "")).strip()
+#     except Exception:
+#         _streamlit_password = ""
+# if _streamlit_password:
+#     if "auth_ok" not in st.session_state:
+#         st.session_state.auth_ok = False
+#     if not st.session_state.auth_ok:
+#         st.markdown("### 🔐 GAgent Remote")
+#         pwd = st.text_input("密码", type="password", placeholder="输入访问密码")
+#         if st.button("登录"):
+#             if pwd == _streamlit_password:
+#                 st.session_state.auth_ok = True
+#                 st.rerun()
+#             else:
+#                 st.error("密码错误")
+#         st.stop()
 
 st.title("What can I help you?")
 
