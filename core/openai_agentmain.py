@@ -1468,6 +1468,29 @@ class OpenAIOrchestratedAgent:
         original_user_request: str | None = None,
         store: Any | None = None,
     ) -> str:
+        # ── P2-3: ExecutionPolicy evaluation ──
+        from .runtime.execution_policy import evaluate_operation, get_policy_mode as _get_policy_mode
+        policy_mode = _get_policy_mode()
+        policy_decision = evaluate_operation(user_request, execution_plan, mode=policy_mode)
+        if self._active_span_id is not None and self.active_profiler is not None:
+            self.active_profiler.record_event(
+                "execution_policy_check",
+                kind="policy",
+                metadata={
+                    "mode": policy_mode,
+                    "allowed": policy_decision.allowed,
+                    "risk_level": policy_decision.risk_level,
+                    "matched_patterns": policy_decision.matched_patterns,
+                    "reason": policy_decision.reason,
+                },
+            )
+        if not policy_decision.allowed:
+            return (
+                f"[POLICY BLOCKED] ({policy_decision.mode} mode)\n"
+                f"Risk level: {policy_decision.risk_level}\n"
+                f"Reason: {policy_decision.reason}\n"
+                f"Matched: {', '.join(policy_decision.matched_patterns[:5])}"
+            )
         self._store_executor_result_state(None)
         try:
             classic = self._classic_executor

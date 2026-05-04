@@ -1,9 +1,31 @@
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass, field
 
 from core.skills.skill_phase import normalize_skill_phase
 from core.skills.skill_registry import SkillRegistry
+
+POLICY_ENV_VAR = "GENERIC_AGENT_EXECUTION_POLICY"
+_POLICY_MODE_DEFAULT = "observe"
+
+_HIGH_RISK_PATTERNS: list[tuple[str, str, str]] = [
+    # (regex, risk_level, description)
+    (r"\brm\s+-rf\b", "critical", "recursive force delete"),
+    (r"\bgit\s+reset\s+--hard\b", "critical", "git hard reset"),
+    (r"\bgit\s+clean\s+-[fidx]+\b", "high", "git clean with force flags"),
+    (r"\bdel\s+/[fq].*[/\\]", "high", "force delete with path"),
+    (r"\bpip\s+install\b", "medium", "pip package installation"),
+    (r"\bnpm\s+install\b", "medium", "npm package installation"),
+    (r"\bconda\s+install\b", "medium", "conda package installation"),
+    (r"\brmdir\s+/[sS]\b", "high", "recursive directory removal"),
+    (r"(?:^|\s|[/\\])\.env(?:\s|$)", "high", "access to .env file"),
+    (r"(?:^|\s|[/\\])mykey\.py(?:\s|$)", "high", "access to mykey.py"),
+    (r"(?:^|\s|[/\\])mykey\.json(?:\s|$)", "high", "access to mykey.json"),
+    (r"\bdrop\s+table\b", "critical", "SQL drop table"),
+    (r"\bdelete\s+from\b", "medium", "SQL delete from"),
+]
 
 
 @dataclass
@@ -172,3 +194,55 @@ def build_execution_policy_from_skills(
     ]
 
     return policy
+
+
+# ── P2-3: Runtime policy evaluation ──────────────────────────────
+
+
+@dataclass
+class PolicyDecision:
+    allowed: bool
+    risk_level: str  # "none" | "medium" | "high" | "critical"
+    matched_patterns: list[str]
+    reason: str
+    mode: str  # "off" | "observe" | "soft" | "hard"
+
+
+def get_policy_mode() -> str:
+    raw = os.environ.get(POLICY_ENV_VAR, "").strip().lower()
+    if raw in ("off", "observe", "soft", "hard"):
+        return raw
+    return _POLICY_MODE_DEFAULT
+
+
+def evaluate_operation(user_request: str, execution_plan: str = "", mode: str | None = None) -> PolicyDecision:
+    """Evaluate a task against high-risk patterns. Always returns allowed=True in observe mode."""
+    mode = mode or get_policy_mode()
+    if mode == "off":
+        return PolicyDecision(True, "none", [], "policy is off", mode)
+
+    combined = f"{user_request}\n{execution_plan}"
+    matched: list[str] = []
+    highest_risk = "none"
+    _risk_order = {"none": 0, "medium": 1, "high": 2, "critical": 3}
+
+    for pattern, risk_level, description in _HIGH_RISK_PATTERNS:
+        if re.search(pattern, combined, re.IGNORECASE):
+            matched.append(f"{risk_level}:{description}")
+            if _risk_order.get(risk_level, 0) > _risk_order.get(highest_risk, 0):
+                highest_risk = risk_level
+
+    if not matched:
+        return PolicyDecision(True, "none", [], "no risk patterns matched", mode)
+
+    if mode == "observe":
+        return PolicyDecision(True, highest_risk, matched, f"observed {len(matched)} risk pattern(s), not blocked", mode)
+    elif mode == "soft":
+        if highest_risk in ("critical", "high"):
+            return PolicyDecision(False, highest_risk, matched, f"soft-blocked: {len(matched)} high/critical pattern(s)", mode)
+        return PolicyDecision(True, highest_risk, matched, f"allowed in soft mode: risk level {highest_risk}", mode)
+    elif mode == "hard":
+        if highest_risk != "none":
+            return PolicyDecision(False, highest_risk, matched, f"hard-blocked: {len(matched)} risk pattern(s)", mode)
+        return PolicyDecision(True, "none", [], "no risk patterns matched", mode)
+    return PolicyDecision(True, highest_risk, matched, "fallback: allowed", mode)
