@@ -24,6 +24,12 @@ def _context_mode() -> str:
 from .workspace_probe import WorkspaceProbe, WorkspaceSnapshot
 from .project_identity import ProjectIdentity, detect_project
 from .runtime_identity import RuntimeIdentity, detect_runtime
+from .session_dump import (
+    cleanup_expired_dumps,
+    dump_session,
+    list_session_dumps,
+    restore_session,
+)
 from .recent_turns import (
     build_recent_conversation_block,
     build_clarification_request,
@@ -40,6 +46,10 @@ __all__ = [
     "detect_project",
     "RuntimeIdentity",
     "detect_runtime",
+    "cleanup_expired_dumps",
+    "dump_session",
+    "list_session_dumps",
+    "restore_session",
     "build_recent_conversation_block",
     "build_clarification_request",
     "is_ambiguous_followup",
