@@ -30,10 +30,12 @@ sys.path.append(os.path.abspath(os.path.join(script_dir, "..")))
 import streamlit as st
 
 BACKEND_KIND = os.environ.get("GA_AGENT_BACKEND", "genericagent").lower()
+from core.agentmain import GeneraticAgent
+from core.router_rules import RouterRules
 if BACKEND_KIND == "openai-agents":
     from core.openai_agentmain import OpenAIOrchestratedAgent as BackendAgent
 else:
-    from core.agentmain import GeneraticAgent as BackendAgent
+    BackendAgent = GeneraticAgent
 try:
     from frontends.chatapp_common import (
         delete_history_file,
@@ -327,6 +329,38 @@ def init():
 agent = init()
 st.caption(f"Backend: {getattr(agent, 'backend_display_name', 'genericagent')}")
 
+
+def get_orchestrator():
+    """Lazy-init the OpenAI multi-agent orchestrator (only loaded when needed)."""
+    if st.session_state.orchestrator is not None:
+        return st.session_state.orchestrator
+    if BACKEND_KIND == "openai-agents":
+        # Already running as orchestrator — reuse the main agent
+        st.session_state.orchestrator = agent
+        return agent
+    try:
+        from core.openai_agentmain import OpenAIOrchestratedAgent
+
+        orch = OpenAIOrchestratedAgent()
+        orch.llm_no = getattr(agent, "llm_no", 0)
+        if not getattr(orch, "_ui_thread_started", False):
+            threading.Thread(target=orch.run, daemon=True).start()
+            orch._ui_thread_started = True
+        st.session_state.orchestrator = orch
+        return orch
+    except Exception:
+        return None
+
+
+def detect_complexity(prompt):
+    """Use RouterRules to judge task complexity before dispatch.
+    Returns one of: 'chat', 'code', 'review', 'research', 'executor', or None.
+    """
+    if not prompt or prompt.startswith("/"):
+        return None
+    result = RouterRules.match(prompt)
+    return result.target  # 'chat' / 'code' / 'review' / 'research' / 'executor' / None
+
 # ── Password gate (disabled: mobile not live yet) ──
 # _streamlit_password = getattr(agent, "_streamlit_password", None)
 # if _streamlit_password is None:
@@ -382,6 +416,12 @@ if "display_queue" not in st.session_state:
     st.session_state.display_queue = None
 if "scroll_event" not in st.session_state:
     st.session_state.scroll_event = 0
+if "routing_mode" not in st.session_state:
+    st.session_state.routing_mode = "ask"  # "ask" | "auto" | "classic_only"
+if "pending_routing" not in st.session_state:
+    st.session_state.pending_routing = None  # {"prompt": ..., "task_prompt": ..., "visible": ..., "route": ...}
+if "orchestrator" not in st.session_state:
+    st.session_state.orchestrator = None  # lazy-init OpenAIOrchestratedAgent
 
 
 def get_history_files():
@@ -801,6 +841,15 @@ def render_sidebar():
     )
     st.divider()
 
+    # ── Routing mode ──
+    routing_checked = st.checkbox(
+        "复杂任务路由询问",
+        value=(st.session_state.routing_mode != "classic_only"),
+        help="检测到代码/审查/搜索等复杂任务时，询问是否切换到多智能体编排模式。关闭后全部走经典路径。",
+    )
+    st.session_state.routing_mode = "ask" if routing_checked else "classic_only"
+    st.divider()
+
     # ── Model Switcher (Key1 / Key2) ──
     current_idx = getattr(agent, "llm_no", 0)
     key_labels = getattr(agent, "get_key_labels", lambda: [])()
@@ -1169,6 +1218,51 @@ if st.session_state.agent_running:
     st.rerun()
 
 if not st.session_state.agent_running:
+    # ── Routing suggestion UI (shown after complexity detection, before dispatch) ──
+    pending = st.session_state.pending_routing
+    if pending is not None:
+        route_label = {"code": "代码/重构", "review": "审查/测试", "research": "调研/搜索", "executor": "复杂任务"}
+        route_hint = route_label.get(pending["route"], "复杂任务")
+        with st.chat_message("assistant"):
+            st.info(f"**任务类型判断：{route_hint}** — 这类任务用多智能体编排（规划 → 执行 → 验证）效果更好。")
+            c1, c2, c3 = st.columns([1, 1, 2])
+            with c1:
+                if st.button("用 Planner 编排", key="route_planner", type="primary", use_container_width=True):
+                    orch = get_orchestrator()
+                    if orch is not None:
+                        dispatch_agent = orch
+                        st.toast("已切换到多智能体编排模式")
+                    else:
+                        dispatch_agent = agent
+                        st.toast("编排器不可用，使用经典模式")
+                    st.session_state.display_queue = dispatch_agent.put_task(
+                        pending["task_prompt"], source="user", run_id=st.session_state.task_id
+                    )
+                    st.session_state.agent_running = True
+                    st.session_state.stream_started = False
+                    st.session_state.stop_requested = False
+                    st.session_state.partial_response = ""
+                    st.session_state.current_turn = 0
+                    st.session_state.scroll_event = 0
+                    st.session_state.pending_routing = None
+                    st.rerun()
+            with c2:
+                if st.button("直接执行", key="route_classic", use_container_width=True):
+                    st.session_state.display_queue = agent.put_task(
+                        pending["task_prompt"], source="user", run_id=st.session_state.task_id
+                    )
+                    st.session_state.agent_running = True
+                    st.session_state.stream_started = False
+                    st.session_state.stop_requested = False
+                    st.session_state.partial_response = ""
+                    st.session_state.current_turn = 0
+                    st.session_state.scroll_event = 0
+                    st.session_state.pending_routing = None
+                    st.rerun()
+            with c3:
+                st.caption("Planner 会先规划再执行，适合复杂任务。直接执行跳过规划步骤，更快但缺少验证闭环。")
+        st.stop()
+
     if prompt := st.chat_input("any task?"):
         task_prompt = build_prompt_with_attachments(prompt)
         visible_prompt = format_user_message(prompt)
@@ -1179,16 +1273,30 @@ if not st.session_state.agent_running:
         with st.chat_message("user"):
             st.markdown(visible_prompt)
 
+        # ── Complexity detection ──
+        route = detect_complexity(prompt)
         task_id = str(uuid.uuid4())
         st.session_state.task_id = task_id
-        st.session_state.display_queue = agent.put_task(task_prompt, source="user", run_id=task_id)
-        st.session_state.agent_running = True
-        st.session_state.stream_started = False
-        st.session_state.stop_requested = False
-        st.session_state.partial_response = ""
-        st.session_state.current_turn = 0
-        st.session_state.scroll_event = 0
-        st.rerun()
+
+        if route in ("code", "review", "research", "executor") and st.session_state.routing_mode != "classic_only":
+            # Complex task — save prompt and show routing suggestion
+            st.session_state.pending_routing = {
+                "prompt": prompt,
+                "task_prompt": task_prompt,
+                "visible": visible_prompt,
+                "route": route,
+            }
+            st.rerun()
+        else:
+            # Simple chat or routing disabled — dispatch directly to classic
+            st.session_state.display_queue = agent.put_task(task_prompt, source="user", run_id=task_id)
+            st.session_state.agent_running = True
+            st.session_state.stream_started = False
+            st.session_state.stop_requested = False
+            st.session_state.partial_response = ""
+            st.session_state.current_turn = 0
+            st.session_state.scroll_event = 0
+            st.rerun()
 
 if st.session_state.autonomous_enabled:
     st.markdown(
