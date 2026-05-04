@@ -22,6 +22,14 @@ from .early_stop import (
     should_stop_classic_executor,
 )
 from .llm_cache import LLMCallCache, LLMCallRecord, is_cache_safe
+from .llm_cache_bridge import (
+    CACHE_ENV_VAR,
+    get_cache_stats,
+    llm_cache_enabled,
+    make_semantic_hash,
+    store_cache,
+    try_get_cached,
+)
 from .profiler import (
     PROFILE_ENV_VAR,
     RuntimeProfiler,
@@ -52,8 +60,14 @@ __all__ = [
     "EarlyStopDecision",
     "EXECUTION_POLICY_ENV_VAR",
     "ExecutionPolicy",
+    "CACHE_ENV_VAR",
     "LLMCallCache",
     "LLMCallRecord",
+    "get_cache_stats",
+    "llm_cache_enabled",
+    "make_semantic_hash",
+    "store_cache",
+    "try_get_cached",
     "PROFILE_ENV_VAR",
     "PolicyDecision",
     "READ_PREFETCH_ENV_VAR",

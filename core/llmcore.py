@@ -953,6 +953,19 @@ class ToolClient:
 
     def chat(self, messages, tools=None):
         full_prompt = self._build_protocol_prompt(messages, tools)
+        # ── P2-cache: check exact + semantic hash before LLM call ──
+        try:
+            from .runtime.llm_cache_bridge import llm_cache_enabled, try_get_cached, store_cache
+            if llm_cache_enabled():
+                cached = try_get_cached(full_prompt, getattr(self.backend, 'model', 'unknown'), tools)
+                if cached is not None:
+                    cached_text = cached.get("response", "")
+                    if cached_text:
+                        for i in range(0, len(cached_text), 40):
+                            yield cached_text[i:i+40]
+                        return self._parse_mixed_response(cached_text)
+        except Exception:
+            pass
         print("Full prompt length:", len(full_prompt), 'chars')
         prompt_log = full_prompt
         gen = self.backend.ask(full_prompt, stream=True)
@@ -964,6 +977,12 @@ class ToolClient:
         if raw_text.endswith(summarytag):
             self.last_tools = ''; raw_text = raw_text[:-len(summarytag)]
         _write_llm_log('Response', raw_text)
+        try:
+            from .runtime.llm_cache_bridge import llm_cache_enabled, store_cache
+            if llm_cache_enabled():
+                store_cache(full_prompt, getattr(self.backend, 'model', 'unknown'), raw_text, tools)
+        except Exception:
+            pass
         return self._parse_mixed_response(raw_text)
 
     def _estimate_content_len(self, content):
@@ -1251,7 +1270,7 @@ class NativeToolClient:
         combined_content = []; resp = None; tool_results = []
         for msg in messages:
             c = msg.get('content', '')
-            if msg['role'] == 'system': 
+            if msg['role'] == 'system':
                 self.set_system(c); continue
             if isinstance(c, str): combined_content.append({"type": "text", "text": c})
             elif isinstance(c, list): combined_content.extend(c)
@@ -1266,12 +1285,30 @@ class NativeToolClient:
             if tid not in tr_id_set: tool_result_blocks.append({"type": "tool_result", "tool_use_id": tid, "content": ""})
         self._pending_tool_ids = []
         merged = {"role": "user", "content": tool_result_blocks + combined_content}
+        # ── P2-cache: check exact + semantic hash before LLM call ──
+        try:
+            from .runtime.llm_cache_bridge import llm_cache_enabled, try_get_cached, store_cache
+            if llm_cache_enabled():
+                cached = try_get_cached(json.dumps(merged, ensure_ascii=False), getattr(self.backend, 'model', 'unknown'), tools)
+                if cached is not None:
+                    cached_text = cached.get("response", "")
+                    if cached_text:
+                        yield cached_text
+                        return None
+        except Exception:
+            pass
         _write_llm_log('Prompt', json.dumps(merged, ensure_ascii=False, indent=2))
         gen = self.backend.ask(merged)
         try:
-            while True: 
+            while True:
                 chunk = next(gen); yield chunk
         except StopIteration as e: resp = e.value
         if resp: _write_llm_log('Response', resp.raw)
         if resp and hasattr(resp, 'tool_calls') and resp.tool_calls: self._pending_tool_ids = [tc.id for tc in resp.tool_calls]
+        try:
+            from .runtime.llm_cache_bridge import llm_cache_enabled, store_cache
+            if llm_cache_enabled() and resp:
+                store_cache(json.dumps(merged, ensure_ascii=False), getattr(self.backend, 'model', 'unknown'), resp.raw, tools)
+        except Exception:
+            pass
         return resp
