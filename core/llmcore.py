@@ -67,7 +67,7 @@ def _load_mykeys_from_env():
     # ── Key1 (primary model) ──
     key1_api = os.environ.get("GA_KEY1_API_KEY", "").strip() or os.environ.get("GA_API_KEY", "").strip()
     if key1_api:
-        result["key1_config"] = {
+        result["key1_native_oai_config"] = {
             "name": os.environ.get("GA_KEY1_NAME", os.environ.get("GA_BACKEND_NAME", "key1")),
             "apikey": key1_api,
             "apibase": os.environ.get("GA_KEY1_API_BASE", os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com")).rstrip("/"),
@@ -80,7 +80,7 @@ def _load_mykeys_from_env():
     # ── Key2 (secondary model) ──
     key2_api = os.environ.get("GA_KEY2_API_KEY", "").strip()
     if key2_api:
-        result["key2_config"] = {
+        result["key2_native_oai_config"] = {
             "name": os.environ.get("GA_KEY2_NAME", "key2"),
             "apikey": key2_api,
             "apibase": os.environ.get("GA_KEY2_API_BASE", "https://api.deepseek.com").rstrip("/"),
