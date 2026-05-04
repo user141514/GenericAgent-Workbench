@@ -10,6 +10,8 @@ import math, os, sys, json, glob, re, base64, time, threading
 import queue as _queue
 from datetime import datetime
 from typing import Optional
+from http.server import HTTPServer, BaseHTTPRequestHandler
+from urllib.parse import urlparse, parse_qs
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
@@ -28,6 +30,46 @@ from PySide6.QtGui import (
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from core.agentmain import GeneraticAgent
+
+
+# ══════════════════════════════════════════════════════════════════════
+# IPC Server – receives show-panel requests from desktop pet
+# ══════════════════════════════════════════════════════════════════════
+class IPCServer(QObject):
+    """Tiny HTTP server for inter-process communication with the desktop pet.
+
+    Listens on 127.0.0.1:41984.  The desktop pet sends GET /show when the
+    user clicks the "查看结果" button on a notification.
+    """
+
+    show_requested = Signal()
+
+    def __init__(self, port=41984, parent=None):
+        super().__init__(parent)
+        self._port = port
+        ipc = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == '/show' or self.path.startswith('/show?'):
+                    ipc.show_requested.emit()
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'ok')
+                elif self.path == '/ping' or self.path.startswith('/ping?'):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'pong')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        HTTPServer.allow_reuse_address = True
+        self._srv = HTTPServer(('127.0.0.1', port), Handler)
+        threading.Thread(target=self._srv.serve_forever, daemon=True).start()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -276,6 +318,15 @@ class FloatingButton(QWidget):
         x = max(scr.left() + 10, min(x, scr.right() - pw - 10))
         y = max(scr.top() + 10, min(y, scr.bottom() - ph - 10))
         self.chat_panel.move(x, y)
+
+    # ── Public API (called via IPC from desktop pet) ──────
+    def show_panel(self):
+        """Show and raise the chat panel if hidden; raise+activate if already shown."""
+        if not self.chat_panel.isVisible():
+            self._position_panel()
+            self.chat_panel.show()
+        self.chat_panel.raise_()
+        self.chat_panel.activateWindow()
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -1735,6 +1786,11 @@ def main():
     print(f"  悬浮按钮: ({button.x()}, {button.y()})")
     print(f"  聊天面板: ({panel.x()}, {panel.y()})")
     print(f"  关闭面板后可点击右下角发光按钮重新打开")
+
+    # ── IPC Server (desktop pet → show panel) ─────────────
+    ipc = IPCServer()
+    ipc.show_requested.connect(button.show_panel, Qt.QueuedConnection)
+    print(f"  IPC: http://127.0.0.1:41984/show")
 
     # ── Idle monitor (autonomous mode) ────────────────────
     _last_trigger = [0.0]

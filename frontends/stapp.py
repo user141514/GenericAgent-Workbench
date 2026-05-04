@@ -420,7 +420,7 @@ if "show_history" not in st.session_state:
 if "show_memory" not in st.session_state:
     st.session_state.show_memory = False
 if "compact_assistant_history" not in st.session_state:
-    st.session_state.compact_assistant_history = False
+    st.session_state.compact_assistant_history = True
 if "uploaded_files" not in st.session_state:
     st.session_state.uploaded_files = []
 if "processed_upload_cache" not in st.session_state:
@@ -990,14 +990,17 @@ def render_sidebar():
             agent._turn_end_hooks = {}
 
         def _pet_hook(ctx):
-            parts = [f"Turn {ctx.get('turn', '?')}"]
-            if ctx.get("summary"):
-                parts.append(ctx["summary"])
             if ctx.get("exit_reason"):
-                parts.append("任务已完成")
-            _pet_req(f"msg={quote(chr(10).join(parts))}")
-            if ctx.get("exit_reason"):
+                # Task complete → big notification (stays until user clicks)
+                summary = ctx.get("summary", "")
+                _pet_req(f"notify={quote('任务完成|' + summary)}")
                 _pet_req("state=idle")
+            else:
+                # Mid-task turn → short toast bubble (auto-dismiss 3s)
+                parts = [f"Turn {ctx.get('turn', '?')}"]
+                if ctx.get("summary"):
+                    parts.append(ctx["summary"])
+                _pet_req(f"msg={quote(chr(10).join(parts))}")
 
         agent._turn_end_hooks["pet"] = _pet_hook
         st.toast("桌面宠物已启动")
@@ -1140,6 +1143,11 @@ except (ImportError, AttributeError):
 _js_scroll_fix = (
     "!function(){var p=window.parent;if(p.__sfx)return;p.__sfx=1;"
     "var d=p.document;"
+    # ── Anti-flash: force Streamlit expander content hidden when collapsed ──
+    "var antiFlash=d.createElement('style');"
+    "antiFlash.textContent="
+    "\"[data-testid='stExpander'] details:not([open])>div{display:none!important}\";"
+    "d.head.appendChild(antiFlash);"
     "var lastScrollEvent=0;"
     "var isNearBottom=function(){"
     "var m=d.querySelector('section.main');if(!m)return 1;"
@@ -1408,9 +1416,14 @@ if not st.session_state.agent_running:
                     st.rerun()
             with c3:
                 st.caption("Planner 会先规划再执行，适合复杂任务。直接执行跳过规划步骤，更快但缺少验证闭环。")
-            st.markdown(
-                '<div id="content-end" data-force-scroll="1"></div>',
-                unsafe_allow_html=True,
+            # Force scroll to bottom — st.stop() may prevent MutationObserver from firing reliably
+            _embed_html(
+                "<script>"
+                "var m=window.parent.document.querySelector('section.main');"
+                "if(m){var b=m.querySelector('.block-container');"
+                "if(b)b.scrollIntoView({block:'end',behavior:'instant'});}"
+                "</script>",
+                height=0,
             )
         st.stop()
 
