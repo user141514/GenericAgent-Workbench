@@ -150,15 +150,25 @@ section[data-testid="stSidebar"] button[kind="primary"]:hover {
 }
 
 /* ── Chat input ── */
-textarea[data-testid="stChatInputTextArea"] {
+[data-testid="stChatInput"] {
+  background: var(--bg-root) !important;
+}
+[data-testid="stChatInput"] > div {
   background: var(--bg-card) !important;
   border: 1px solid var(--border) !important;
-  border-radius: 10px !important;
-  color: var(--text-primary) !important;
+  border-radius: 12px !important;
 }
-textarea[data-testid="stChatInputTextArea"]:focus {
+[data-testid="stChatInput"] > div:focus-within {
   border-color: var(--border-focus) !important;
   box-shadow: 0 0 0 3px rgba(204,136,100,0.12) !important;
+}
+textarea[data-testid="stChatInputTextArea"] {
+  background: transparent !important;
+  border: none !important;
+  color: var(--text-primary) !important;
+}
+[data-testid="stBottomBlockContainer"] {
+  background: var(--bg-root) !important;
 }
 
 /* ── Scrollbar ── */
