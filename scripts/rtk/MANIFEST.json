@@ -1,0 +1,46 @@
+{
+  "module": "rtk",
+  "version": "0.37.1",
+  "platform_note": "Windows不支持hook模式，rtk自动降级为--claude-md模式",
+  "integrated_by": "rtk init --auto-patch (fallback to --claude-md)",
+  "touch_points": [
+    {
+      "file": "CLAUDE.md",
+      "type": "append",
+      "description": "rtk指令块，由rtk init注入",
+      "marker_start": "<!-- rtk-instructions v2 -->",
+      "marker_end": "EOF（块到文件末尾，无结束标记）",
+      "line_start": 134,
+      "line_end": 271,
+      "backup": "scripts/rtk/backup_preinit/CLAUDE.md"
+    },
+    {
+      "file": "CLAUDE.md",
+      "type": "manual_section",
+      "description": "Token Optimization(RTK)摘要节（L12-25），手动添加，不由uninstall移除",
+      "marker_start": "## Token Optimization (RTK)",
+      "managed_by": "user"
+    },
+    {
+      "file": ".claude/settings.local.json",
+      "type": "permissions.allow entries",
+      "description": "rtk命令的Claude Code权限白名单",
+      "entries": [
+        "Bash(where rtk *)",
+        "Bash(rtk deps *)",
+        "Bash(rtk init *)",
+        "Bash(rtk pytest *)"
+      ],
+      "backup": "scripts/rtk/backup_preinit/settings.local.json"
+    },
+    {
+      "file": ".claude/settings.json",
+      "type": "unchanged",
+      "description": "Windows下rtk不添加hook，settings.json无rtk变更",
+      "backup": "scripts/rtk/backup_preinit/.claude__settings.json"
+    }
+  ],
+  "uninstall": "python scripts/rtk/rtk_uninstall.py",
+  "reinstall": "python scripts/rtk/rtk_install.py",
+  "verify": "rtk --show"
+}

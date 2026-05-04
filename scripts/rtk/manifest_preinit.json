@@ -1,0 +1,21 @@
+{
+  "ts": "2026-05-04T19:04:19",
+  "rtk_version": "0.37.1",
+  "files_before": {
+    ".claude/settings.json": {
+      "exists": true,
+      "sha256": "bd9a3724544daea592d479260be300bc9a862b2e810a125f36d8d264eafa5494",
+      "size": 78,
+      "backup": "scripts/rtk/backup_preinit/.claude__settings.json"
+    },
+    "ASSISTANT.md": {
+      "exists": false
+    },
+    "RTK.md": {
+      "exists": false
+    },
+    ".claude/hooks": {
+      "exists": false
+    }
+  }
+}
