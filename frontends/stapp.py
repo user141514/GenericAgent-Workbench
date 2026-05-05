@@ -386,6 +386,9 @@ def detect_complexity(prompt):
     """
     if not prompt or prompt.startswith("/"):
         return None
+    # ── Autonomous operations always use Classic mode ──
+    if prompt.startswith("[AUTO]") or prompt.startswith("[定时任务]"):
+        return None
     result = RouterRules.match(prompt)
     return result.target  # 'chat' / 'code' / 'review' / 'research' / 'executor' / None
 
@@ -921,11 +924,11 @@ def render_sidebar():
 
     # ── Routing mode ──
     routing_checked = st.checkbox(
-        "复杂任务路由询问",
+        "复杂任务自动走多Agent编排",
         value=(st.session_state.routing_mode != "classic_only"),
-        help="检测到代码/审查/搜索等复杂任务时，询问是否切换到多智能体编排模式。关闭后全部走经典路径。",
+        help="勾上：检测到复杂任务（代码/审查/搜索/执行）时，自动走多智能体编排。不勾：全部走经典路径。",
     )
-    st.session_state.routing_mode = "ask" if routing_checked else "classic_only"
+    st.session_state.routing_mode = "auto" if routing_checked else "classic_only"
     st.divider()
 
     # ── Model Switcher (Key1 / Key2) ──
@@ -1444,17 +1447,20 @@ if not st.session_state.agent_running:
         task_id = str(uuid.uuid4())
         st.session_state.task_id = task_id
 
-        if route in ("code", "review", "research", "executor") and st.session_state.routing_mode != "classic_only":
-            # Complex task — save prompt and show routing suggestion
-            st.session_state.pending_routing = {
-                "prompt": prompt,
-                "task_prompt": task_prompt,
-                "visible": visible_prompt,
-                "route": route,
-            }
+        if route in ("code", "review", "research", "executor") and st.session_state.routing_mode == "auto":
+            # Complex task + auto mode — dispatch directly to multi-agent orchestrator
+            orch = get_orchestrator()
+            if orch is not None:
+                dispatch_agent = orch
+                st.toast("任务类型：" + {"code": "代码/重构", "review": "审查/测试", "research": "调研/搜索", "executor": "复杂任务"}.get(route, "复杂任务") + " → 多Agent编排")
+            else:
+                dispatch_agent = agent
+                st.toast("编排器不可用，使用经典模式")
+            dq = dispatch_agent.put_task(task_prompt, source="user", run_id=task_id)
+            start_agent_task(dq)
             st.rerun()
         else:
-            # Simple chat or routing disabled — dispatch directly to classic
+            # Simple chat, routing disabled, or autonomous — dispatch directly to classic
             dq = agent.put_task(task_prompt, source="user", run_id=task_id)
             start_agent_task(dq)
             st.rerun()
