@@ -367,6 +367,17 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
     handler.max_turns = max_turns
     handler._last_user_input = user_input
 
+    # ── M7: Tool Event Ledger initialization ──
+    import os as _os_m7
+    if _os_m7.environ.get("GA_TOOL_EVENT_LEDGER", "").strip() == "1":
+        try:
+            from core.context.tool_event_ledger import ToolEventLedger
+            handler._tool_event_ledger = ToolEventLedger()
+        except Exception:
+            handler._tool_event_ledger = None
+    else:
+        handler._tool_event_ledger = None
+
     def _stopped():
         return stop_event and stop_event.is_set()
 
@@ -489,6 +500,30 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         )
                     except Exception:
                         pass
+
+                # ── M7: Tool Event Ledger recording hook ──
+                # Minimal, gated, non-blocking. Records executed facts only.
+                _ledger = getattr(handler, "_tool_event_ledger", None)
+                if _ledger is not None and tool_name != "no_tool":
+                    try:
+                        _event_id = _ledger.start_call(
+                            tool_name=tool_name,
+                            args=args,
+                            target_path=tool_target_path,
+                            turn=turn,
+                            index=ii,
+                        )
+                        if _event_id:
+                            _result_text = _outcome_result_text(outcome)
+                            _ledger.complete_call(
+                                event_id=_event_id,
+                                result=_result_text,
+                                status="error" if _is_error_like_outcome(outcome) else "success",
+                                result_chars=len(_result_text),
+                                error_like=_is_error_like_outcome(outcome),
+                            )
+                    except Exception:
+                        pass  # ledger failure must never block agent loop
 
                 if outcome.should_exit:
                     exit_reason = {"result": "EXITED", "data": outcome.data}

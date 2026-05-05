@@ -118,6 +118,9 @@ CANONICAL_READER_WHITELIST = {
     "tests/integration/test_memory_reader_parity.py",
     "tests/integration/test_context_builder_output.py",
     "tests/integration/test_openai_adapter.py",
+    "tests/integration/test_classic_handoff_bridge.py",
+    "tests/integration/test_tool_event_ledger.py",
+    "tests/integration/test_distillation_verified.py",
 }
 
 def test_no_new_direct_l1_l2_reads():
@@ -188,6 +191,8 @@ KNOWN_BUILDERS = {
     "core/context/recent_turns.py",
     "core/context/memory_reader.py",
     "core/context/adapters.py",             # M5: OpenAIContextAdapter + ClassicContextAdapter
+    "core/context/tool_event_ledger.py",    # M7: ToolEventLedger
+    "core/context/change_classifier.py",    # M7: ChangeClassifier
     # context runtime infrastructure (not builders, but co-located in core/context/)
     "core/context/__init__.py",
     "core/context/project_identity.py",

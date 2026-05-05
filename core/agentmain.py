@@ -95,6 +95,7 @@ def _tool_schema_chars(tools):
     return len(json.dumps(tools or [], ensure_ascii=False, separators=(",", ":")))
 
 
+# DEPRECATED: phase=M6, replaced_by=core.context.recent_turns.is_ambiguous_followup()
 _AMBIGUOUS_PATTERNS = [
     "...", "。。。", "…", "继续", "接着", "然后呢", "然后",
     "上一个", "刚才那个", "你刚才说的", "按你说的做", "照做",
@@ -104,7 +105,18 @@ _AMBIGUOUS_PATTERNS = [
 
 
 def _is_ambiguous_followup(user_query: str) -> bool:
-    """Detect queries that need recent context to be understood."""
+    """Detect queries that need recent context to be understood.
+
+    M6: Delegates to the canonical is_ambiguous_followup() in
+    core.context.recent_turns when available. Falls back to legacy
+    pattern matching on import failure.
+    """
+    try:
+        from core.context.recent_turns import is_ambiguous_followup as _canonical
+        return _canonical(user_query)
+    except Exception:
+        pass
+    # Legacy fallback
     if not user_query or not user_query.strip():
         return True
     s = user_query.strip().lower()
@@ -112,29 +124,56 @@ def _is_ambiguous_followup(user_query: str) -> bool:
 
 
 def _build_recent_context(history: list[str], current_query: str, max_lines: int = 12, max_chars: int = 3000) -> str:
-    """Build a [RECENT CONVERSATION CONTEXT] block from self.history.
+    """Build a [RECENT CONTEXT] block from self.history.
 
-    Uses existing history entries — no new data structures.
-    When current query is ambiguous and history is empty, instructs the model
-    to make minimal assumptions and proceed rather than asking the user.
+    M6: Uses the canonical build_recent_conversation_block() from
+    core.context.recent_turns when history is available. Falls back
+    to legacy format on import failure or when history is empty.
     """
     ambiguous = _is_ambiguous_followup(current_query)
 
+    # ── Empty history: use canonical clarification note ──
     if not history:
         if ambiguous:
+            try:
+                from core.context.recent_turns import build_clarification_request as _canonical_clarify
+                return _canonical_clarify()
+            except Exception:
+                pass
             return (
-                "### [RECENT CONVERSATION CONTEXT]\n"
+                "### [RECENT CONTEXT]\n"
                 "No recent conversation history is available. "
                 "The user's message is ambiguous (e.g. a continuation like '...'). "
                 "Do NOT ask the user to clarify. Instead, make minimal, reversible "
                 "assumptions based on common context (project state, recent edits, "
                 "git status) and proceed. State your assumptions briefly, then act.\n"
-                "[/RECENT CONVERSATION CONTEXT]"
+                "[/RECENT CONTEXT]"
             )
         return ""
 
+    # ── Convert Classic history format to input_items ──
+    input_items = _history_to_input_items(history, max_lines=max_lines)
+
+    # ── Use canonical format when available ──
+    try:
+        from core.context.recent_turns import build_recent_conversation_block as _canonical_block
+        block = _canonical_block(input_items, max_turns=max(min(max_lines, 5), 1), max_chars=max_chars)
+        if block:
+            prefix = ""
+            if ambiguous:
+                prefix = (
+                    "The user's current message is ambiguous (e.g. '...', '继续', '怎么改回去'). "
+                    "Use the context below to understand what the user is referring to. "
+                    "If context is insufficient, make minimal assumptions and proceed — "
+                    "do NOT ask the user to repeat themselves.\n\n"
+                )
+            return prefix + block
+    except Exception:
+        pass
+
+    # ── Legacy fallback ──
     recent_lines = history[-max_lines:]
-    parts = ["### [RECENT CONVERSATION CONTEXT]"]
+    parts = ["### [RECENT CONTEXT]"]
     if ambiguous:
         parts.append(
             "The user's current message is ambiguous (e.g. '...', '继续', '怎么改回去'). "
@@ -156,8 +195,36 @@ def _build_recent_context(history: list[str], current_query: str, max_lines: int
     for line in included:
         parts.append(line)
 
-    parts.append("[/RECENT CONVERSATION CONTEXT]")
+    parts.append("[/RECENT CONTEXT]")
     return "\n".join(parts)
+
+
+def _history_to_input_items(history: list[str], max_lines: int = 12) -> list[dict[str, str]]:
+    """Convert Classic history format to OpenAI input_items format.
+
+    Classic format:
+        [USER]: query text
+        [Agent] summary text
+
+    OpenAI format:
+        {"role": "user", "content": "query text"}
+        {"role": "assistant", "content": "summary text"}
+    """
+    items: list[dict[str, str]] = []
+    for line in history[-max_lines:]:
+        line = str(line or "").strip()
+        if line.startswith("[USER]:"):
+            items.append({"role": "user", "content": line[len("[USER]:"):].strip()})
+        elif line.startswith("[Agent]"):
+            items.append({"role": "assistant", "content": line[len("[Agent]"):].strip()})
+        elif line.startswith("[USER]:") or line.startswith("[Agent]"):
+            # Already in correct format, skip unrecognized prefixes
+            pass
+        else:
+            # Unrecognized format — treat as system info
+            if line:
+                items.append({"role": "user", "content": line})
+    return items
 
 
 class GeneraticAgent:

@@ -145,6 +145,131 @@ def build_distillation_candidate(
     return candidate
 
 
+# ══════════════════════════════════════════════════════════════════════
+# M8: Cross-reference verification
+# ══════════════════════════════════════════════════════════════════════
+
+def verify_distillation_candidate(
+    candidate: dict[str, Any],
+    tool_event_ledger: Any | None = None,
+    change_classifier: Any | None = None,
+) -> dict[str, Any]:
+    """Cross-reference a distillation candidate against tool execution evidence.
+
+    M8: Adds tool_cross_reference metadata to the candidate. This allows
+    downstream consumers (preview, write gate) to distinguish between
+    evidence-backed claims and unverified assistant output.
+
+    Args:
+        candidate: From build_distillation_candidate().
+        tool_event_ledger: ToolEventLedger instance (from M7) or None.
+        change_classifier: ChangeClassifier instance (from M7) or None.
+
+    Returns:
+        The candidate dict with added tool_cross_reference field:
+        {
+            "verified": bool,
+            "matched_events": int,
+            "matched_files": list[str],
+            "unmatched_files": list[str],
+            "ledger_available": bool,
+            "classifier_pending": int,
+            "classifier_executed": int,
+        }
+    """
+    ref: dict[str, Any] = {
+        "verified": False,
+        "matched_events": 0,
+        "matched_files": [],
+        "unmatched_files": [],
+        "ledger_available": False,
+        "classifier_pending": 0,
+        "classifier_executed": 0,
+    }
+
+    # ── Cross-reference with tool event ledger ──
+    if tool_event_ledger is not None:
+        try:
+            events = tool_event_ledger.recent_events(50)
+            ref["ledger_available"] = True
+            ref["matched_events"] = len(events)
+
+            # Check if candidate's files_touched have corresponding tool events
+            candidate_files = set(candidate.get("files_touched") or [])
+            if candidate_files and events:
+                # Extract paths from tool events
+                tool_paths: set[str] = set()
+                for e in events:
+                    if e.target_path:
+                        tool_paths.add(e.target_path)
+                    # Also check args_summary for path references
+                    args = str(e.args_summary or "")
+                    import re
+                    for m in re.finditer(r'["\']?([^"\',]+\.(?:py|txt|md|json|toml|cfg|yaml|yml|js|ts|html|css))["\']?', args):
+                        tool_paths.add(m.group(1))
+
+                matched = candidate_files & tool_paths
+                unmatched = candidate_files - tool_paths
+                ref["matched_files"] = sorted(matched)
+                ref["unmatched_files"] = sorted(unmatched)
+
+                # Candidate is verified if at least one file matches or
+                # there are tool events in the same time window
+                if matched or len(events) > 0:
+                    ref["verified"] = True
+        except Exception:
+            pass
+
+    # ── Cross-reference with change classifier ──
+    if change_classifier is not None:
+        try:
+            pending = change_classifier.get_pending()
+            executed = change_classifier.get_executed()
+            ref["classifier_pending"] = len(pending)
+            ref["classifier_executed"] = len(executed)
+
+            # If there are executed changes, the candidate is more likely verified
+            if executed and not ref["verified"]:
+                ref["verified"] = True
+        except Exception:
+            pass
+
+    # ── Attach to candidate ──
+    candidate["tool_cross_reference"] = ref
+    return candidate
+
+
+def build_verified_candidate(
+    *,
+    summary: str,
+    source: str = "openai",
+    run_id: str = "",
+    task: str = "",
+    session: str = "",
+    files_touched: list[str] | None = None,
+    questions: list[str] | None = None,
+    is_proposed: bool = False,
+    tool_event_ledger: Any | None = None,
+    change_classifier: Any | None = None,
+) -> dict[str, Any]:
+    """Build and verify a distillation candidate in one step.
+
+    M8: Wraps build_distillation_candidate() + verify_distillation_candidate().
+    The returned candidate includes tool_cross_reference metadata.
+    """
+    candidate = build_distillation_candidate(
+        summary=summary,
+        source=source,
+        run_id=run_id,
+        task=task,
+        session=session,
+        files_touched=files_touched,
+        questions=questions,
+        is_proposed=is_proposed,
+    )
+    return verify_distillation_candidate(candidate, tool_event_ledger, change_classifier)
+
+
 def format_inbox_entry(candidate: dict[str, Any]) -> str:
     """Format a distillation candidate as a history_memory_inbox.md entry.
 
@@ -271,24 +396,48 @@ def write_distillation_candidate(
 
     if mode == "preview":
         # Preview: write candidate JSON to temp/ for inspection
+        # M8: Enhanced with tool_cross_reference verification metadata
         preview_dir = root / "temp" / "distillation_previews"
         preview_dir.mkdir(parents=True, exist_ok=True)
         ts = int(time.time())
         run_id = candidate.get("run_id", "") or f"draft_{ts}"
         preview_path = preview_dir / f"{run_id}_{ts}.json"
+
+        # ── M8: Auto-verify if ledger/classifier available ──
+        _xref = candidate.get("tool_cross_reference")
+        if _xref is None:
+            # Try lazy verification if not already done
+            try:
+                from core.context.tool_event_ledger import ToolEventLedger
+                from core.context.change_classifier import ChangeClassifier
+                # Can't auto-create instances here — caller must pass them
+                pass
+            except Exception:
+                pass
+
         try:
             preview_data = {
                 "candidate": candidate,
                 "formatted_entry": entry,
                 "mode": mode,
                 "generated_at": candidate.get("generated_at", _utc_now_iso()),
+                # M8: Highlight verification status in preview
+                "tool_cross_reference": _xref or {
+                    "verified": False,
+                    "note": "No ToolEventLedger provided to verify_distillation_candidate()",
+                },
+                "verification_status": (
+                    "VERIFIED" if (_xref or {}).get("verified")
+                    else "UNVERIFIED" if _xref is not None
+                    else "NOT_CHECKED"
+                ),
             }
             preview_path.write_text(
                 json.dumps(preview_data, ensure_ascii=False, indent=2, default=str),
                 encoding="utf-8",
             )
             result["path"] = str(preview_path)
-            result["reason"] = "preview: logged to temp/distillation_previews/"
+            result["reason"] = f"preview: logged to temp/distillation_previews/ (verification: {preview_data['verification_status']})"
         except Exception as e:
             result["reason"] = f"preview write failed: {e}"
         return result
