@@ -28,11 +28,20 @@ script_dir = os.path.dirname(__file__)
 sys.path.append(os.path.abspath(os.path.join(script_dir, "..")))
 
 import streamlit as st
-try:
-    from watchtower_panel import render_watchtower_panel as _render_watchtower_panel
-    _WATCHTOWER_AVAILABLE = True
-except Exception:
-    _WATCHTOWER_AVAILABLE = False
+
+# ── Mobile password gate ───────────────────────────────────
+_PASSWORD = "136168"  # ← 改这里
+if not st.session_state.get("_authenticated"):
+    st.title("🔒 请输入访问密码")
+    _pwd = st.text_input("密码", type="password")
+    if st.button("进入"):
+        if _pwd == _PASSWORD:
+            st.session_state["_authenticated"] = True
+            st.rerun()
+        else:
+            st.error("密码错误")
+    st.stop()
+# ──────────────────────────────────────────────────────────
 
 BACKEND_KIND = os.environ.get("GA_AGENT_BACKEND", "genericagent").lower()
 from core.agentmain import GeneraticAgent
@@ -364,49 +373,25 @@ st.caption(f"Backend: {getattr(agent, 'backend_display_name', 'genericagent')}")
 
 
 def get_orchestrator():
-    """Lazy-init the OpenAI multi-agent orchestrator (only loaded when needed).
-
-    Returns (orchestrator, error_message).
-    - On success: (orch, None)
-    - On failure: (None, reason_string)
-    """
+    """Lazy-init the OpenAI multi-agent orchestrator (only loaded when needed)."""
     if st.session_state.orchestrator is not None:
-        orch = st.session_state.orchestrator
-        if getattr(orch, "ready", False):
-            return orch, None
-        err = getattr(orch, "startup_error", "") or "编排器未就绪"
-        return None, err
-
+        return st.session_state.orchestrator
     if BACKEND_KIND == "openai-agents":
         # Already running as orchestrator — reuse the main agent
-        if getattr(agent, "ready", False):
-            st.session_state.orchestrator = agent
-            return agent, None
-        err = getattr(agent, "startup_error", "") or "openai-agents 后端未就绪"
-        return None, err
-
-    # ── Classic backend + multi-agent checkbox: spin up orchestrator ──
-    orch_startup_error = None
+        st.session_state.orchestrator = agent
+        return agent
     try:
         from core.openai_agentmain import OpenAIOrchestratedAgent
-    except ImportError as e:
-        return None, f"无法导入 OpenAIOrchestratedAgent: {e}"
 
-    try:
         orch = OpenAIOrchestratedAgent()
-    except Exception as e:
-        return None, f"OpenAIOrchestratedAgent 初始化失败: {e}"
-
-    if not getattr(orch, "ready", False):
-        err = getattr(orch, "startup_error", "") or "编排器初始化未完成（缺少模型配置或 openai-agents SDK）"
-        return None, err
-
-    orch.llm_no = getattr(agent, "llm_no", 0)
-    if not getattr(orch, "_ui_thread_started", False):
-        threading.Thread(target=orch.run, daemon=True).start()
-        orch._ui_thread_started = True
-    st.session_state.orchestrator = orch
-    return orch, None
+        orch.llm_no = getattr(agent, "llm_no", 0)
+        if not getattr(orch, "_ui_thread_started", False):
+            threading.Thread(target=orch.run, daemon=True).start()
+            orch._ui_thread_started = True
+        st.session_state.orchestrator = orch
+        return orch
+    except Exception:
+        return None
 
 
 def detect_complexity(prompt):
@@ -451,8 +436,6 @@ if "show_history" not in st.session_state:
     st.session_state.show_history = False
 if "show_memory" not in st.session_state:
     st.session_state.show_memory = False
-if "show_watchtower" not in st.session_state:
-    st.session_state.show_watchtower = False
 if "compact_assistant_history" not in st.session_state:
     st.session_state.compact_assistant_history = True
 if "uploaded_files" not in st.session_state:
@@ -481,7 +464,7 @@ if "scroll_event" not in st.session_state:
 if "content_event" not in st.session_state:
     st.session_state.content_event = 0
 if "routing_mode" not in st.session_state:
-    st.session_state.routing_mode = "auto"  # "auto" | "classic" | "multi_agent"
+    st.session_state.routing_mode = "ask"  # "ask" | "auto" | "classic_only"
 if "pending_routing" not in st.session_state:
     st.session_state.pending_routing = None  # {"prompt": ..., "task_prompt": ..., "visible": ..., "route": ...}
 if "orchestrator" not in st.session_state:
@@ -490,26 +473,6 @@ if "last_submitted_input" not in st.session_state:
     st.session_state.last_submitted_input = ""
 if "task_start_time" not in st.session_state:
     st.session_state.task_start_time = 0
-if "task_error" not in st.session_state:
-    st.session_state.task_error = False
-if "task_restoring" not in st.session_state:
-    st.session_state.task_restoring = False
-if "stop_confirmed_at" not in st.session_state:
-    st.session_state.stop_confirmed_at = 0
-
-# ── Routing mode indicator ──
-_routing_mode = st.session_state.routing_mode
-_routing_label = {
-    "auto": "🤖 自动判断",
-    "classic": "📋 经典模式",
-    "multi_agent": "🔀 多Agent编排",
-}
-_routing_help = {
-    "auto": "复杂任务自动走多智能体，简单对话走经典",
-    "classic": "全部任务走经典单体 GenericAgent",
-    "multi_agent": "全部任务强制走多智能体编排",
-}
-st.caption(f"{_routing_label.get(_routing_mode, '')}  |  {_routing_help.get(_routing_mode, '')}")
 
 
 def get_agent_state():
@@ -520,19 +483,9 @@ def get_agent_state():
         running   — task queued, waiting for first output (backend thinking / tool exec)
         streaming — output chunks arriving
         stopping  — user requested stop, waiting for backend to confirm
-        stopped   — task successfully stopped, transient state (~1s)
         error     — backend reported an error
-        restoring — restore conversation operation in progress
     """
-    if st.session_state.task_restoring:
-        return "restoring"
     if not st.session_state.agent_running:
-        if st.session_state.task_error:
-            return "error"
-        if st.session_state.stop_confirmed_at > 0:
-            if time.time() - st.session_state.stop_confirmed_at < 1.0:
-                return "stopped"
-            st.session_state.stop_confirmed_at = 0
         return "idle"
     if st.session_state.stop_requested:
         return "stopping"
@@ -553,9 +506,6 @@ def reset_agent_state():
     st.session_state.task_id = ""
     st.session_state.scroll_event = 0
     st.session_state.task_start_time = 0
-    st.session_state.task_error = False
-    st.session_state.task_restoring = False
-    st.session_state.stop_confirmed_at = 0
 
 
 def start_agent_task(display_queue):
@@ -570,8 +520,6 @@ def start_agent_task(display_queue):
     st.session_state.current_turn = 0
     st.session_state.scroll_event = 0
     st.session_state.content_event += 1
-    st.session_state.task_error = False
-    st.session_state.task_restoring = False
     st.session_state.pending_routing = None
     st.session_state.task_start_time = time.time()
     return True
@@ -964,22 +912,15 @@ def render_sidebar():
     
     st.divider()
     
-    col1, col2, col3 = st.columns(3)
+    col1, col2 = st.columns(2)
     with col1:
         if st.button("📜 历史", key="toggle_history", use_container_width=True):
             st.session_state.show_history = not st.session_state.show_history
             st.session_state.show_memory = False
-            st.session_state.show_watchtower = False
     with col2:
         if st.button("🧠 记忆", key="toggle_memory", use_container_width=True):
             st.session_state.show_memory = not st.session_state.show_memory
             st.session_state.show_history = False
-            st.session_state.show_watchtower = False
-    with col3:
-        if st.button("🖥️ 终端", key="toggle_watchtower", use_container_width=True, disabled=not _WATCHTOWER_AVAILABLE):
-            st.session_state.show_watchtower = not st.session_state.show_watchtower
-            st.session_state.show_history = False
-            st.session_state.show_memory = False
 
     st.divider()
 
@@ -988,9 +929,6 @@ def render_sidebar():
         st.divider()
     if st.session_state.show_memory:
         render_memory_panel()
-        st.divider()
-    if st.session_state.show_watchtower and _WATCHTOWER_AVAILABLE:
-        _render_watchtower_panel()
         st.divider()
 
     render_upload_panel()
@@ -1002,46 +940,12 @@ def render_sidebar():
     st.divider()
 
     # ── Routing mode ──
-    st.caption("**路由策略**")
-    _current_mode = st.session_state.routing_mode
-    _policy = "auto" if _current_mode == "auto" else "select"
-    _policy_idx = 0 if _policy == "auto" else 1
-
-    routing_policy = st.radio(
-        "路由策略",
-        ["auto", "select"],
-        index=_policy_idx,
-        format_func=lambda x: "🤖 自动判断" if x == "auto" else "🔧 手动指定",
-        horizontal=True,
-        label_visibility="collapsed",
+    routing_checked = st.checkbox(
+        "复杂任务自动走多Agent编排",
+        value=(st.session_state.routing_mode != "classic_only"),
+        help="勾上：检测到复杂任务（代码/审查/搜索/执行）时，自动走多智能体编排。不勾：全部走经典路径。",
     )
-
-    if routing_policy == "select":
-        _sub_idx = 1 if _current_mode == "multi_agent" else 0
-        routing_mode = st.radio(
-            "选择后端",
-            ["classic", "multi_agent"],
-            index=_sub_idx,
-            format_func=lambda x: (
-                "📋 经典模式 (GenericAgent)" if x == "classic"
-                else "🔀 多Agent编排 (Orchestrator)"
-            ),
-            label_visibility="collapsed",
-        )
-    else:
-        routing_mode = "auto"
-
-    st.session_state.routing_mode = routing_mode
-
-    # Show orchestrator status when multi-agent might be used
-    if routing_mode in ("auto", "multi_agent"):
-        orch, orch_err = get_orchestrator()
-        if orch is not None:
-            st.success("✅ 多Agent编排已就绪")
-        else:
-            st.error(f"⚠️ 多Agent编排不可用: {orch_err}")
-            if routing_mode == "multi_agent":
-                st.caption("将回退到经典模式，直到编排器可用")
+    st.session_state.routing_mode = "auto" if routing_checked else "classic_only"
     st.divider()
 
     # ── Model Switcher (Key1 / Key2) ──
@@ -1073,7 +977,6 @@ def render_sidebar():
     if st.button("强行停止任务", use_container_width=True):
         agent.abort()
         st.session_state.stop_requested = True
-        st.session_state.stop_requested_at = time.time()
         st.toast("已发送停止信号")
         st.rerun()
     if st.button("重新注入工具", use_container_width=True):
@@ -1092,7 +995,7 @@ def render_sidebar():
         if not os.path.exists(pet_script):
             pet_script = os.path.join(script_dir, "desktop_pet.pyw")
         subprocess.Popen(
-            [sys.executable, pet_script],
+            [sys.executable, pet_script, "--streamlit-url", "http://localhost:8501"],
             **kwargs
         )
 
@@ -1111,11 +1014,16 @@ def render_sidebar():
 
         def _pet_hook(ctx):
             if ctx.get("exit_reason"):
+                # Task complete → big notification (stays until user clicks)
+                summary = ctx.get("summary", "")
+                _pet_req(f"notify={quote('任务完成|' + summary)}")
                 _pet_req("state=idle")
-            parts = [f"Turn {ctx.get('turn', '?')}"]
-            if ctx.get("summary"):
-                parts.append(ctx["summary"])
-            _pet_req(f"msg={quote(chr(10).join(parts))}")
+            else:
+                # Mid-task turn → short toast bubble (auto-dismiss 3s)
+                parts = [f"Turn {ctx.get('turn', '?')}"]
+                if ctx.get("summary"):
+                    parts.append(ctx["summary"])
+                _pet_req(f"msg={quote(chr(10).join(parts))}")
 
         agent._turn_end_hooks["pet"] = _pet_hook
         st.toast("桌面宠物已启动")
@@ -1245,11 +1153,11 @@ for msg_idx, msg in enumerate(st.session_state.messages):
                 )
             else:
                 st.markdown(message_content_to_text(msg["content"]))
-# Persistent scroll anchor — placed once after all messages so JS can scroll to bottom
-st.markdown(
-    f'<div id="content-end" data-content-event="{st.session_state.content_event}"></div>',
-    unsafe_allow_html=True,
-)
+    # Persistent scroll anchor — placed after all messages so JS can scroll to bottom
+    st.markdown(
+        f'<div id="content-end" data-content-event="{st.session_state.content_event}"></div>',
+        unsafe_allow_html=True,
+    )
 
 try:
     from streamlit import iframe as _st_iframe
@@ -1268,7 +1176,7 @@ _js_scroll_fix = (
     "antiFlash.textContent="
     "\"[data-testid='stExpander'] details:not([open])>div{display:none!important}\";"
     "d.head.appendChild(antiFlash);"
-    "var lastScrollEvent=0,lastContentEvent=0,lastScrollHeight=0;"
+    "var lastScrollEvent=0,lastContentEvent=0;"
     "var isNearBottom=function(){"
     "var m=d.querySelector('section.main');if(!m)return 1;"
     "return m.scrollTop+m.clientHeight>=m.scrollHeight-200;"
@@ -1307,17 +1215,13 @@ _js_scroll_fix = (
     # ── MutationObserver for stream updates ──
     "var obs=new MutationObserver(function(){"
     "var marker=d.querySelector('#stream-marker');"
-    "var sc=d.querySelector('section.main');"
     "if(marker){"
     "var active=marker.getAttribute('data-stream-active');"
     "if(active==='1'){"
     "var se=parseInt(marker.getAttribute('data-scroll-event')||'0',10);"
     "if(se!==lastScrollEvent){"
     "lastScrollEvent=se;"
-    "var curSH=sc?sc.scrollHeight:0;"
-    "var delta=lastScrollHeight?curSH-lastScrollHeight:0;"
-    "lastScrollHeight=curSH;"
-    "if(delta<=300&&isNearBottom())doScroll(false);"
+    "if(isNearBottom())doScroll(false);"
     "}"
     "}"
     "}"
@@ -1378,7 +1282,6 @@ def poll_agent_output():
             if item.get("event") == "error":
                 st.session_state.partial_response = item.get("error", st.session_state.partial_response)
                 st.session_state.agent_running = False
-                st.session_state.task_error = True
                 return True
             if "done" in item:
                 st.session_state.partial_response = item["done"]
@@ -1405,7 +1308,6 @@ def poll_agent_output():
         if item.get("event") == "error":
             st.session_state.partial_response = item.get("error", st.session_state.partial_response)
             st.session_state.agent_running = False
-            st.session_state.task_error = True
             return True
         if "done" in item:
             st.session_state.partial_response = item["done"]
@@ -1501,7 +1403,6 @@ if st.session_state.agent_running:
             done = True
 
     if done:
-        was_stopped = st.session_state.stop_requested
         final_response = st.session_state.partial_response
         if not final_response:
             final_response = "(已停止)"
@@ -1510,8 +1411,6 @@ if st.session_state.agent_running:
         st.session_state.content_event += 1
         st.session_state.last_reply_time = int(time.time())
         reset_agent_state()
-        if was_stopped:
-            st.session_state.stop_confirmed_at = time.time()
         st.rerun()
 
     time.sleep(0.2)
@@ -1528,7 +1427,7 @@ if not st.session_state.agent_running:
             c1, c2, c3 = st.columns([1, 1, 2])
             with c1:
                 if st.button("用 Planner 编排", key="route_planner", type="primary", use_container_width=True):
-                    orch, _orch_err = get_orchestrator()
+                    orch = get_orchestrator()
                     if orch is not None:
                         dispatch_agent = orch
                         st.toast("已切换到多智能体编排模式")
@@ -1578,36 +1477,23 @@ if not st.session_state.agent_running:
         task_id = str(uuid.uuid4())
         st.session_state.task_id = task_id
 
-        routing_mode = st.session_state.routing_mode
-        route_labels = {"code": "代码/重构", "review": "审查/测试", "research": "调研/搜索", "executor": "复杂任务"}
-
-        # ── Decide dispatch target ──
-        use_orchestrator = False
-        if routing_mode == "multi_agent":
-            # Force multi-agent for everything
-            use_orchestrator = True
-            dispatch_reason = "手动指定 → 多Agent编排"
-        elif routing_mode == "auto" and route in ("code", "review", "research", "executor"):
-            # Auto mode: only complex tasks go multi-agent
-            use_orchestrator = True
-            dispatch_reason = f"任务类型：{route_labels.get(route, '复杂任务')} → 多Agent编排"
-        else:
-            dispatch_reason = "经典模式" if routing_mode == "classic" else "简单对话 → 经典"
-
-        if use_orchestrator:
-            orch, orch_error = get_orchestrator()
+        if route in ("code", "review", "research", "executor") and st.session_state.routing_mode == "auto":
+            # Complex task + auto mode — dispatch directly to multi-agent orchestrator
+            orch = get_orchestrator()
             if orch is not None:
                 dispatch_agent = orch
-                st.toast(dispatch_reason, icon="🤖")
+                st.toast("任务类型：" + {"code": "代码/重构", "review": "审查/测试", "research": "调研/搜索", "executor": "复杂任务"}.get(route, "复杂任务") + " → 多Agent编排")
             else:
                 dispatch_agent = agent
-                st.toast(f"⚠️ 编排器不可用：{orch_error}\n已回退经典模式", icon="⚠️")
+                st.toast("编排器不可用，使用经典模式")
+            dq = dispatch_agent.put_task(task_prompt, source="user", run_id=task_id)
+            start_agent_task(dq)
+            st.rerun()
         else:
-            dispatch_agent = agent
-
-        dq = dispatch_agent.put_task(task_prompt, source="user", run_id=task_id)
-        start_agent_task(dq)
-        st.rerun()
+            # Simple chat, routing disabled, or autonomous — dispatch directly to classic
+            dq = agent.put_task(task_prompt, source="user", run_id=task_id)
+            start_agent_task(dq)
+            st.rerun()
 
 if st.session_state.autonomous_enabled:
     st.markdown(

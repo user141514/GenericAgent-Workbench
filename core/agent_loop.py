@@ -365,6 +365,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
     exit_reason = None
     handler._done_hooks = []
     handler.max_turns = max_turns
+    handler._last_user_input = user_input
 
     def _stopped():
         return stop_event and stop_event.is_set()

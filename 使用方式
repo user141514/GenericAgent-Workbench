@@ -1,0 +1,94 @@
+# 阶段审查式重构机制 — 使用方式
+
+## 概述
+
+这是一套"先审查、后重构"的机制，确保对 context/memory 系统的任何改动都有据可查、可回溯。
+
+核心原则：**先诊断根因，再设计方案，最后动代码。**
+
+## 文件结构
+
+```
+docs/refactor/
+├── memory-system-audit.md       ← 现状清单（Context Sources / Injection Points / Write Paths / Failure Patterns）
+├── rebuild-decision.md          ← 决策矩阵（Keep / Wrap / Migrate / Deprecate / Delete）
+├── canonical-context-pipeline.md ← 目标架构设计（唯一 canonical 路径）
+├── deprecated-paths.md          ← 废弃路径清单（含迁移时间表）
+└── test-matrix.md               ← 测试覆盖矩阵
+
+tests/architecture/
+└── test_context_boundaries.py   ← 架构边界测试（强制约束，9 个测试）
+```
+
+## 使用流程
+
+### 当你需要新增一个 context 注入点时
+
+1. 打开 `docs/refactor/memory-system-audit.md`，确认你的新注入点是否与现有路径重复
+2. 打开 `docs/refactor/rebuild-decision.md`，在相应表格中增加一行，标明 KEEP/WRAP/MIGRATE/DEPRECATE/DELETE
+3. 更新 `docs/refactor/deprecated-paths.md`（如果是替换旧路径）
+4. 运行 `pytest tests/architecture/test_context_boundaries.py -v`
+5. 如果测试失败，按测试输出中的提示更新 whitelist 或 baseline
+
+### 当你需要修改 L1/L2 内存文件格式时
+
+1. 查阅 `memory-system-audit.md` 第 1.2 节 — 确认 5 个独立 read path 都需同步更新
+2. 查阅 `deprecated-paths.md` — 确认哪些路径已废弃、哪些仍在用
+3. 改动前先跑 `test_no_new_direct_l1_l2_reads` 确认基线
+
+### 当你需要新增内存文件 reader 时
+
+1. 检查 `canonical-context-pipeline.md` — 你的 reader 是否应该成为 `MemoryReader` 的一部分
+2. 如果不是，在 `rebuild-decision.md` 中登记
+3. 将新 reader 加入 `test_context_boundaries.py` 的 `CANONICAL_READER_WHITELIST`
+
+### 当你需要修改 openai_agentmain.py 的 context assembly 时
+
+1. 查看 `memory-system-audit.md` 第 2.2 节 — 当前有 10 个注入点
+2. 查看 `canonical-context-pipeline.md` 的目标架构 — 未来应该只有 `OpenAIContextAdapter.inject()`
+3. **不要**在 `_run_task_async()` 中再新增 `inputs.append({"role": "user", ...})` 调用 — 测试 `test_no_new_openai_context_injection_points` 会阻止你
+4. 新的 context block 应该通过 `ContextBuilder` → `OpenAIContextAdapter` 路径注入
+
+### 当 Phase 2 实施开始时
+
+1. 以 `canonical-context-pipeline.md` 为蓝图
+2. 按 `rebuild-decision.md` 的决策矩阵执行（从 DEPRECATE 和 MIGRATE 标记开始）
+3. 每完成一个 migration，更新 `deprecated-paths.md` 的状态
+
+## 快速命令
+
+```bash
+# 跑架构边界测试
+pytest tests/architecture/test_context_boundaries.py -v
+
+# 搜索所有直接读取 global_mem 的代码（排除注释）
+grep -rn "global_mem" core/ frontends/ --include="*.py" | grep -v "#"
+
+# 搜索所有 context 拼接点
+grep -rn "inputs.append\|messages\[0\]\|system_prompt" core/ --include="*.py"
+
+# 搜索所有内存写入点
+grep -rn "global_mem\|history_memory_inbox\|add_evidence\|write_distill" core/ frontends/ --include="*.py"
+```
+
+## 关键约束速查
+
+| # | 规则 | 测试 |
+|---|------|------|
+| 1 | 只有 `MemoryReader` 可以直接读 `memory/global_mem*.txt` | `test_no_new_direct_l1_l2_reads` |
+| 2 | 只有 `ContextBuilder` 可以组装多源 context packet | `test_no_new_context_builders` |
+| 3 | `openai_agentmain.py` 禁止新增手写 context 拼接（baseline=10） | `test_no_new_openai_context_injection_points` |
+| 4 | assistant 输出不能当 verified fact 写入 L1/L2 | `test_no_assistant_output_as_l1_l2_fact` |
+| 5 | `ContextBuilder` / `MemoryReader` 是唯一主路径 | `test_context_builder_module_exists` |
+
+## Phase 路线图
+
+```
+Phase 1 (当前)    建立审查机制，不改代码
+    ↓
+Phase 2           实现 ContextBuilder + MemoryReader（新代码，不删旧）
+    ↓
+Phase 3           双路径并行，验证 parity，切换 Classic + OpenAI 路径
+    ↓
+Phase 4           删除废弃的旧 read path
+```

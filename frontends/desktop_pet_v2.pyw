@@ -217,150 +217,6 @@ def build_bubble_image(message, max_width=220):
     }
 
 
-def build_notification_image(title, summary, max_width=340):
-    """Build a cartoon-style notification dialog with action buttons.
-
-    Returns dict with image, size, tail_tip, and hit-test rects for buttons.
-    """
-    title = (title or '').strip()
-    summary = (summary or '').strip()
-
-    # ── Fonts ──
-    title_font = _load_default_font(18)
-    body_font = _load_default_font(14)
-    btn_font = _load_default_font(15)
-
-    # ── Measure text ──
-    draw_dummy = ImageDraw.Draw(Image.new('RGBA', (1, 1)))
-    text_area_w = max_width - 48  # left/right padding
-
-    title_lines = _wrap_text_for_width(draw_dummy, title, title_font, text_area_w)
-    summary_lines = _wrap_text_for_width(draw_dummy, summary, body_font, text_area_w)
-
-    title_h = max(24, len(title_lines) * 28)
-    summary_h = max(20, len(summary_lines) * 22)
-    btn_h = 44
-    tail_h = 18
-    shadow_offset = 5
-
-    # ── Calculate canvas size ──
-    content_h = 28 + title_h + 12 + summary_h + 20 + btn_h + 20
-    canvas_w = max_width + shadow_offset * 2
-    canvas_h = content_h + tail_h + shadow_offset * 2
-
-    img = Image.new('RGBA', (canvas_w, canvas_h), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    sx, sy = shadow_offset, shadow_offset  # shadow-aware origin
-    body_w = max_width
-    body_h = content_h
-
-    # ── Colours ──
-    bg_color = (255, 248, 231, 255)        # cream
-    border_color = (93, 64, 55, 255)       # dark brown
-    title_color = (61, 43, 31, 255)        # deep brown
-    summary_color = (78, 78, 78, 255)      # dark grey
-    btn_bg = (255, 140, 66, 255)           # orange
-    btn_text = (255, 255, 255, 255)        # white
-    close_bg = (180, 160, 150, 255)        # muted brown
-    shadow_color = (0, 0, 0, 40)
-
-    # ── Shadow ──
-    shadow_rect = (sx + 4, sy + 4, sx + body_w + 4, sy + body_h + 4)
-    draw.rounded_rectangle(shadow_rect, radius=16, fill=shadow_color)
-
-    # ── Main body ──
-    body_rect = (sx, sy, sx + body_w, sy + body_h)
-    draw.rounded_rectangle(body_rect, radius=16, fill=bg_color, outline=border_color, width=4)
-
-    # ── Separator line under title ──
-    sep_y = sy + 26 + title_h
-    draw.line([(sx + 20, sep_y), (sx + body_w - 20, sep_y)], fill=border_color, width=1)
-
-    # ── Title text ──
-    y = sy + 16
-    for line in title_lines:
-        bbox = draw_dummy.textbbox((0, 0), line, font=title_font)
-        tw = bbox[2] - bbox[0]
-        x = sx + (body_w - tw) / 2
-        draw.text((x, y), line, font=title_font, fill=title_color)
-        y += 28
-
-    # ── Close button area (top-right circle) ──
-    close_cx = sx + body_w - 24
-    close_cy = sy + 20
-    close_r = 10
-    draw.ellipse(
-        (close_cx - close_r, close_cy - close_r, close_cx + close_r, close_cy + close_r),
-        fill=close_bg,
-    )
-    # × mark
-    cross_sz = 5
-    draw.line(
-        (close_cx - cross_sz, close_cy - cross_sz, close_cx + cross_sz, close_cy + cross_sz),
-        fill=(255, 255, 255, 255), width=2,
-    )
-    draw.line(
-        (close_cx + cross_sz, close_cy - cross_sz, close_cx - cross_sz, close_cy + cross_sz),
-        fill=(255, 255, 255, 255), width=2,
-    )
-
-    # ── Summary text ──
-    y = sep_y + 12
-    for line in summary_lines:
-        bbox = draw_dummy.textbbox((0, 0), line, font=body_font)
-        tw = bbox[2] - bbox[0]
-        x = sx + (body_w - tw) / 2
-        draw.text((x, y), line, font=body_font, fill=summary_color)
-        y += 22
-
-    # ── "查看结果" button ──
-    btn_w = 160
-    btn_h = 44
-    btn_x = sx + (body_w - btn_w) / 2
-    btn_y = sy + body_h - btn_h - 16
-    btn_rect = (btn_x, btn_y, btn_x + btn_w, btn_y + btn_h)
-
-    draw.rounded_rectangle(btn_rect, radius=10, fill=btn_bg)
-    btn_label = "查看结果 →"
-    bbox = draw_dummy.textbbox((0, 0), btn_label, font=btn_font)
-    tw = bbox[2] - bbox[0]
-    th = bbox[3] - bbox[1]
-    draw.text(
-        (btn_x + (btn_w - tw) / 2, btn_y + (btn_h - th) / 2 - 1),
-        btn_label, font=btn_font, fill=btn_text,
-    )
-
-    # ── Tail triangle (pointing down toward pet) ──
-    tail_cx = sx + int(body_w * 0.75)
-    tail_top = sy + body_h
-    tail_bottom = tail_top + tail_h
-    tail_half = 10
-    draw.polygon(
-        [(tail_cx - tail_half, tail_top), (tail_cx + tail_half, tail_top), (tail_cx, tail_bottom)],
-        fill=bg_color, outline=border_color, width=2,
-    )
-
-    # ── Compute hit-test rects in image coordinates ──
-    close_btn_rect = (close_cx - 16, close_cy - 16, close_cx + 16, close_cy + 16)
-
-    return {
-        'image': img,
-        'size': img.size,
-        'tail_tip': (tail_cx, tail_bottom),
-        'view_btn_rect': btn_rect,
-        'close_btn_rect': close_btn_rect,
-    }
-
-
-def _notify_qtapp_show():
-    """Tell the QtApp (if running) to show its chat panel."""
-    try:
-        from urllib.request import urlopen
-        urlopen("http://127.0.0.1:41984/show", timeout=2)
-    except Exception:
-        pass  # QtApp not running — silently ignore
-
 
 # ============================================================================
 # Shared Base Class
@@ -395,20 +251,6 @@ class PetBase:
                     self.send_response(200)
                     self.end_headers()
                     self.wfile.write(b'ok')
-                elif 'notify' in params:
-                    raw = params['notify'][0]
-                    parts = raw.split('|', 1)
-                    title = parts[0]
-                    summary = parts[1] if len(parts) > 1 else ''
-                    pet.show_notification_safe(title, summary)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
-                elif 'notify_dismiss' in params:
-                    pet._schedule_main(pet._dismiss_notification)
-                    self.send_response(200)
-                    self.end_headers()
-                    self.wfile.write(b'ok')
                 elif 'msg' in params:
                     msg = params['msg'][0]
                     pet.show_toast_safe(msg)
@@ -419,7 +261,7 @@ class PetBase:
                     self.send_response(400)
                     self.end_headers()
                     self.wfile.write(
-                        b'?state=idle/walk/run/sprint | ?msg=hello | ?notify=title|summary | ?notify_dismiss'
+                        b'?state=idle/walk/run/sprint | ?msg=hello'
                     )
 
             def do_POST(self):
@@ -818,11 +660,6 @@ else:
             self.toast_window = None
             self.toast_photo = None
 
-            # Notification state
-            self.notif_window = None
-            self.notif_photo = None
-            self.notif_hit_rects = {}
-
             # Start animation
             self._animate()
             self._start_server()
@@ -946,102 +783,6 @@ else:
                     self.toast_window = None
                 except:
                     pass
-
-        def _dismiss_notification(self):
-            """Dismiss the notification window."""
-            if self.notif_window:
-                try:
-                    self.notif_window.destroy()
-                    self.notif_window = None
-                except:
-                    pass
-
-        def _pet_jump(self):
-            """Brief hop animation — move pet window up then back down."""
-            try:
-                x = self.root.winfo_x()
-                y = self.root.winfo_y()
-                # Jump up
-                self.root.geometry(f'+{x}+{y - 20}')
-                self.root.update_idletasks()
-                # Fall back after 120ms
-                self.root.after(120, lambda: self.root.geometry(f'+{x}+{y}'))
-            except Exception:
-                pass
-
-        def show_notification(self, title, summary):
-            """Show a cartoon notification dialog above the pet.
-
-            Stays visible until the user clicks an action button or dismisses it.
-            """
-            # Dismiss any existing notification first
-            self._dismiss_notification()
-
-            notif_info = build_notification_image(title, summary)
-            notif_pil = notif_info['image']
-            notif_w, notif_h = notif_info['size']
-            tail_x, tail_y = notif_info['tail_tip']
-            self.notif_hit_rects = {
-                'view': notif_info['view_btn_rect'],
-                'close': notif_info['close_btn_rect'],
-            }
-
-            self.notif_photo = ImageTk.PhotoImage(notif_pil)
-
-            self.notif_window = tk.Toplevel(self.root)
-            self.notif_window.overrideredirect(True)
-            self.notif_window.wm_attributes('-topmost', True)
-            self.notif_window.wm_attributes('-transparentcolor', '#00ff01')
-            self.notif_window.config(bg='#00ff01')
-
-            notif_label = tk.Label(
-                self.notif_window,
-                image=self.notif_photo,
-                bg='#00ff01',
-                bd=0,
-                highlightthickness=0,
-            )
-            notif_label.pack()
-
-            # Position: tail tip anchors to pet's upper-centre
-            pet_x = self.root.winfo_x()
-            pet_y = self.root.winfo_y()
-            anchor_x = pet_x + int(self.display_width * 0.75)
-            anchor_y = pet_y
-            notif_x = anchor_x - tail_x
-            notif_y = anchor_y - notif_h
-
-            # Keep on screen
-            screen_w = self.root.winfo_screenwidth()
-            screen_h = self.root.winfo_screenheight()
-            notif_x = max(0, min(notif_x, screen_w - notif_w))
-            notif_y = max(0, notif_y)
-
-            self.notif_window.geometry(f'{notif_w}x{notif_h}+{notif_x}+{notif_y}')
-
-            # Click handler — check which button area was hit
-            def _on_click(e):
-                vr = self.notif_hit_rects.get('view', (0, 0, 0, 0))
-                cr = self.notif_hit_rects.get('close', (0, 0, 0, 0))
-                if vr[0] <= e.x <= vr[2] and vr[1] <= e.y <= vr[3]:
-                    # "查看结果" clicked → notify QtApp then dismiss
-                    self._dismiss_notification()
-                    threading.Thread(
-                        target=lambda: _notify_qtapp_show(),
-                        daemon=True,
-                    ).start()
-                elif cr[0] <= e.x <= cr[2] and cr[1] <= e.y <= cr[3]:
-                    self._dismiss_notification()
-
-            notif_label.bind('<Button-1>', _on_click)
-            self.notif_window.bind('<Button-1>', _on_click)
-
-            # Pet jump animation
-            self._pet_jump()
-
-        def show_notification_safe(self, title, summary):
-            """Thread-safe wrapper for show_notification."""
-            self._schedule_main(lambda t=title, s=summary: self.show_notification(t, s))
 
         def _schedule_main(self, fn):
             self.root.after(0, fn)

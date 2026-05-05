@@ -3,25 +3,34 @@ Context Builder — pure constructor. Takes typed dataclasses, returns ContextPa
 
 NEVER reads files. NEVER reads SQLite. NEVER reads global memory directly.
 All memory content arrives via MemoryBundle from MemoryReader.
+
+M4: Added recent_turns and working_memory as first-class source types.
+    Preview mode writes ContextPacket as JSON to temp/context_audit/.
 """
 
+import json
+import os
 import time
 from dataclasses import dataclass, field
 
 # ── Route budgets ──
 
 _ROUTE_BUDGET: dict[str | None, dict[str, int]] = {
-    "chat":            {"workspace": 0,   "project": 0,   "state": 0,   "memory": 0},
-    "code":            {"workspace": 100, "project": 100,  "state": 0,   "memory": 1500},
-    "review":          {"workspace": 100, "project": 100,  "state": 200, "memory": 1500},
-    "research":        {"workspace": 100, "project": 100,  "state": 0,   "memory": 2500},
-    "executor":        {"workspace": 150, "project": 150,  "state": 500, "memory": 3000},
-    "planner_executor": {"workspace": 150, "project": 150, "state": 500, "memory": 3000},
-    None:              {"workspace": 0,   "project": 0,   "state": 0,   "memory": 0},
+    "chat":            {"workspace": 0,   "project": 0,   "state": 0,   "memory": 0,    "recent_turns": 0,    "working_memory": 0},
+    "code":            {"workspace": 100, "project": 100,  "state": 0,   "memory": 1500, "recent_turns": 800,  "working_memory": 600},
+    "review":          {"workspace": 100, "project": 100,  "state": 200, "memory": 1500, "recent_turns": 800,  "working_memory": 600},
+    "research":        {"workspace": 100, "project": 100,  "state": 0,   "memory": 2500, "recent_turns": 800,  "working_memory": 600},
+    "executor":        {"workspace": 150, "project": 150,  "state": 500, "memory": 3000, "recent_turns": 1200, "working_memory": 800},
+    "planner_executor": {"workspace": 150, "project": 150, "state": 500, "memory": 3000, "recent_turns": 1200, "working_memory": 800},
+    None:              {"workspace": 0,   "project": 0,   "state": 0,   "memory": 0,    "recent_turns": 0,    "working_memory": 0},
 }
 
 # Truncation order when over budget: volatile → supplementary → state blocks.
 # Identity blocks (workspace, project) are never truncated — they are tiny.
+# Conversation blocks (recent_turns, working_memory) are truncated before memory.
+
+# Preview output directory (relative to project root)
+_PREVIEW_DIR = "temp/context_audit"
 
 
 @dataclass
@@ -35,6 +44,8 @@ class ContextPacket:
     last_active_task: "TaskState | None" = None
     active_tasks: list = field(default_factory=list)
     memory_bundle: "MemoryBundle | None" = None
+    recent_turns_block: str = ""          # M4: from build_recent_conversation_block()
+    working_memory_block: str = ""        # M4: from _working_memory_message()
     generated_at: float = 0.0
     total_chars: int = 0
     source_breakdown: dict[str, int] = field(default_factory=dict)
@@ -45,6 +56,58 @@ class ContextPacket:
     def __post_init__(self):
         if self.generated_at == 0.0:
             self.generated_at = time.time()
+
+    def to_dict(self) -> dict:
+        """Serialize to dict for JSON preview export."""
+        return {
+            "generated_at": self.generated_at,
+            "target_route": self.target_route,
+            "policy_mode": self.policy_mode,
+            "total_chars": self.total_chars,
+            "max_chars_limit": self.max_chars_limit,
+            "source_breakdown": self.source_breakdown,
+            "workspace": {
+                "cwd": self.workspace.cwd,
+                "git_root": self.workspace.git_root,
+                "git_branch": self.workspace.git_branch,
+                "dirty": self.workspace.has_uncommitted_changes,
+                "dirty_files": self.workspace.dirty_files[:10],
+            } if self.workspace else None,
+            "project": {
+                "project_id": self.project.project_id,
+                "name": self.project.project_name,
+                "root": self.project.project_root,
+                "key_files": self.project.key_files[:10],
+                "languages": self.project.languages,
+            } if self.project else None,
+            "runtime": {
+                "session_id": self.runtime.session_id,
+                "backend": self.runtime.agent_backend,
+            } if self.runtime else None,
+            "session": {
+                "tasks": self.current_session.task_count,
+                "last_completed": self.current_session.last_completed_task_id,
+            } if self.current_session else None,
+            "last_task": {
+                "summary": self.last_active_task.summary,
+                "status": self.last_active_task.status,
+            } if self.last_active_task else None,
+            "active_tasks": [
+                {"summary": t.summary, "status": t.status}
+                for t in self.active_tasks[:5]
+            ],
+            "memory_blocks": [
+                {
+                    "source": b.source,
+                    "priority": b.source_priority,
+                    "score": b.relevance_score,
+                    "chars": b.chars,
+                }
+                for b in (self.memory_bundle.blocks if self.memory_bundle else [])
+            ],
+            "recent_turns_chars": len(self.recent_turns_block),
+            "working_memory_chars": len(self.working_memory_block),
+        }
 
 
 class ContextBuilder:
@@ -75,6 +138,8 @@ class ContextBuilder:
         last_task: "TaskState | None" = None,
         active_tasks: list | None = None,
         memory_bundle: "MemoryBundle | None" = None,
+        recent_turns_block: str = "",            # M4: pre-built by caller via build_recent_conversation_block()
+        working_memory_block: str = "",          # M4: pre-built by caller via _working_memory_message()
         target_route: str | None = None,
     ) -> ContextPacket | None:
         """Build a ContextPacket. Returns None when:
@@ -91,6 +156,8 @@ class ContextBuilder:
         project_chars = budget.get("project", 0)
         state_chars = budget.get("state", 0)
         memory_chars = budget.get("memory", 0)
+        recent_turns_chars = budget.get("recent_turns", 0)
+        working_memory_chars = budget.get("working_memory", 0)
 
         breakdown: dict[str, int] = {}
 
@@ -113,6 +180,14 @@ class ContextBuilder:
         mem_text = self._format_memory(memory_bundle, memory_chars) if memory_bundle and memory_chars > 0 else ""
         breakdown["memory"] = len(mem_text)
 
+        # ── Recent turns block (M4) ──
+        rt_text = recent_turns_block[:recent_turns_chars] if recent_turns_block and recent_turns_chars > 0 else ""
+        breakdown["recent_turns"] = len(rt_text)
+
+        # ── Working memory block (M4) ──
+        wm_text = working_memory_block[:working_memory_chars] if working_memory_block and working_memory_chars > 0 else ""
+        breakdown["working_memory"] = len(wm_text)
+
         total = sum(breakdown.values())
 
         return ContextPacket(
@@ -123,6 +198,8 @@ class ContextBuilder:
             last_active_task=last_task,
             active_tasks=active_tasks or [],
             memory_bundle=memory_bundle,
+            recent_turns_block=rt_text,
+            working_memory_block=wm_text,
             generated_at=time.time(),
             total_chars=total,
             source_breakdown=breakdown,
@@ -130,6 +207,36 @@ class ContextBuilder:
             target_route=target_route,
             max_chars_limit=self._max_chars,
         )
+
+    def preview_to_disk(
+        self,
+        packet: ContextPacket,
+        project_root: str | None = None,
+    ) -> str | None:
+        """Write ContextPacket as JSON to temp/context_audit/ for inspection.
+
+        Returns the output file path, or None if preview mode is not active.
+        Does NOT inject context into any runtime path.
+        """
+        if self._policy_mode != "preview":
+            return None
+
+        root = project_root or os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "..")
+        )
+        audit_dir = os.path.join(root, _PREVIEW_DIR)
+        os.makedirs(audit_dir, exist_ok=True)
+
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        route = packet.target_route or "unknown"
+        filename = f"context_packet_{route}_{timestamp}.json"
+        filepath = os.path.join(audit_dir, filename)
+
+        payload = packet.to_dict()
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, ensure_ascii=False, default=str)
+
+        return filepath
 
     def serialize(self, packet: ContextPacket) -> str:
         """Render a ContextPacket to the injection text format."""
@@ -196,6 +303,16 @@ class ContextBuilder:
                 src = f"[{b.source} | priority={b.source_priority} | score={b.relevance_score:.2f}]"
                 parts.append(f"\n{src}")
                 parts.append(b.content)
+
+        # M4: Recent turns block
+        if packet.recent_turns_block:
+            parts.append("\n## Recent Conversation")
+            parts.append(packet.recent_turns_block)
+
+        # M4: Working memory block
+        if packet.working_memory_block:
+            parts.append("\n## Working Memory")
+            parts.append(packet.working_memory_block)
 
         parts.append("\n[/CONTEXT PACKET]")
         return "\n".join(parts)

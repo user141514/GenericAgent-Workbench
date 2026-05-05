@@ -310,3 +310,100 @@ class MemoryReader:
             source_counts=counts,
             queried_at=time.time(),
         )
+
+
+# ═══ Standalone wrapper functions — backward-compatible with core/memory/reader.py ═══
+# These allow core/memory/reader.py to delegate to the canonical MemoryReader
+# without changing its public API. Once all callers migrate to MemoryReader,
+# core/memory/reader.py can be fully deprecated.
+
+_STRUCTURED_MEMORY_ENV_VAR = "GENERIC_AGENT_STRUCTURED_MEMORY"
+
+
+def _structured_memory_enabled() -> bool:
+    return os.environ.get(_STRUCTURED_MEMORY_ENV_VAR, "").strip() == "1"
+
+
+def read_global_memory(project_root: str | None = None) -> dict:
+    """Standalone wrapper — matches core/memory/reader.py API.
+    Returns {global_mem_insight, global_mem, sources, total_chars}.
+    Delegates to canonical MemoryReader.
+    """
+    reader = MemoryReader(project_root=project_root)
+    raw = reader.read_global_memory()
+    result: dict = {
+        "global_mem_insight": raw.get("l1"),
+        "global_mem": raw.get("l2"),
+        "sources": [],
+        "total_chars": 0,
+    }
+    memory_dir = os.path.join(reader._project_root, "memory")
+    if raw.get("l1"):
+        chars = len(raw["l1"])
+        result["sources"].append(
+            {"file": os.path.join(memory_dir, "global_mem_insight.txt"), "label": "L1", "chars": chars}
+        )
+        result["total_chars"] += chars
+    if raw.get("l2"):
+        chars = len(raw["l2"])
+        result["sources"].append(
+            {"file": os.path.join(memory_dir, "global_mem.txt"), "label": "L2", "chars": chars}
+        )
+        result["total_chars"] += chars
+    return result
+
+
+def search_structured_memory(
+    query: str,
+    db_path: str | None = None,
+    limit: int = 5,
+) -> dict:
+    """Standalone wrapper — matches core/memory/reader.py API.
+    Returns {results, total_hits, error, disabled}.
+    Delegates to canonical MemoryReader.
+    """
+    if not _structured_memory_enabled():
+        return {"results": [], "total_hits": 0, "error": None, "disabled": True}
+
+    reader = MemoryReader(db_path=db_path)
+    blocks = reader.read_structured_memory(query, limit=limit)
+    results = [
+        {
+            "source_path": b.source_path or "",
+            "summary": b.metadata.get("chunk_id", ""),
+            "content_preview": (b.content or "")[:500],
+            "created_at": b.metadata.get("created_at", ""),
+        }
+        for b in blocks
+    ]
+    return {"results": results, "total_hits": len(results), "error": None, "disabled": False}
+
+
+def read_working_memory(history: list[str], max_items: int = 20) -> str:
+    """Standalone wrapper — matches core/memory/reader.py API.
+    Delegates to canonical MemoryReader.
+    """
+    if not history:
+        return ""
+    h_str = "\n".join(history[-max_items:])
+    return (
+        "### [WORKING MEMORY]\n"
+        f"<history>\n{h_str}\n</history>\n"
+        "Use this as compressed recent context. Keep the next <summary> consistent with it."
+    )
+
+
+def build_memory_source_report() -> dict:
+    """Standalone wrapper — matches core/memory/reader.py API.
+    Delegates to canonical MemoryReader.
+    """
+    reader = MemoryReader()
+    global_mem = reader.read_global_memory()
+    l1_chars = len(global_mem.get("l1") or "")
+    l2_chars = len(global_mem.get("l2") or "")
+    return {
+        "l1_chars": l1_chars,
+        "l2_chars": l2_chars,
+        "structured_enabled": _structured_memory_enabled(),
+        "total_sources": (1 if l1_chars > 0 else 0) + (1 if l2_chars > 0 else 0),
+    }

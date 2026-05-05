@@ -8,6 +8,13 @@ PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(PROJECT_ROOT)
 
 from .agent_loop import BaseHandler, StepOutcome, json_default
+from .runtime.clarification_gate import (
+    clarification_gate_enabled,
+    should_allow_clarification,
+    emit_clarification_requested,
+    emit_clarification_allowed,
+    emit_clarification_denied,
+)
 
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=[]):
     """代码执行器
@@ -334,6 +341,55 @@ class GenericAgentHandler(BaseHandler):
     def do_ask_user(self, args, response):
         question = args.get("question", "请提供输入：")
         candidates = args.get("candidates", [])
+        user_input = getattr(self, "_last_user_input", "") or ""
+
+        # ── Clarification Gate ──────────────────────────────
+        if clarification_gate_enabled():
+            context: dict = {}
+            if candidates:
+                context["candidates"] = [
+                    {"name": c if isinstance(c, str) else c.get("name", str(c)),
+                     "score": c.get("score", 0.5) if isinstance(c, dict) else 0.5,
+                     "action": c.get("action", "") if isinstance(c, dict) else ""}
+                    for c in candidates
+                ]
+            # Check working state for target hints
+            working = getattr(self, "working", {}) or {}
+            if working.get("target_file"):
+                context["target_file"] = working["target_file"]
+            if working.get("target_object"):
+                context["target_object"] = working["target_object"]
+            if working.get("selected_candidate"):
+                context["selected_candidate"] = working["selected_candidate"]
+
+            profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
+            decision = should_allow_clarification(user_input, question, context)
+
+            emit_clarification_requested(profiler, decision, user_input, question)
+
+            if decision.allowed:
+                emit_clarification_allowed(profiler, decision, user_input, question)
+            else:
+                emit_clarification_denied(profiler, decision, user_input, question)
+                yield (
+                    f"[Clarification Gate] ask_user blocked: {decision.reason}\n"
+                )
+                return StepOutcome(
+                    {
+                        "status": "BLOCKED",
+                        "gate": "clarification",
+                        "reason": decision.reason,
+                        "fallback_instruction": decision.fallback_instruction,
+                        "signals": decision.signals,
+                    },
+                    next_prompt=(
+                        f"\n[System] ask_user was blocked by clarification gate: "
+                        f"{decision.reason}\n{decision.fallback_instruction}\n"
+                        f"继续执行，不要再次 ask_user 相同问题。"
+                    ),
+                    should_exit=False,
+                )
+
         result = ask_user(question, candidates)
         yield f"Waiting for your answer ...\n"
         return StepOutcome(result, next_prompt="", should_exit=True)
@@ -610,16 +666,58 @@ class GenericAgentHandler(BaseHandler):
             except: pass
         return prompt
 
-    def turn_end_callback(self, response, tool_calls, tool_results, turn, next_prompt, exit_reason):
+    def _safe_summary(self, response, tool_calls, turn):
+        """Extract and validate summary before saving to history.
+
+        Returns (summary_text, is_fallback).
+        Hallucination-prone summaries on early turns are replaced with
+        tool-based fallbacks to prevent context corruption.
+        """
         _c = re.sub(r'```.*?```|<thinking>.*?</thinking>', '', response.content, flags=re.DOTALL)
         rsumm = re.search(r"<summary>(.*?)</summary>", _c, re.DOTALL)
-        if rsumm: summary = rsumm.group(1).strip()
-        else:
-            tc = tool_calls[0]; tool_name, args = tc['tool_name'], tc['args']   # at least one because no_tool
-            clean_args = {k: v for k, v in args.items() if not k.startswith('_')}
-            summary = f"调用工具{tool_name}, args: {clean_args}"
-            if tool_name == 'no_tool': summary = "直接回答了用户问题"
-            next_prompt += "\n[DANGER] 上一轮遗漏了<summary>，已根据物理动作自动补全。在下次回复中记得<summary>协议。" 
+
+        if rsumm:
+            summary = rsumm.group(1).strip()
+            user_input = getattr(self, "_last_user_input", "") or ""
+            user_lower = str(user_input or "").lower()
+
+            # Hallucination markers: claims about user statements that may be fabricated,
+            # or explicit confusion signals on early turns.
+            _hallucination_markers = [
+                "用户澄清", "用户说", "用户提到", "用户表示", "用户已说明",
+                "用户补充说明", "用户告诉我", "用户回复说",
+                "我缺少前文", "我缺少上下文", "缺少前面的对话",
+            ]
+            has_marker = any(m in summary for m in _hallucination_markers)
+
+            # Check if the summary references topics absent from the user input.
+            # Extract potential topic keywords from summary (quoted phrases / project names).
+            _topic_refs = re.findall(r'(?:在|关于|针对|对于|不是)\s*([\u4e00-\u9fffA-Za-z0-9_-]{3,20})', summary)
+            _topic_mismatch = False
+            for ref in _topic_refs:
+                if ref.lower() not in user_lower:
+                    _topic_mismatch = True
+                    break
+
+            if turn <= 2 and (has_marker or (_topic_mismatch and has_marker)):
+                # Suspicious summary on early turn — use tool-based fallback
+                pass  # fall through to fallback
+            elif summary:
+                return summary, False
+
+        # Fallback: derive summary from tool calls
+        tc = tool_calls[0]
+        tool_name, args = tc['tool_name'], tc['args']
+        clean_args = {k: v for k, v in args.items() if not k.startswith('_')}
+        summary = f"调用工具{tool_name}, args: {clean_args}"
+        if tool_name == 'no_tool':
+            summary = "直接回答了用户问题"
+        return summary, True
+
+    def turn_end_callback(self, response, tool_calls, tool_results, turn, next_prompt, exit_reason):
+        summary, fallback_used = self._safe_summary(response, tool_calls, turn)
+        if fallback_used:
+            next_prompt += "\n[DANGER] 上一轮遗漏了<summary>，已根据物理动作自动补全。在下次回复中记得<summary>协议。"
         summary = smart_format(summary, max_str_len=100)
         self.history_info.append(f'[Agent] {summary}')
         if turn % 70 == 0 and 'plan' not in str(self.working.get('related_sop')):

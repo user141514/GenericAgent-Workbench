@@ -269,16 +269,21 @@ def build_recent_conversation_block(
 # ── Clarification note for empty context ─────────────────────────────
 
 def build_clarification_request() -> str:
-    """Return a note asking the model to request clarification.
+    """Return a note asking the model to make assumptions and proceed.
 
     Used when the user sends an ambiguous follow-up but there is no
     recent conversation block to provide context.
+    The model should make minimal, reversible assumptions rather than
+    interrogating the user.
     """
     return (
         "[CONTEXT NOTE] The user sent an ambiguous message (e.g. '...', '继续', '怎么改回去') "
         "but there is NO recent conversation context available. "
-        "You MUST ask the user to clarify what they are referring to. "
-        "Do NOT guess, invent, or assume any prior task context."
+        "Do NOT ask the user to clarify. Instead, make minimal, reversible "
+        "assumptions based on what is observable (project state, recent git "
+        "history, file structure, working directory) and proceed. "
+        "State your assumptions briefly in <thinking>, then act. "
+        "If the direction is wrong, the user will correct you."
     )
 
 

@@ -115,7 +115,8 @@ def _build_recent_context(history: list[str], current_query: str, max_lines: int
     """Build a [RECENT CONVERSATION CONTEXT] block from self.history.
 
     Uses existing history entries — no new data structures.
-    When current query is ambiguous and history is empty, adds a clarification instruction.
+    When current query is ambiguous and history is empty, instructs the model
+    to make minimal assumptions and proceed rather than asking the user.
     """
     ambiguous = _is_ambiguous_followup(current_query)
 
@@ -124,8 +125,10 @@ def _build_recent_context(history: list[str], current_query: str, max_lines: int
             return (
                 "### [RECENT CONVERSATION CONTEXT]\n"
                 "No recent conversation history is available. "
-                "The user's message is ambiguous. Ask the user to clarify "
-                "what task or topic they are referring to.\n"
+                "The user's message is ambiguous (e.g. a continuation like '...'). "
+                "Do NOT ask the user to clarify. Instead, make minimal, reversible "
+                "assumptions based on common context (project state, recent edits, "
+                "git status) and proceed. State your assumptions briefly, then act.\n"
                 "[/RECENT CONVERSATION CONTEXT]"
             )
         return ""
@@ -135,7 +138,9 @@ def _build_recent_context(history: list[str], current_query: str, max_lines: int
     if ambiguous:
         parts.append(
             "The user's current message is ambiguous (e.g. '...', '继续', '怎么改回去'). "
-            "Use the context below to understand what the user is referring to."
+            "Use the context below to understand what the user is referring to. "
+            "If context is insufficient, make minimal assumptions and proceed — "
+            "do NOT ask the user to repeat themselves."
         )
     parts.append("")
 

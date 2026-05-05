@@ -320,10 +320,23 @@ def _ensure_openai_agents_on_path() -> None:
     # Only check once; the path doesn't change during a process lifetime.
     if getattr(_ensure_openai_agents_on_path, "_done", False):
         return
+    _ensure_openai_agents_on_path._done = True
+
     repo_src = os.path.join(os.path.dirname(SCRIPT_DIR), "openai-agents-python", "src")
     if os.path.isdir(repo_src) and repo_src not in sys.path:
         sys.path.insert(0, repo_src)
-    _ensure_openai_agents_on_path._done = True
+        return
+
+    # Try alternative locations
+    alt_paths = [
+        os.path.join(SCRIPT_DIR, "..", "openai-agents-python", "src"),
+        os.path.join(os.path.expanduser("~"), "openai-agents-python", "src"),
+    ]
+    for alt in alt_paths:
+        alt = os.path.normpath(alt)
+        if os.path.isdir(alt) and alt not in sys.path:
+            sys.path.insert(0, alt)
+            return
 
 
 def _load_json_file(path: str) -> dict[str, Any]:
@@ -1450,9 +1463,9 @@ class OpenAIOrchestratedAgent:
 
         if not self.variants:
             self.startup_error = (
-                "新版后端没有找到可用的模型配置。"
-                "我现在会优先读取 GenericAgent 的 `mykey.py` / `mykey.json`，"
-                "以及 `~/.claude/settings.json` 里的 `ANTHROPIC_*` 或 `OPENAI_*`。"
+                "未找到可用的模型配置。多Agent编排需要 OpenAI/Anthropic API key。"
+                "请检查: (1) mykey.py 中是否有 native_claude_* 或 native_oai_* 配置; "
+                "(2) ~/.claude/settings.json 中是否有 ANTHROPIC_* 或 OPENAI_* 环境变量。"
             )
             return
 
@@ -1462,14 +1475,17 @@ class OpenAIOrchestratedAgent:
 
             set_tracing_disabled(disabled=True)
         except Exception as e:
-            self.startup_error = f"新版后端未能导入 openai-agents 依赖。详情: {e}"
+            self.startup_error = (
+                f"未安装 openai-agents SDK。请将 openai-agents-python 仓库放在 "
+                f"{os.path.dirname(SCRIPT_DIR)} 目录下。详情: {e}"
+            )
             return
 
         self._apply_variant(0)
         try:
             self._init_classic_executor()
         except Exception as e:
-            self.startup_error = f"鏂扮増鍚庣鏈兘鍚姩经典 GenericAgent 执行器。详情: {e}"
+            self.startup_error = f"无法启动 Classic GenericAgent 执行器。详情: {e}"
             return
         self.ready = True
 
@@ -2766,6 +2782,45 @@ class OpenAIOrchestratedAgent:
                     from core.context.recent_turns import build_clarification_request as _clarify
                     inputs.append({"role": "user", "content": _clarify()})
                 inputs.append({"role": "user", "content": raw_query})
+
+                # ── M5: Canonical context assembly gate ──
+                # When GA_CONTEXT_RUNTIME_MODE=inject, rebuild inputs through
+                # the OpenAIContextAdapter to add structural markers and enforce
+                # canonical ordering. Legacy path (default/preview) is unchanged.
+                _context_mode = os.environ.get("GA_CONTEXT_RUNTIME_MODE", "preview")
+                if _context_mode == "inject":
+                    from core.context.adapters import OpenAIContextAdapter
+                    _adapter = OpenAIContextAdapter(policy_mode="inject")
+                    _clarify_text = ""
+                    if ambiguous_query and not recent_block:
+                        from core.context.recent_turns import build_clarification_request as _clarify
+                        _clarify_text = _clarify()
+                    inputs = _adapter.build_inputs(
+                        input_items=list(self.input_items),
+                        working_memory=working_memory,
+                        context_packet=context_packet_text,
+                        recent_block=recent_block,
+                        legacy_memory=legacy_memory_block,
+                        route_hint=route_hint if (route_hint and selected_agent is agents["root"]) else "",
+                        answer_quality=answer_quality_block,
+                        sop_context=optional_sop_block,
+                        prefetch_block=prefetch_block if prefetch_injected else "",
+                        clarification=_clarify_text,
+                        raw_query=raw_query,
+                    )
+                    if profiler is not None:
+                        profiler.record_event(
+                            "canonical_context_assembly",
+                            kind="memory",
+                            metadata={
+                                "mode": "inject",
+                                "block_count": len(inputs),
+                                "total_chars": sum(
+                                    len(str(i.get("content", ""))) for i in inputs
+                                ),
+                            },
+                        )
+
                 if profiler is not None:
                     profiler.record_event(
                         "route_selected",

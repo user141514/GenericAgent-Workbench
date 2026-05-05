@@ -1,6 +1,11 @@
 """
 Legacy Global Memory — shared read-only L1/L2 access for Classic + OpenAI paths.
 
+DEPRECATED: phase=M3, replaced_by=core.context.memory_reader.MemoryReader
+This module's read_legacy_l1_l2() and build_legacy_memory_block() are
+superseded by the canonical MemoryReader + ContextBuilder pipeline.
+Existing callers continue to work; no new callers should be added.
+
 Does NOT write to global_mem.txt, global_mem_insight.txt, or any other file.
 Pure read functions extracted from ga.py:get_global_memory() so the OpenAI
 path can access the same L1/L2 memory without importing ga.py internals.
@@ -16,10 +21,11 @@ from pathlib import Path
 from typing import Any
 
 
+# DEPRECATED: phase=M3, replaced_by=core.context.memory_reader.MemoryReader.read_global_memory()
 def read_legacy_l1_l2(project_root: str | Path | None = None) -> dict[str, Any]:
-    """Read legacy L1 (global_mem_insight.txt) and L2 (global_mem.txt).
+    """DEPRECATED. Read legacy L1 (global_mem_insight.txt) and L2 (global_mem.txt).
 
-    Pure read — no side effects, no writes.
+    Pure read - no side effects, no writes.
 
     Returns:
         {
@@ -70,8 +76,9 @@ def read_legacy_l1_l2(project_root: str | Path | None = None) -> dict[str, Any]:
     return result
 
 
+# DEPRECATED: phase=M3, replaced_by=core.context.context_builder.ContextBuilder.build()
 def build_legacy_memory_block(project_root: str | Path | None = None) -> str:
-    """Build the formatted L1/L2 prompt block matching Classic get_global_memory().
+    """DEPRECATED. Build the formatted L1/L2 prompt block matching Classic get_global_memory().
 
     This reproduces the EXACT output format of ga.py:get_global_memory().
 

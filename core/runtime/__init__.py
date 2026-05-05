@@ -1,5 +1,14 @@
 """Runtime profiling helpers."""
 
+from .clarification_gate import (
+    CLARIFICATION_GATE_ENV_VAR,
+    ClarificationDecision,
+    clarification_gate_enabled,
+    emit_clarification_allowed,
+    emit_clarification_denied,
+    emit_clarification_requested,
+    should_allow_clarification,
+)
 from .direct_answer import (
     DIRECT_ANSWER_ENV_VAR,
     DirectAnswerDecision,
@@ -54,6 +63,8 @@ from .read_shortcut import (
 from .shared_store import Artifact, SharedArtifactStore
 
 __all__ = [
+    "CLARIFICATION_GATE_ENV_VAR",
+    "ClarificationDecision",
     "DIRECT_ANSWER_ENV_VAR",
     "DirectAnswerDecision",
     "EARLY_STOP_ENV_VAR",
@@ -78,6 +89,7 @@ __all__ = [
     "build_profile_path",
     "build_execution_policy_from_skills",
     "build_read_prefetch_context",
+    "clarification_gate_enabled",
     "detect_read_prefetch",
     "detect_read_shortcut",
     "direct_answer_enabled",
@@ -91,6 +103,7 @@ __all__ = [
     "profiling_enabled",
     "read_shortcut_enabled",
     "safe_read_prefetch_content",
+    "should_allow_clarification",
     "should_stop_classic_executor",
     "try_direct_answer_from_tool_result",
     "Artifact",
