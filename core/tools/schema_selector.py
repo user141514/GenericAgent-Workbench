@@ -6,6 +6,8 @@ import os
 import re
 from typing import Any
 
+from core.router_rules import RouterRules
+
 
 SLIM_TOOLS_ENV_VAR = "GENERIC_AGENT_SLIM_TOOLS"
 
@@ -15,13 +17,16 @@ def slim_tools_enabled() -> bool:
 
 
 class ToolSchemaSelector:
-    ALWAYS_INCLUDE = {"ask_user"}
-    BASE_READ_ONLY = {"file_read", "ask_user"}
+    ALWAYS_INCLUDE = {"ask_user", "code_run"}
+    BASE_READ_ONLY = {"file_read", "code_run", "ask_user"}
     FILE_DISCOVERY = {"file_read", "code_run", "ask_user"}
     WRITE_TOOLS = {"file_patch", "file_write"}
-    WEB_TOOLS = {"web_scan", "web_execute_js"}
+    WEB_TOOLS = {"web_scan", "web_execute_js", "browser_agent"}
     MEMORY_HELPERS = {"update_working_checkpoint", "start_long_term_update"}
     MEMORY_QUERY_TOOLS = {"file_read", "code_run", "ask_user"}
+    REVIEW_BASE = {"file_read", "code_run", "ask_user", "update_working_checkpoint"}
+    CODE_BASE = {"file_read", "code_run", "file_patch", "file_write", "ask_user", "update_working_checkpoint"}
+    RESEARCH_BASE = {"file_read", "code_run", "ask_user"}
 
     READ_PATTERNS = (
         r"readme",
@@ -107,6 +112,93 @@ class ToolSchemaSelector:
         r"上次",
         r"回忆",
     )
+    REVIEW_PATTERNS = (
+        r"\breview\b",
+        r"\baudit\b",
+        r"\bbug\b",
+        r"\bissue\b",
+        r"\bfailure\b",
+        r"\btraceback\b",
+        r"\bexception\b",
+        r"\blint\b",
+        r"\bcoverage\b",
+        r"\bregression\b",
+        r"审查",
+        r"检查",
+        r"排查",
+        r"定位",
+        r"漏洞",
+        r"安全",
+        r"报错",
+        r"日志",
+        r"失败",
+        r"异常",
+        r"回归",
+    )
+    RESEARCH_PATTERNS = (
+        r"\bdocs?\b",
+        r"\bdocumentation\b",
+        r"\bapi\b",
+        r"\bchangelog\b",
+        r"\brelease note\b",
+        r"\bexample\b",
+        r"\btutorial\b",
+        r"\bcompare\b",
+        r"文档",
+        r"教程",
+        r"用法",
+        r"示例",
+        r"调研",
+        r"对比",
+        r"新特性",
+        r"更新日志",
+        r"官方",
+    )
+    FIX_PATTERNS = (
+        r"\bfix\b",
+        r"\bpatch\b",
+        r"\brepair\b",
+        r"\bresolve\b",
+        r"修复",
+        r"改一下",
+        r"改成",
+        r"处理掉",
+    )
+    BROWSER_PATTERNS = (
+        r"\blogin\b",
+        r"\bsign in\b",
+        r"\bform\b",
+        r"\bclick\b",
+        r"\bupload\b",
+        r"\bdownload\b",
+        r"\bnavigate\b",
+        r"\bmulti-page\b",
+        r"\bworkflow\b",
+        r"登录",
+        r"表单",
+        r"点击",
+        r"上传",
+        r"下载",
+        r"跳转",
+        r"多页面",
+        r"流程",
+        r"网页自动化",
+    )
+    REPO_WIDE_PATTERNS = (
+        r"\bwhole project\b",
+        r"\bentire project\b",
+        r"\brepo\b",
+        r"\brepository\b",
+        r"\bcross-file\b",
+        r"\bend-to-end\b",
+        r"整个项目",
+        r"整个仓库",
+        r"全仓库",
+        r"跨文件",
+        r"端到端",
+        r"系统性",
+        r"全量",
+    )
     COMPLEX_PATTERNS = (
         r"\bcomplex\b",
         r"\bend-to-end\b",
@@ -135,19 +227,49 @@ class ToolSchemaSelector:
         names = [self._tool_name(tool) for tool in available_tools]
         tool_map = {name: tool for name, tool in zip(names, available_tools) if name}
         normalized = self._normalize(user_input)
+        route_target = RouterRules.match(user_input).target
 
         read_signal = self._matches(normalized, self.READ_PATTERNS)
         write_signal = self._matches(normalized, self.WRITE_PATTERNS)
         run_signal = self._matches(normalized, self.RUN_PATTERNS)
         web_signal = self._matches(normalized, self.WEB_PATTERNS)
         memory_signal = self._matches(normalized, self.MEMORY_PATTERNS)
-        complex_signal = self._matches(normalized, self.COMPLEX_PATTERNS)
-        signal_count = sum(bool(flag) for flag in (read_signal, write_signal, run_signal, web_signal, memory_signal))
+        review_signal = self._matches(normalized, self.REVIEW_PATTERNS)
+        research_signal = self._matches(normalized, self.RESEARCH_PATTERNS)
+        fix_signal = self._matches(normalized, self.FIX_PATTERNS)
+        browser_signal = self._matches(normalized, self.BROWSER_PATTERNS)
+        repo_wide_signal = self._matches(normalized, self.REPO_WIDE_PATTERNS)
+        complex_signal = self._matches(normalized, self.COMPLEX_PATTERNS) or repo_wide_signal
+        signal_count = sum(
+            bool(flag)
+            for flag in (
+                read_signal,
+                write_signal,
+                run_signal,
+                web_signal,
+                memory_signal,
+                review_signal,
+                research_signal,
+                browser_signal,
+            )
+        )
 
-        if complex_signal or signal_count >= 3:
+        if (
+            complex_signal
+            or signal_count >= 4
+            or (read_signal and write_signal and run_signal)
+            or (write_signal and run_signal and review_signal)
+        ):
             return list(available_tools)
 
         selected_names = set(self.ALWAYS_INCLUDE)
+
+        if route_target == "code":
+            selected_names.update(self.CODE_BASE)
+        elif route_target == "review":
+            selected_names.update(self.REVIEW_BASE)
+        elif route_target == "research":
+            selected_names.update(self.RESEARCH_BASE)
 
         if memory_signal:
             selected_names.update(self.MEMORY_QUERY_TOOLS)
@@ -155,6 +277,10 @@ class ToolSchemaSelector:
         if web_signal:
             selected_names.update(self.WEB_TOOLS)
             selected_names.add("code_run")
+
+        if browser_signal:
+            selected_names.update(self.WEB_TOOLS)
+            selected_names.add("update_working_checkpoint")
 
         if write_signal:
             selected_names.update(self.FILE_DISCOVERY)
@@ -167,6 +293,18 @@ class ToolSchemaSelector:
 
         if read_signal:
             selected_names.update(self.FILE_DISCOVERY)
+
+        if review_signal:
+            selected_names.update(self.REVIEW_BASE)
+
+        if research_signal:
+            selected_names.update(self.RESEARCH_BASE)
+            if web_signal or browser_signal:
+                selected_names.update(self.WEB_TOOLS)
+
+        if fix_signal:
+            selected_names.update(self.WRITE_TOOLS)
+            selected_names.add("update_working_checkpoint")
 
         if not selected_names or selected_names == self.ALWAYS_INCLUDE:
             selected_names.update(self.BASE_READ_ONLY)

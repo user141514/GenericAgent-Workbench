@@ -153,6 +153,9 @@ def build_recent_conversation_block(
         content_text = _extract_text(item.get("content"))
 
         if role == "user":
+            # Skip internal execution-engine prompts (not real user messages)
+            if content_text.startswith("You are the execution engine"):
+                continue
             # Start a new turn when we see a user message
             # (but only if current turn has content)
             if current["user_texts"] or current["assistant_texts"] or current["tool_events"]:

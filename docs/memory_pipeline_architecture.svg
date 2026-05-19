@@ -1,0 +1,166 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 740">
+  <style>
+    text { font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Helvetica Neue", Helvetica, Arial, "PingFang SC", "Microsoft YaHei", sans-serif; }
+    .t  { font-size:26px; font-weight:700; fill:#111827; }
+    .s  { font-size:12px; font-weight:700; letter-spacing:0.08em; fill:#0b3d91; }
+    .nt { font-size:14px; font-weight:700; fill:#111827; }
+    .nw { font-size:14px; font-weight:700; fill:#ffffff; }
+    .ns { font-size:11px; font-weight:500; fill:#475569; }
+    .nsw{ font-size:11px; font-weight:500; fill:#dbeafe; }
+    .al { font-size:10px; font-weight:600; fill:#374151; }
+    .lg { font-size:11px; font-weight:500; fill:#475569; }
+    .mo { font-family:"SF Mono","Cascadia Code",Consolas,monospace; font-size:10px; fill:#e5e7eb; }
+    .ms { font-family:"SF Mono","Cascadia Code",Consolas,monospace; font-size:9px; fill:#9ca3af; }
+    .pl { font-size:10px; font-weight:600; fill:#111827; }
+    .ps { font-size:9px; font-weight:400; fill:#64748b; }
+  </style>
+  <defs>
+    <marker id="ap" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#1266d6"/>
+    </marker>
+    <marker id="ao" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#111827"/>
+    </marker>
+    <marker id="ad" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#0b3d91"/>
+    </marker>
+    <marker id="aa" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#64748b"/>
+    </marker>
+    <marker id="ac" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#f6d65b"/>
+    </marker>
+    <filter id="sh" x="-4%" y="-4%" width="108%" height="116%">
+      <feDropShadow dx="0" dy="2" stdDeviation="3" flood-color="#111827" flood-opacity="0.08"/>
+    </filter>
+  </defs>
+  <rect width="960" height="740" fill="#ffffff"/>
+  <path d="M 0 72 L 960 28 L 960 72 L 0 120 Z" fill="#eaf3ff" opacity="0.6"/>
+  <text x="480" y="34" text-anchor="middle" class="t">GAgent-Multi Memory Pipeline (M6–M8)</text>
+  <rect x="24" y="56" width="436" height="126" rx="14" fill="none" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="6 5"/>
+  <text x="36" y="76" class="s">WRITE PATH — INGESTION &amp; GATE</text>
+  <rect x="40" y="90" width="168" height="56" rx="12" fill="#1266d6" stroke="#111827" stroke-width="1.4" filter="url(#sh)"/>
+  <text x="124" y="112" text-anchor="middle" class="nw">Agent Loop</text>
+  <text x="124" y="131" text-anchor="middle" class="nsw">Tool calls · Reasoning</text>
+  <rect x="252" y="90" width="168" height="56" rx="8" fill="#111827" stroke="#374151" stroke-width="1.4"/>
+  <circle cx="268" cy="104" r="4" fill="#f6d65b"/>
+  <circle cx="282" cy="104" r="4" fill="#93c5fd"/>
+  <circle cx="296" cy="104" r="4" fill="#ffffff"/>
+  <text x="336" y="120" text-anchor="middle" class="nw">RuntimeEventLog</text>
+  <text x="336" y="137" text-anchor="middle" class="mo">events.jsonl per session</text>
+  <path d="M 208 118 L 252 118" stroke="#1266d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+  <path d="M 420 118 L 464 118" stroke="#1266d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+  <rect x="464" y="90" width="148" height="56" rx="8" fill="#fff6c7" stroke="#eabf35" stroke-width="1.4"/>
+  <text x="538" y="111" text-anchor="middle" class="nt">MemoryWriteGate</text>
+  <text x="538" y="130" text-anchor="middle" class="ns">source → target ACL</text>
+  <path d="M 648 98 C 648 80, 872 80, 872 98 L 872 152 C 872 170, 648 170, 648 152 Z" fill="#ffffff" stroke="#111827" stroke-width="1.4" filter="url(#sh)"/>
+  <ellipse cx="760" cy="98" rx="112" ry="18" fill="#eaf3ff" stroke="#111827" stroke-width="1.4"/>
+  <text x="760" y="119" text-anchor="middle" class="nt">MemoryStore</text>
+  <text x="760" y="139" text-anchor="middle" class="ns">SQLite · FTS5 · catalog.sqlite</text>
+  <text x="760" y="162" text-anchor="middle" class="ms">memory_items · memory_candidates</text>
+  <text x="760" y="174" text-anchor="middle" class="ms">evidence_chunks · memory_events</text>
+  <path d="M 612 118 L 648 118" stroke="#1266d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+  <rect x="24" y="196" width="912" height="146" rx="14" fill="none" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="6 5"/>
+  <text x="36" y="216" class="s">DISTILLATION &amp; MAINTENANCE — M6 Trigger → M7 Build → M8 Verify</text>
+  <rect x="40" y="230" width="240" height="82" rx="10" fill="#f8fbff" stroke="#d8e1ec" stroke-width="1.4" filter="url(#sh)"/>
+  <text x="160" y="252" text-anchor="middle" class="nt">Distillation Pipeline</text>
+  <rect x="52" y="264" width="70" height="22" rx="6" fill="#1266d6" stroke="#111827" stroke-width="1"/>
+  <text x="87" y="279" text-anchor="middle" class="nsw">M6 Trigger</text>
+  <rect x="128" y="264" width="70" height="22" rx="6" fill="#0b3d91" stroke="#111827" stroke-width="1"/>
+  <text x="163" y="279" text-anchor="middle" class="nsw">M7 Build</text>
+  <rect x="204" y="264" width="70" height="22" rx="6" fill="#f6d65b" stroke="#eabf35" stroke-width="1"/>
+  <text x="239" y="279" text-anchor="middle" class="ns">M8 Verify</text>
+  <text x="160" y="305" text-anchor="middle" class="ps">trigger → candidate → cross-ref → format</text>
+  <path d="M 324 230 L 484 230 L 504 250 L 504 306 L 324 306 Z" fill="#ffffff" stroke="#111827" stroke-width="1.4"/>
+  <path d="M 484 230 L 484 250 L 504 250" fill="none" stroke="#111827" stroke-width="1.4"/>
+  <text x="414" y="264" text-anchor="middle" class="nt">Inbox</text>
+  <text x="414" y="283" text-anchor="middle" class="ns">history_memory_inbox.md</text>
+  <rect x="548" y="230" width="200" height="82" rx="10" fill="#f8fbff" stroke="#d8e1ec" stroke-width="1.4" filter="url(#sh)"/>
+  <text x="648" y="252" text-anchor="middle" class="nt">Maintenance</text>
+  <rect x="562" y="264" width="56" height="18" rx="5" fill="#eaf3ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="590" y="277" text-anchor="middle" class="ps">dedup</text>
+  <rect x="624" y="264" width="56" height="18" rx="5" fill="#eaf3ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="652" y="277" text-anchor="middle" class="ps">score</text>
+  <rect x="686" y="264" width="56" height="18" rx="5" fill="#eaf3ff" stroke="#93c5fd" stroke-width="1"/>
+  <text x="714" y="277" text-anchor="middle" class="ps">archive</text>
+  <text x="648" y="305" text-anchor="middle" class="ps">runs during agent idle / autonomous</text>
+  <path d="M 792 230 L 928 230 L 948 250 L 948 306 L 792 306 Z" fill="#ffffff" stroke="#111827" stroke-width="1.4"/>
+  <path d="M 928 230 L 928 250 L 948 250" fill="none" stroke="#111827" stroke-width="1.4"/>
+  <text x="870" y="262" text-anchor="middle" class="nt">L1 / L2</text>
+  <text x="870" y="280" text-anchor="middle" class="ns">global_mem_insight.txt</text>
+  <text x="870" y="295" text-anchor="middle" class="ns">global_mem.txt</text>
+  <path d="M 280 271 L 324 271" stroke="#1266d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+  <path d="M 504 271 L 548 271" stroke="#1266d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+  <path d="M 748 271 L 792 271" stroke="#1266d6" stroke-width="2" fill="none" marker-end="url(#ap)"/>
+  <path d="M 700 170 L 700 196 L 160 196 L 160 230" stroke="#0b3d91" stroke-width="1.8" fill="none" marker-end="url(#ad)"/>
+  <g transform="translate(430,183)"><rect x="-6" y="-11" width="86" height="18" rx="5" fill="#fff" opacity="0.95"/><text x="0" y="2" text-anchor="middle" class="al">read evidence</text></g>
+  <path d="M 648 312 L 648 342 L 820 342 L 820 170" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4" fill="none" marker-end="url(#aa)"/>
+  <g transform="translate(738,338)"><rect x="-6" y="-11" width="72" height="18" rx="5" fill="#fff" opacity="0.95"/><text x="0" y="2" text-anchor="middle" class="al">archive back</text></g>
+  <rect x="24" y="362" width="912" height="170" rx="14" fill="none" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="6 5"/>
+  <text x="36" y="382" class="s">READ PATH — UNIFIED RETRIEVAL &amp; CONTEXT ASSEMBLY</text>
+  <rect x="40" y="396" width="200" height="62" rx="12" fill="#1266d6" stroke="#111827" stroke-width="1.4" filter="url(#sh)"/>
+  <text x="140" y="421" text-anchor="middle" class="nw">MemoryReader</text>
+  <text x="140" y="442" text-anchor="middle" class="nsw">Unified read-only facade</text>
+  <rect x="284" y="396" width="176" height="62" rx="10" fill="#f8fbff" stroke="#d8e1ec" stroke-width="1.4" filter="url(#sh)"/>
+  <text x="372" y="421" text-anchor="middle" class="nt">MemoryBundle</text>
+  <text x="372" y="442" text-anchor="middle" class="ns">Sorted by priority</text>
+  <rect x="504" y="390" width="288" height="134" rx="12" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.2"/>
+  <text x="648" y="410" text-anchor="middle" class="nt">MemoryPlanes</text>
+  <rect x="514" y="420" width="268" height="20" rx="4" fill="#f8fbff" stroke="#d8e1ec" stroke-width="0.8"/>
+  <circle cx="524" cy="430" r="3" fill="#1266d6"/>
+  <text x="534" y="434" class="pl">project_memory</text>
+  <text x="650" y="434" class="ps">L1/L2 + structured</text>
+  <rect x="514" y="444" width="268" height="20" rx="4" fill="#f8fbff" stroke="#d8e1ec" stroke-width="0.8"/>
+  <circle cx="524" cy="454" r="3" fill="#0b3d91"/>
+  <text x="534" y="458" class="pl">session_memory</text>
+  <text x="650" y="458" class="ps">Snapshot + tasks</text>
+  <rect x="514" y="468" width="268" height="20" rx="4" fill="#f8fbff" stroke="#d8e1ec" stroke-width="0.8"/>
+  <circle cx="524" cy="478" r="3" fill="#64748b"/>
+  <text x="534" y="482" class="pl">run_memory</text>
+  <text x="650" y="482" class="ps">Recent turns + working</text>
+  <rect x="514" y="492" width="268" height="20" rx="4" fill="#f8fbff" stroke="#d8e1ec" stroke-width="0.8"/>
+  <circle cx="524" cy="502" r="3" fill="#111827"/>
+  <text x="534" y="506" class="pl">collaboration</text>
+  <text x="650" y="506" class="ps">Shared artifacts</text>
+  <rect x="826" y="402" width="98" height="56" rx="10" fill="#0b3d91" stroke="#111827" stroke-width="1.4" filter="url(#sh)"/>
+  <text x="875" y="428" text-anchor="middle" class="nw">Context</text>
+  <text x="875" y="446" text-anchor="middle" class="nsw">Builder</text>
+  <path d="M 240 427 L 284 427" stroke="#0b3d91" stroke-width="1.8" fill="none" marker-end="url(#ad)"/>
+  <path d="M 460 427 L 504 427" stroke="#0b3d91" stroke-width="1.8" fill="none" marker-end="url(#ad)"/>
+  <path d="M 792 434 L 826 434" stroke="#0b3d91" stroke-width="1.8" fill="none" marker-end="url(#ad)"/>
+  <path d="M 760 170 L 760 362 L 140 362 L 140 396" stroke="#0b3d91" stroke-width="1.8" fill="none" marker-end="url(#ad)"/>
+  <g transform="translate(440,348)"><rect x="-6" y="-11" width="66" height="18" rx="5" fill="#fff" opacity="0.95"/><text x="0" y="2" text-anchor="middle" class="al">FTS5 search</text></g>
+  <path d="M 870 306 L 870 352 L 340 352 L 340 396" stroke="#0b3d91" stroke-width="1.8" fill="none" marker-end="url(#ad)"/>
+  <g transform="translate(590,348)"><rect x="-6" y="-11" width="78" height="18" rx="5" fill="#fff" opacity="0.95"/><text x="0" y="2" text-anchor="middle" class="al">file read L1/L2</text></g>
+  <path d="M 538 146 L 538 196 L 340 196 L 340 230" stroke="#f6d65b" stroke-width="1.8" fill="none" marker-end="url(#ac)"/>
+  <g transform="translate(440,192)"><rect x="-6" y="-11" width="78" height="18" rx="5" fill="#fff6c7" opacity="0.95"/><text x="0" y="2" text-anchor="middle" class="al">write decision</text></g>
+  <path d="M 372 458 L 372 494 L 504 494" stroke="#111827" stroke-width="1.6" fill="none" marker-end="url(#ao)"/>
+  <rect x="24" y="552" width="912" height="56" rx="10" fill="#f8fbff" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="44" y="574" class="ps" fill="#0b3d91" font-weight="700">PRIORITY ORDER:</text>
+  <text x="44" y="592" class="ps">Primary (L1/L2, always available)</text>
+  <text x="280" y="592" class="ps">→ Supplementary (structured FTS5, gated)</text>
+  <text x="520" y="592" class="ps">→ Volatile (session/task state, gated)</text>
+  <text x="176" y="590" text-anchor="middle" class="ps">write path</text>
+  <text x="416" y="590" text-anchor="middle" class="ps">read path</text>
+  <text x="652" y="590" text-anchor="middle" class="ps">async maint</text>
+  <text x="852" y="590" text-anchor="middle" class="ps">checkpoint</text>
+  <line x1="168" y1="565" x2="216" y2="565" stroke="#1266d6" stroke-width="2"/>
+  <line x1="408" y1="565" x2="456" y2="565" stroke="#0b3d91" stroke-width="1.8"/>
+  <line x1="644" y1="565" x2="692" y2="565" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4"/>
+  <line x1="844" y1="565" x2="892" y2="565" stroke="#f6d65b" stroke-width="1.8"/>
+  <rect x="24" y="626" width="500" height="100" rx="10" fill="#ffffff" stroke="#d8e1ec" stroke-width="1"/>
+  <text x="44" y="648" class="s">LEGEND</text>
+  <line x1="44" y1="666" x2="84" y2="666" stroke="#1266d6" stroke-width="2" stroke-dasharray="none" marker-end="url(#ap)"/>
+  <text x="96" y="670" class="lg">Primary execution / write flow</text>
+  <line x1="44" y1="686" x2="84" y2="686" stroke="#0b3d91" stroke-width="1.5" stroke-dasharray="none" marker-end="url(#ad)"/>
+  <text x="96" y="690" class="lg">Data / memory movement (read &amp; store)</text>
+  <line x1="44" y1="706" x2="84" y2="706" stroke="#64748b" stroke-width="1.5" stroke-dasharray="5 4" marker-end="url(#aa)"/>
+  <text x="96" y="710" class="lg">Async / maintenance background</text>
+  <line x1="280" y1="666" x2="320" y2="666" stroke="#111827" stroke-width="1.6" marker-end="url(#ao)"/>
+  <text x="332" y="670" class="lg">Observation / review</text>
+  <line x1="280" y1="686" x2="320" y2="686" stroke="#f6d65b" stroke-width="1.8" marker-end="url(#ac)"/>
+  <text x="332" y="690" class="lg">Checkpoint / gate decision</text>
+  <path d="M 280 702 C 280 697, 310 697, 310 702 L 310 710 C 310 715, 280 715, 280 710 Z" fill="#eaf3ff" stroke="#111827" stroke-width="1"/>
+  <ellipse cx="295" cy="702" rx="15" ry="4" fill="#ffffff" stroke="#111827" stroke-width="1"/>
+  <text x="322" y="710" class="lg">Persistent store (SQLite)</text>
+</svg>

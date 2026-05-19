@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+
+from core.protocol.agent import AgentBackend
+from core.protocol.input import AgentInput
 import importlib.util
 import json
 import locale
@@ -18,12 +21,16 @@ import uuid
 from contextlib import nullcontext
 from datetime import datetime
 from typing import Any, cast
+from urllib.parse import urlparse
 
 from .router_rules import RouterRules, RouteResult
 from .quality import (
     answer_quality_enabled,
     build_answer_quality_context,
+    build_problem_framing_context,
+    problem_framing_enabled,
     should_inject_answer_quality_context,
+    should_inject_problem_framing,
 )
 from .runtime import (
     RuntimeProfiler,
@@ -34,6 +41,13 @@ from .runtime import (
     is_read_prefetch_enabled,
     profiling_enabled,
     safe_read_prefetch_content,
+)
+from .runtime.tool_contract import (
+    ToolContract,
+    build_orchestrator_tool_contract,
+    sanitize_runtime_tool_mentions,
+    synthetic_handoff_tool_name,
+    validate_visible_tools,
 )
 from .skills import (
     build_optional_sop_context,
@@ -79,13 +93,13 @@ CAPABILITY_BRIEF = (
 SUMMARY_PROTOCOL_ZH = (
     "### 行动规范（持续有效）\n"
     "1. 在每次交接、调用工具或最终回答前，先输出一行 <summary>...</summary>。\n"
-    "2. <summary> 必须极简且事实化，概括上次结果新信息 + 本次意图。\n"
+    "2. <summary> 必须极简且事实化：写上次结果的新事实或当前已知状态 + 本次意图，禁止“继续处理/准备下一步”这类空话。\n"
     "3. 再输出正文；不要省略 summary。"
 )
 SUMMARY_PROTOCOL_EN = (
     "### Action Protocol (always in effect)\n"
     "1. Before every handoff, tool call, or final answer, emit one line of <summary>...</summary>.\n"
-    "2. The <summary> must be minimal and factual: new information from the last result + current intent.\n"
+    "2. The <summary> must be minimal and factual: last grounded fact or current state + current intent. No filler like 'continue working'.\n"
     "3. Then write the body; do not omit the summary."
 )
 
@@ -112,6 +126,11 @@ class _CompatLLMClient:
     def __init__(self) -> None:
         self.last_tools = ""
         self.backend = _CompatBackend()
+
+
+ORCHESTRATOR_TOOL_CONTRACT = build_orchestrator_tool_contract()
+ORCHESTRATOR_CONTEXT_AGENTS = {"planner_executor", "task_router"}
+EXECUTOR_ROUTE_TARGETS = {"executor", "code", "review", "research"}
 
 
 def smart_format(data: Any, max_str_len: int = 100, omit_str: str = " ... ") -> str:
@@ -314,6 +333,32 @@ def format_error(exc: BaseException) -> str:
                 f"{os.path.basename(frame.filename)}:{frame.lineno}, {frame.name}"
             )
     return f"{type(exc).__name__}: {exc}"
+
+
+def _converted_tool_name(tool_schema: Any) -> str:
+    if isinstance(tool_schema, dict):
+        function = tool_schema.get("function")
+        if isinstance(function, dict):
+            return str(function.get("name") or "").strip()
+        return str(tool_schema.get("name") or "").strip()
+    return str(getattr(tool_schema, "name", "") or "").strip()
+
+
+def _tool_contract_error_text(tool_name: str, contract: ToolContract) -> str:
+    available_tools = sorted(contract.executable_tools)
+    lines = [
+        "Tool contract error:",
+        f"`{tool_name}` is not executable in this runtime.",
+        "Use one of the available tools:",
+    ]
+    for available_tool in available_tools:
+        lines.append(f"- {available_tool}")
+    lines.append("or continue with normal planner reasoning.")
+    return "\n".join(lines)
+
+
+def _sanitize_runtime_injected_text(text: str) -> str:
+    return sanitize_runtime_tool_mentions(text, ORCHESTRATOR_TOOL_CONTRACT)
 
 
 def _ensure_openai_agents_on_path() -> None:
@@ -605,6 +650,127 @@ def _resolve_model_variants() -> list[dict[str, Any]]:
     return deduped
 
 
+def _normalize_model_identity(model: str | None) -> str:
+    text = str(model or "").strip().lower()
+    if not text:
+        return ""
+    return text.replace("[1m]", "").strip()
+
+
+def _normalized_backend_base_url(backend_kind: str | None, base_url: str | None) -> str:
+    kind = str(backend_kind or "").strip().lower()
+    if kind == "native_oai":
+        return str(_normalize_openai_base_url(base_url) or "").strip().lower()
+    return str(_strip_url(base_url) or "").strip().lower()
+
+
+def _normalized_url_host(base_url: str | None) -> str:
+    normalized = str(_strip_url(base_url) or "").strip()
+    if not normalized:
+        return ""
+    parsed = urlparse(normalized)
+    if parsed.netloc:
+        return parsed.netloc.lower()
+    if "://" in normalized:
+        normalized = normalized.split("://", 1)[1]
+    return normalized.split("/", 1)[0].lower()
+
+
+def _describe_variant_backend(variant: dict[str, Any]) -> dict[str, Any]:
+    backend_kind = str(variant.get("backend_kind") or "").strip().lower()
+    base_url = variant.get("base_url")
+    return {
+        "backend_kind": backend_kind,
+        "base_url": _normalized_backend_base_url(backend_kind, base_url),
+        "host": _normalized_url_host(base_url),
+        "model": _normalize_model_identity(variant.get("model")),
+        "api_key": str(variant.get("api_key") or "").strip(),
+        "source": str(variant.get("source") or "").strip().lower(),
+        "label": str(variant.get("label") or "").strip().lower(),
+    }
+
+
+def _describe_classic_backend(llmclient: Any, index: int) -> dict[str, Any]:
+    backend = getattr(llmclient, "backend", None)
+    class_name = type(backend).__name__ if backend is not None else ""
+    base_url = getattr(backend, "api_base", None)
+    model = getattr(backend, "model", None)
+    backend_name = getattr(backend, "name", None)
+    backend_kind = (
+        _infer_backend_kind(class_name, base_url, model)
+        or _infer_backend_kind(str(backend_name or ""), base_url, model)
+        or ""
+    )
+    return {
+        "index": index,
+        "backend_kind": backend_kind,
+        "base_url": _normalized_backend_base_url(backend_kind, base_url),
+        "host": _normalized_url_host(base_url),
+        "model": _normalize_model_identity(model),
+        "api_key": str(getattr(backend, "api_key", "") or "").strip(),
+        "label": str(backend_name or "").strip().lower(),
+    }
+
+
+def _score_variant_to_classic_backend(variant: dict[str, Any], classic_info: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
+    variant_info = _describe_variant_backend(variant)
+    same_kind = bool(variant_info["backend_kind"] and variant_info["backend_kind"] == classic_info["backend_kind"])
+    same_model = bool(variant_info["model"] and variant_info["model"] == classic_info["model"])
+    same_base = bool(variant_info["base_url"] and variant_info["base_url"] == classic_info["base_url"])
+    same_host = bool(variant_info["host"] and variant_info["host"] == classic_info["host"])
+    same_key = bool(variant_info["api_key"] and variant_info["api_key"] == classic_info["api_key"])
+    source_is_mykey = variant_info["source"] == "mykey.py"
+
+    score = 0
+    if same_kind and same_base and same_model:
+        score += 100
+    elif same_base and same_model:
+        score += 90
+    elif same_model and same_host:
+        score += 75
+    elif same_model:
+        score += 60
+    elif same_host and same_kind:
+        score += 45
+    elif same_host:
+        score += 35
+    elif same_kind:
+        score += 20
+    if same_key:
+        score += 5
+
+    return (
+        score,
+        1 if same_kind else 0,
+        1 if same_model else 0,
+        1 if same_base else 0,
+        1 if source_is_mykey else 0,
+        -int(classic_info.get("index", 0)),
+    )
+
+
+def _looks_like_backend_unavailable(output: str) -> bool:
+    text = str(output or "").strip().lower()
+    if not text:
+        return False
+    patterns = (
+        "no available channel for model",
+        '"code":"model_not_found"',
+        "model_not_found",
+        "503 server error",
+        "http 503",
+        "service unavailable",
+        "sslerror",
+        "max retries exceeded",
+        "connectionerror",
+        "connection aborted",
+        "read timed out",
+        "temporarily unavailable",
+        "unexpected eof while reading",
+    )
+    return any(pattern in text for pattern in patterns)
+
+
 def _log_exchange(prompt: str, response: str, input_items: list | None = None) -> None:
     log_dir = os.path.join(SCRIPT_DIR, "temp", "model_responses_openai")
     os.makedirs(log_dir, exist_ok=True)
@@ -856,11 +1022,27 @@ class GenericAgentSDKModel(Model):
     def __init__(self, variant: dict[str, Any]) -> None:
         self.variant = dict(variant)
         self._audit_context: dict[str, Any] = {}
+        self._runtime_profiler: RuntimeProfiler | None = None
+        self._tool_contract: ToolContract = build_orchestrator_tool_contract()
 
     def update_audit_context(self, **kwargs: Any) -> None:
         current = dict(self._audit_context)
         current.update({k: v for k, v in kwargs.items() if v is not None})
         self._audit_context = current
+
+    def _record_profiler_event(
+        self,
+        name: str,
+        *,
+        kind: str,
+        metadata: dict[str, Any],
+    ) -> None:
+        if self._runtime_profiler is None:
+            return
+        try:
+            self._runtime_profiler.record_event(name, kind=kind, metadata=metadata)
+        except Exception:
+            pass
 
     def _build_session(
         self,
@@ -891,6 +1073,36 @@ class GenericAgentSDKModel(Model):
         converted_tools = [Converter.tool_to_openai(tool) for tool in tools] if tools else []
         for handoff in handoffs:
             converted_tools.append(Converter.convert_handoff_tool(handoff))
+        visible_tool_names = [
+            _converted_tool_name(tool_schema)
+            for tool_schema in converted_tools
+            if _converted_tool_name(tool_schema)
+        ]
+        contract_report = validate_visible_tools(
+            visible_tool_names,
+            self._tool_contract,
+        )
+        if contract_report["removed_tools"]:
+            self._record_profiler_event(
+                "tool_contract_violation_detected",
+                kind="tool",
+                metadata={
+                    "unknown_tools": contract_report["unknown_tools"],
+                    "forbidden_tools": contract_report["forbidden_tools"],
+                    "removed_tools": contract_report["removed_tools"],
+                    "source": (
+                        f"GenericAgentSDKModel._build_session:"
+                        f"{self._audit_context.get('agent_name') or 'unknown_agent'}"
+                    ),
+                    "contract_source": self._tool_contract.source,
+                },
+            )
+        allowed_visible_names = set(contract_report["valid_tools"])
+        converted_tools = [
+            tool_schema
+            for tool_schema in converted_tools
+            if _converted_tool_name(tool_schema) in allowed_visible_names
+        ]
 
         # Auto-detect model capabilities for protocol negotiation
         from .llm_capabilities import detect_model_profile
@@ -902,7 +1114,11 @@ class GenericAgentSDKModel(Model):
             session_cls = NativeOAISession if converted_tools else LLMSession
 
         # Override session class based on detected protocol
-        if model_profile.protocol == "claude":
+        # Only override when backend_kind is not explicitly native_oai —
+        # native_oai means the config is an OpenAI-compatible endpoint (e.g. DeepSeek).
+        # model_profile.protocol="claude" for these providers indicates the response
+        # content-block format, not that they serve the /v1/messages endpoint.
+        if model_profile.protocol == "claude" and self.variant.get("backend_kind") != "native_oai":
             session_cls = NativeClaudeSession
             # Auto-configure Claude-specific features
             if model_profile.supports_thinking and not cfg.get("thinking_type"):
@@ -910,9 +1126,10 @@ class GenericAgentSDKModel(Model):
                 cfg["thinking_budget_tokens"] = 16000  # Extended thinking for complex tasks
 
         session = session_cls(cfg)
-        session.system = system_instructions or ""
+        session.system = _sanitize_runtime_injected_text(system_instructions or "")
         session.tools = converted_tools
         session._audit_context = dict(self._audit_context)
+        session._allowed_tool_names = allowed_visible_names
         return session, converted_tools
 
     def _prepare_request(
@@ -956,8 +1173,12 @@ class GenericAgentSDKModel(Model):
             total_tokens=0,
         )
 
-    @staticmethod
-    def _content_blocks_to_output_items(content_blocks: list[dict[str, Any]]) -> list[Any]:
+    def _content_blocks_to_output_items(
+        self,
+        content_blocks: list[dict[str, Any]],
+        *,
+        allowed_tool_names: set[str] | None = None,
+    ) -> list[Any]:
         from agents.models.fake_id import FAKE_RESPONSES_ID
         from openai.types.responses import (
             ResponseFunctionToolCall,
@@ -966,6 +1187,7 @@ class GenericAgentSDKModel(Model):
         )
 
         output_items: list[Any] = []
+        allowed_names = set(allowed_tool_names or set())
 
         # Preserve thinking blocks as reasoning items (required by DeepSeek v4
         # which demands that thinking content be passed back to the API).
@@ -998,19 +1220,35 @@ class GenericAgentSDKModel(Model):
                 )
             )
 
-        if message_parts:
-            output_items.append(
-                ResponseOutputMessage(
-                    id=FAKE_RESPONSES_ID,
-                    content=message_parts,
-                    role="assistant",
-                    type="message",
-                    status="completed",
-                )
-            )
-
         for block in content_blocks:
             if block.get("type") != "tool_use":
+                continue
+            tool_name = str(block.get("name") or "").strip()
+            tool_report = validate_visible_tools([tool_name], self._tool_contract)
+            tool_allowed = bool(tool_report["valid_tools"])
+            if allowed_names and tool_name not in allowed_names:
+                tool_allowed = False
+                if tool_name not in tool_report["removed_tools"]:
+                    tool_report["unknown_tools"] = [tool_name]
+                    tool_report["removed_tools"] = [tool_name]
+            if not tool_allowed:
+                self._record_profiler_event(
+                    "unknown_tool_call_denied",
+                    kind="tool",
+                    metadata={
+                        "tool_name": tool_name,
+                        "available_tools": sorted(allowed_names) or sorted(self._tool_contract.visible_tools),
+                        "reason": "not_in_tool_contract",
+                    },
+                )
+                message_parts.append(
+                    ResponseOutputText(
+                        text=_tool_contract_error_text(tool_name, self._tool_contract),
+                        type="output_text",
+                        annotations=[],
+                        logprobs=[],
+                    )
+                )
                 continue
             arguments = block.get("input", {})
             if isinstance(arguments, str):
@@ -1022,10 +1260,22 @@ class GenericAgentSDKModel(Model):
                     id=FAKE_RESPONSES_ID,
                     call_id=str(block.get("id") or ""),
                     arguments=arguments_json or "{}",
-                    name=str(block.get("name") or ""),
+                    name=tool_name,
                     type="function_call",
                     status="completed",
                 )
+            )
+
+        if message_parts:
+            output_items.insert(
+                0,
+                ResponseOutputMessage(
+                    id=FAKE_RESPONSES_ID,
+                    content=message_parts,
+                    role="assistant",
+                    type="message",
+                    status="completed",
+                ),
             )
 
         if output_items:
@@ -1052,9 +1302,21 @@ class GenericAgentSDKModel(Model):
         if not text.startswith("Error:"):
             return None
         lowered = text.lower()
+        # Use semantic classifier when HTTP status is present
+        import re
+        m = re.search(r'HTTP (\d+)', lowered)
+        if m:
+            status = int(m.group(1))
+            from .llmcore import classify_http_error, ErrorAction
+            _, act = classify_http_error(status, lowered)
+            if act is ErrorAction.RETRY_BACKOFF:
+                return text
+            # AUTH_ERROR, MODEL_NOT_FOUND, PROTOCOL_ERROR → do NOT retry
+            return None
         retry_markers = (
             "ssl",
             "eof",
+            "connection_error",
             "timeout",
             "connectionerror",
             "httpsconnectionpool",
@@ -1132,10 +1394,12 @@ class GenericAgentSDKModel(Model):
             handoffs=handoffs,
             force_stream=False,
         )
+        allowed_tool_names = set(getattr(session, "_allowed_tool_names", set()) or set())
 
         return {
             "output": self._content_blocks_to_output_items(
-                self._collect_content_blocks(session, claude_messages)
+                self._collect_content_blocks(session, claude_messages),
+                allowed_tool_names=allowed_tool_names,
             ),
             "usage": Usage(requests=1),
         }
@@ -1324,7 +1588,11 @@ class GenericAgentSDKModel(Model):
         finally:
             stream_closed.set()
 
-        output_items = self._content_blocks_to_output_items(content_blocks)
+        allowed_tool_names = set(getattr(session, "_allowed_tool_names", set()) or set())
+        output_items = self._content_blocks_to_output_items(
+            content_blocks,
+            allowed_tool_names=allowed_tool_names,
+        )
         first_item = output_items[0] if output_items else None
         first_is_message = isinstance(first_item, ResponseOutputMessage)
 
@@ -1425,7 +1693,55 @@ class GenericAgentSDKModel(Model):
         )
 
 
-class OpenAIOrchestratedAgent:
+def _is_internal_user_message(item: dict) -> bool:
+    """Return True if this is an internal execution-engine prompt, not a real user message."""
+    content = item.get("content", "")
+    if isinstance(content, str):
+        if content.startswith("You are the execution engine"):
+            return True
+    elif isinstance(content, list):
+        # content is a list of text blocks
+        for block in content:
+            if isinstance(block, dict) and block.get("type") in ("text", "input_text"):
+                text = block.get("text", "")
+                if text.startswith("You are the execution engine"):
+                    return True
+    return False
+
+
+def _strip_stream_artifacts(text: str) -> str:
+    """Strip API streaming protocol artifacts from model output.
+
+    Removes transport-layer XML tags that leak from Anthropic/OpenRouter
+    streaming protocol (tool_call, function_results, assistant wrappers).
+    Preserves meaningful content like <thinking> and <summary> blocks.
+    """
+    import re
+
+    # Self-closing tool-call tags: <tool_call id="...">...</tool_call> and variants
+    # Match tool_call elements with any attributes and body
+    text = re.sub(r"<\s*/?\s*tool_calls?\s*[^>]*>", "", text)
+    text = re.sub(r"<\s*/\s*tool_calls?\s*>", "", text)
+
+    # Anthropic/OpenRouter streaming protocol wrappers
+    # Matches: <|assistant|>, </|assistant|>, <|previous_assistant|>,
+    #          <assistant>, </assistant>, <function_results>, </function_results>
+    # and pipe-delimited variants: <|function_results|>, </|function_results|>
+    for tag_name in ("assistant", "previous_assistant", "function_results"):
+        text = re.sub(r"<\s*/\s*\|?\s*" + tag_name + r"\s*\|?\s*>", "", text)
+        text = re.sub(r"<\s*\|?\s*" + tag_name + r"\s*\|?\s*>", "", text)
+
+    # Bare XML processing instructions
+    text = re.sub(r"<\?xml[^>]*\?>", "", text)
+
+    # Clean up: collapse triple+ newlines, strip leading/trailing whitespace
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    text = text.strip()
+
+    return text
+
+
+class OpenAIOrchestratedAgent(AgentBackend):
     backend_kind = "openai-agents"
     backend_display_name = "openai-agents"
     supports_tool_reinject = False
@@ -1436,7 +1752,7 @@ class OpenAIOrchestratedAgent:
         self.history: list[str] = []
         self.input_items: list[dict[str, str]] = []
         self.task_queue: queue.Queue[dict[str, Any]] = queue.Queue()
-        self.is_running = False
+        self._running = False
         self.stop_sig = False
         self._user_abort_requested = False
         self.verbose = True
@@ -1455,6 +1771,8 @@ class OpenAIOrchestratedAgent:
         self._cached_agent_graph: dict[str, Any] | None = None
         self._cached_agent_graph_model_id: int | None = None
         self._run_store: Any | None = None
+        self._runtime_host: Any | None = None
+        self._runtime_session_id: str | None = None
 
         self.variants = _resolve_model_variants()
         self.supports_llm_switch = len(self.variants) > 1
@@ -1492,8 +1810,88 @@ class OpenAIOrchestratedAgent:
     def _current_variant(self) -> dict[str, Any]:
         return self.variants[self.llm_no]
 
+    def _classic_backend_catalog(self, classic: Any | None = None) -> list[dict[str, Any]]:
+        executor = self._classic_executor if classic is None else classic
+        if executor is None:
+            return []
+        llmclients = getattr(executor, "llmclients", None) or []
+        return [_describe_classic_backend(client, idx) for idx, client in enumerate(llmclients)]
+
+    def _resolve_classic_executor_index(self, variant_idx: int | None = None, classic: Any | None = None) -> int | None:
+        executor = self._classic_executor if classic is None else classic
+        catalog = self._classic_backend_catalog(executor)
+        if not catalog:
+            return None
+        target_variant_idx = self.llm_no if variant_idx is None else variant_idx
+        if target_variant_idx < 0 or target_variant_idx >= len(self.variants):
+            return int(catalog[0]["index"])
+        variant = self.variants[target_variant_idx]
+        best = max(
+            catalog,
+            key=lambda info: _score_variant_to_classic_backend(variant, info),
+        )
+        return int(best["index"])
+
+    def _resolve_variant_index_for_classic(self, classic_idx: int) -> int | None:
+        catalog = self._classic_backend_catalog()
+        if classic_idx < 0 or classic_idx >= len(catalog):
+            return None
+        classic_info = catalog[classic_idx]
+        if not self.variants:
+            return None
+        ranked = [
+            (
+                _score_variant_to_classic_backend(variant, classic_info),
+                idx,
+            )
+            for idx, variant in enumerate(self.variants)
+        ]
+        best_score, best_idx = max(ranked, key=lambda item: item[0])
+        if best_score[0] <= 0:
+            return None
+        return best_idx
+
+    def _preferred_classic_retry_indices(self) -> list[int]:
+        classic = self._classic_executor
+        catalog = self._classic_backend_catalog(classic)
+        if not catalog:
+            return []
+        current_idx = int(getattr(classic, "llm_no", 0) or 0)
+        preferred = self._resolve_classic_executor_index(self.llm_no, classic)
+        ordered: list[int] = []
+        if preferred is not None and preferred != current_idx:
+            ordered.append(preferred)
+        for info in catalog:
+            idx = int(info["index"])
+            if idx == current_idx or idx in ordered:
+                continue
+            ordered.append(idx)
+        return ordered
+
+    def _sync_classic_executor_to_variant(self, variant_idx: int) -> int | None:
+        classic = self._classic_executor
+        if classic is None or not getattr(classic, "llmclients", None):
+            return None
+        target_idx = self._resolve_classic_executor_index(variant_idx, classic)
+        if target_idx is None:
+            return None
+        if int(getattr(classic, "llm_no", -1) or -1) != target_idx:
+            classic.switch_to_key(target_idx)
+        return target_idx
+
+    def sync_from_classic_key_index(self, classic_idx: int) -> str:
+        if not self.variants:
+            return self.get_llm_name()
+        target_variant_idx = self._resolve_variant_index_for_classic(classic_idx)
+        if target_variant_idx is None:
+            target_variant_idx = min(max(int(classic_idx), 0), len(self.variants) - 1)
+        return self.switch_to_key(target_variant_idx)
+
     def _build_model(self) -> GenericAgentSDKModel:
-        return GenericAgentSDKModel(self._current_variant())
+        model = GenericAgentSDKModel(self._current_variant())
+        model._runtime_profiler = self.active_profiler
+        model._tool_contract = ORCHESTRATOR_TOOL_CONTRACT
+        return model
 
     def _update_model_audit_context(self, **kwargs: Any) -> None:
         if self._active_sdk_model is None:
@@ -1525,10 +1923,10 @@ class OpenAIOrchestratedAgent:
             from .agentmain import GeneraticAgent
             classic = GeneraticAgent()
             classic.verbose = self.verbose
-            if classic.llmclients:
-                classic.next_llm(self.llm_no % len(classic.llmclients))
-            threading.Thread(target=classic.run, daemon=True).start()
             self._classic_executor = classic
+            if classic.llmclients:
+                self._sync_classic_executor_to_variant(self.llm_no)
+            threading.Thread(target=classic.run, daemon=True).start()
         except Exception as e:
             import traceback
             print(f"[Executor Init] FAILED: {type(e).__name__}: {e}")
@@ -1570,7 +1968,7 @@ class OpenAIOrchestratedAgent:
             and bool(final_answer_text)
         )
 
-    def _run_classic_executor_task(
+    def _run_classic_executor_task_once(
         self,
         user_request: str,
         execution_plan: str,
@@ -1578,30 +1976,6 @@ class OpenAIOrchestratedAgent:
         original_user_request: str | None = None,
         store: Any | None = None,
     ) -> str:
-        # ── P2-3 + P2-4: ExecutionPolicy evaluation with skill effects ──
-        from .runtime.execution_policy import evaluate_operation, get_policy_mode as _get_policy_mode
-        policy_mode = _get_policy_mode()
-        active_policy = getattr(self, "_active_policy", None) or {}
-        policy_decision = evaluate_operation(user_request, execution_plan, mode=policy_mode, policy=active_policy)
-        if getattr(self, "_active_span_id", None) is not None and self.active_profiler is not None:
-            self.active_profiler.record_event(
-                "execution_policy_check",
-                kind="policy",
-                metadata={
-                    "mode": policy_mode,
-                    "allowed": policy_decision.allowed,
-                    "risk_level": policy_decision.risk_level,
-                    "matched_patterns": policy_decision.matched_patterns,
-                    "reason": policy_decision.reason,
-                },
-            )
-        if not policy_decision.allowed:
-            return (
-                f"[POLICY BLOCKED] ({policy_decision.mode} mode)\n"
-                f"Risk level: {policy_decision.risk_level}\n"
-                f"Reason: {policy_decision.reason}\n"
-                f"Matched: {', '.join(policy_decision.matched_patterns[:5])}"
-            )
         self._store_executor_result_state(None)
         try:
             classic = self._classic_executor
@@ -1660,6 +2034,13 @@ class OpenAIOrchestratedAgent:
                     continue  # 单次超时继续等待，直到总超时
                 except Exception as e:
                     return f"[Executor Error] Queue get failed: {type(e).__name__}: {e}"
+                if isinstance(item, dict) and item.get("type") == "status":
+                    if on_progress is not None:
+                        try:
+                            on_progress(item, False)
+                        except Exception:
+                            pass
+                    continue
                 if "next" in item:
                     current = str(item.get("next") or "")
                     if current and on_progress is not None:
@@ -1683,7 +2064,13 @@ class OpenAIOrchestratedAgent:
                     )
                     break
             if final_output:
-                return final_output
+                # Strip classic executor noise (LLM Running markers, tool-call
+                # transcripts) before returning to the multi-agent LLM. The raw
+                # format is designed for human display and confuses another LLM
+                # into misinterpreting code content (e.g. exception handlers) as
+                # execution errors.
+                cleaned = _extract_classic_executor_report(final_output)
+                return cleaned if cleaned else final_output
             return "[Executor Error] Classic GenericAgent returned empty output."
         except Exception as e:
             import traceback
@@ -1691,14 +2078,94 @@ class OpenAIOrchestratedAgent:
             print(f"[Executor Error] {type(e).__name__}: {e}\n{tb}")
             return f"[Executor Error] {type(e).__name__}: {e}"
 
+    def _run_classic_executor_task(
+        self,
+        user_request: str,
+        execution_plan: str,
+        on_progress=None,
+        original_user_request: str | None = None,
+        store: Any | None = None,
+    ) -> str:
+        # ── P2-3 + P2-4: ExecutionPolicy evaluation with skill effects ──
+        from .runtime.execution_policy import evaluate_operation, get_policy_mode as _get_policy_mode
+
+        policy_mode = _get_policy_mode()
+        active_policy = getattr(self, "_active_policy", None) or {}
+        policy_decision = evaluate_operation(user_request, execution_plan, mode=policy_mode, policy=active_policy)
+        if getattr(self, "_active_span_id", None) is not None and self.active_profiler is not None:
+            self.active_profiler.record_event(
+                "execution_policy_check",
+                kind="policy",
+                metadata={
+                    "mode": policy_mode,
+                    "allowed": policy_decision.allowed,
+                    "risk_level": policy_decision.risk_level,
+                    "matched_patterns": policy_decision.matched_patterns,
+                    "reason": policy_decision.reason,
+                },
+            )
+        if not policy_decision.allowed:
+            return (
+                f"[POLICY BLOCKED] ({policy_decision.mode} mode)\n"
+                f"Risk level: {policy_decision.risk_level}\n"
+                f"Reason: {policy_decision.reason}\n"
+                f"Matched: {', '.join(policy_decision.matched_patterns[:5])}"
+            )
+
+        first_output = self._run_classic_executor_task_once(
+            user_request,
+            execution_plan,
+            on_progress=on_progress,
+            original_user_request=original_user_request,
+            store=store,
+        )
+        if not _looks_like_backend_unavailable(first_output):
+            return first_output
+
+        classic = self._classic_executor
+        if classic is None:
+            return first_output
+
+        current_idx = int(getattr(classic, "llm_no", 0) or 0)
+        last_output = first_output
+        for fallback_idx in self._preferred_classic_retry_indices():
+            try:
+                classic.switch_to_key(fallback_idx)
+                self._reset_classic_executor()
+            except Exception:
+                continue
+            if self.active_profiler is not None:
+                self.active_profiler.record_event(
+                    "executor_backend_retry",
+                    kind="llm",
+                    metadata={
+                        "from_index": current_idx,
+                        "to_index": fallback_idx,
+                        "reason": "backend_unavailable",
+                    },
+                )
+            retry_output = self._run_classic_executor_task_once(
+                user_request,
+                execution_plan,
+                on_progress=on_progress,
+                original_user_request=original_user_request,
+                store=store,
+            )
+            last_output = retry_output
+            if not _looks_like_backend_unavailable(retry_output):
+                return retry_output
+        return last_output
+
     def switch_to_key(self, n: int) -> str:
         """Switch directly to a specific variant index. Returns the new model name."""
         if not self.variants or n < 0 or n >= len(self.variants):
             return self.get_llm_name()
         self._apply_variant(n)
-        classic = self._classic_executor
-        if classic is not None and getattr(classic, "llmclients", None):
-            classic.switch_to_key(n % len(classic.llmclients))
+        # Invalidate agent graph cache so next task rebuilds with new model
+        self._cached_agent_graph = None
+        self._cached_agent_graph_model_id = None
+        self._active_sdk_model = None
+        self._sync_classic_executor_to_variant(n)
         return self.get_llm_name()
 
     def next_llm(self, n: int = -1) -> None:
@@ -1743,11 +2210,35 @@ class OpenAIOrchestratedAgent:
             self.llmclient.backend.history = list(self.input_items)
             self.llmclient.last_tools = ""
 
+    # ── AgentBackend protocol (Phase OA1) ──────────────────────────────
+
+    @property
+    def is_running(self) -> bool:
+        """Whether a task is currently being processed (AgentBackend protocol)."""
+        return self._running
+
+    def submit(self, task: AgentInput):
+        """Submit a task via the AgentBackend protocol.
+
+        Returns an AgentOutputChannel for consuming streaming output.
+        ``put_task()`` is the legacy equivalent; this method delegates to it.
+        """
+        from core.protocol.channel import QueueOutputChannel
+
+        raw_q = self.put_task(task.query, task.source, task.images, task.run_id)
+        return QueueOutputChannel.from_legacy_queue(raw_q)
+
     def abort(self) -> None:
-        if not self.is_running:
+        if not self._running:
             return
         self.stop_sig = True
         self._user_abort_requested = True
+        runtime_host = getattr(self, "_runtime_host", None)
+        if runtime_host is not None:
+            try:
+                runtime_host.request_stop(reason="user_abort")
+            except Exception:
+                pass
         if self._classic_executor is not None:
             try:
                 self._classic_executor.abort()
@@ -1766,6 +2257,7 @@ class OpenAIOrchestratedAgent:
                 pass
 
     def put_task(self, query: str, source: str = "user", images: list[str] | None = None, run_id: str | None = None):
+        """Submit a task (legacy API). Prefer ``submit(AgentInput(...))`` for new code."""
         display_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.task_queue.put(
             {"query": query, "source": source, "images": images or [], "output": display_queue, "run_id": run_id}
@@ -1838,6 +2330,11 @@ class OpenAIOrchestratedAgent:
         ):
             self._active_sdk_model = self._cached_agent_graph["root"].model
             return self._cached_agent_graph
+        return self._build_minimal_runtime_graph(
+            original_user_request,
+            executor_progress=executor_progress,
+            cache_graph=True,
+        )
 
         _ensure_openai_agents_on_path()
         from agents import Agent, function_tool
@@ -2026,15 +2523,13 @@ class OpenAIOrchestratedAgent:
         root_agent = Agent(
             name="task_router",
             instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You are a router. You MUST NOT call any tools directly. "
+                "You are a router. You have NO tools — do not attempt to call any tools.\n"
                 "Your ONLY job is to transfer to the appropriate agent via handoffs.\n"
-                "- For simple chat/conversation → transfer to chat_specialist.\n"
-                "- For code writing, modification, debugging, refactoring → transfer to code_agent.\n"
-                "- For code review, testing, security audit, bug finding → transfer to review_agent.\n"
-                "- For information search, documentation lookup, codebase exploration → transfer to research_agent.\n"
-                "- For complex multi-step tasks that mix multiple concerns → transfer to planner_executor.\n"
-                "Never try to call any tool yourself."
+                "- Simple chat or conversation → chat_specialist\n"
+                "- Code writing, modification, debugging, refactoring → code_agent\n"
+                "- Code review, testing, security audit, bug finding → review_agent\n"
+                "- Information search, documentation lookup, codebase exploration → research_agent\n"
+                "- Complex multi-step tasks mixing multiple concerns → planner_executor\n"
             ),
             handoffs=[chat_agent, code_agent, review_agent, research_agent, planner_executor_agent],
             **common,
@@ -2073,11 +2568,12 @@ class OpenAIOrchestratedAgent:
         route_result = RouterRules.match(query)
 
         # Count per-category keyword hits to determine needed agents.
-        code_hits = sum(1 for kw in RouterRules.CODE_KEYWORDS if kw in query)
-        review_hits = sum(1 for kw in RouterRules.REVIEW_KEYWORDS if kw in query)
-        research_hits = sum(1 for kw in RouterRules.RESEARCH_KEYWORDS if kw in query)
-        chat_hits = sum(1 for kw in RouterRules.CHAT_KEYWORDS if kw in query)
-        exec_hits = sum(1 for kw in RouterRules.EXECUTOR_KEYWORDS if kw in query)
+        hit_counts = RouterRules.keyword_hit_counts(query)
+        code_hits = int(hit_counts.get("code", 0))
+        review_hits = int(hit_counts.get("review", 0))
+        research_hits = int(hit_counts.get("research", 0))
+        chat_hits = int(hit_counts.get("chat", 0))
+        exec_hits = int(hit_counts.get("executor", 0))
 
         needs_code = code_hits > 0 or (exec_hits > 0 and code_hits >= review_hits and code_hits >= research_hits)
         needs_review = review_hits > 0
@@ -2214,10 +2710,8 @@ class OpenAIOrchestratedAgent:
         root_agent = Agent(
             name="task_router",
             instructions=(
-                f"{CAPABILITY_BRIEF} "
-                f"You are a router. Transfer to the appropriate agent. "
-                f"Available agents: {agent_list_str}. "
-                f"Never call tools yourself."
+                f"You are a router with NO tools. Transfer to the appropriate agent. "
+                f"Available agents: {agent_list_str}."
             ),
             handoffs=handoff_list,
             **common,
@@ -2225,6 +2719,119 @@ class OpenAIOrchestratedAgent:
         agent_map["root"] = root_agent
 
         return agent_map
+
+    # Active runtime graph override: keep the real orchestrator limited to
+    # task_router -> chat_specialist/planner_executor.
+    def _build_agent_graph(
+        self, original_user_request: str, executor_progress=None,
+        graph_mode: str = "full",
+    ) -> dict[str, Any]:
+        self._active_policy = None  # P2-4: reset per-run
+        if graph_mode == "dynamic":
+            return self._build_dynamic_graph(original_user_request, executor_progress)
+        if (
+            self._cached_agent_graph is not None
+            and self._cached_agent_graph_model_id == self.llm_no
+        ):
+            self._active_sdk_model = self._cached_agent_graph["root"].model
+            return self._cached_agent_graph
+        return self._build_minimal_runtime_graph(
+            original_user_request,
+            executor_progress=executor_progress,
+            cache_graph=True,
+        )
+
+    def _build_dynamic_graph(
+        self, original_user_request: str, executor_progress=None,
+    ) -> dict[str, Any]:
+        return self._build_minimal_runtime_graph(
+            original_user_request,
+            executor_progress=executor_progress,
+            cache_graph=False,
+        )
+
+    def _build_minimal_runtime_graph(
+        self,
+        original_user_request: str,
+        executor_progress=None,
+        *,
+        cache_graph: bool,
+    ) -> dict[str, Any]:
+        _ensure_openai_agents_on_path()
+        from agents import Agent, function_tool
+
+        model = self._build_model()
+        self._active_sdk_model = model
+        common = {"model": model}
+
+        chat_agent = Agent(
+            name="chat_specialist",
+            handoff_description="Handle simple conversation or explanation-only requests.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You handle simple conversational requests that do not require tool use. "
+                "If asked about tools or skills, explain that this app can delegate execution to "
+                "the classic GenericAgent executor through the workflow coordinator. "
+                "Be concise, helpful, and avoid inventing actions you did not take.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            **common,
+        )
+
+        @function_tool(name_override="run_genericagent_executor")
+        async def run_genericagent_executor(user_request: str, execution_plan: str) -> str:
+            """Delegate execution to the classic GenericAgent runtime."""
+            return await asyncio.to_thread(
+                self._run_classic_executor_task,
+                user_request,
+                execution_plan,
+                executor_progress,
+                original_user_request,
+                getattr(self, "_run_store", None),
+            )
+
+        planner_executor_agent = Agent(
+            name="planner_executor",
+            handoff_description="General-purpose planner and executor for all non-chat tasks.",
+            instructions=(
+                f"{CAPABILITY_BRIEF} "
+                "You handle all non-chat execution tasks in this runtime, including code, review, "
+                "research, and mixed multi-step work.\n"
+                "1. FIRST create a short, actionable plan (2-5 steps)\n"
+                "2. Call run_genericagent_executor to execute the plan\n"
+                "3. AFTER execution, ALWAYS verify results:\n"
+                "   - Did the execution achieve all goals?\n"
+                "   - Is there already a usable answer or evidence?\n"
+                "   - Only retry if the first run produced no usable findings at all.\n"
+                "4. End with: Plan, Execution Summary, Verification, Final Answer\n\n"
+                "IMPORTANT: You have only ONE tool: run_genericagent_executor. "
+                "All file/code/browser operations happen inside the executor.\n\n"
+                f"{_summary_protocol()}"
+            ),
+            tools=[run_genericagent_executor],
+            **common,
+        )
+
+        root_agent = Agent(
+            name="task_router",
+            instructions=(
+                "You are a router. You have NO tools - do not attempt to call any tools.\n"
+                "Your ONLY job is to transfer to the appropriate agent via handoffs.\n"
+                "- Simple chat or conversation -> chat_specialist\n"
+                "- Any file/code/browser/research/review/multi-step task -> planner_executor\n"
+            ),
+            handoffs=[chat_agent, planner_executor_agent],
+            **common,
+        )
+        graph = {
+            "root": root_agent,
+            "chat": chat_agent,
+            "executor": planner_executor_agent,
+        }
+        if cache_graph:
+            self._cached_agent_graph = graph
+            self._cached_agent_graph_model_id = self.llm_no
+        return graph
 
     async def _run_parallel_tasks(
         self, subtasks: list[str], source: str,
@@ -2242,17 +2849,12 @@ class OpenAIOrchestratedAgent:
             """Run one sub-task: route → build graph → run stream → collect output."""
             route = RouterRules.match(subtask_query)
             target = route.target or "executor"
+            execution_mode = getattr(route, "mode", "single_agent")
             agents = self._build_agent_graph(subtask_query, executor_progress=executor_progress, graph_mode="dynamic")
             selected = agents.get("root")
             if target == "chat":
                 selected = agents.get("chat", selected)
-            elif target == "code":
-                selected = agents.get("code", selected)
-            elif target == "review":
-                selected = agents.get("review", selected)
-            elif target == "research":
-                selected = agents.get("research", selected)
-            elif target == "executor":
+            elif execution_mode == "single_agent" and target in EXECUTOR_ROUTE_TARGETS:
                 selected = agents.get("executor", selected)
 
             try:
@@ -2370,6 +2972,7 @@ class OpenAIOrchestratedAgent:
             llm_span = None
             stream_span = None
             planner_followup_override = None
+            runtime_host = getattr(self, "_runtime_host", None)
 
             def flush_progress(*, force: bool = False) -> None:
                 nonlocal last_sent_len
@@ -2381,8 +2984,14 @@ class OpenAIOrchestratedAgent:
 
             classic_progress_snapshot = ""
 
-            def executor_progress(snapshot: str, reset: bool = False) -> None:
+            def executor_progress(snapshot: Any, reset: bool = False) -> None:
                 nonlocal full_text, classic_progress_snapshot
+                if isinstance(snapshot, dict) and snapshot.get("type") == "status":
+                    status_item = dict(snapshot)
+                    status_item.setdefault("source", source)
+                    status_item.setdefault("task_id", self._profile_run_id)
+                    display_queue.put(status_item)
+                    return
                 snapshot = str(snapshot or "")
                 if not snapshot:
                     return
@@ -2406,21 +3015,98 @@ class OpenAIOrchestratedAgent:
                 full_text += snapshot
                 flush_progress(force=True)
 
+            def runtime_collaboration_snapshot() -> dict[str, Any] | None:
+                store = getattr(self, "_run_store", None)
+                snapshot_fn = getattr(store, "snapshot", None)
+                if not callable(snapshot_fn):
+                    return None
+                try:
+                    return snapshot_fn()
+                except Exception:
+                    return None
+
+            def runtime_complete_active_turn() -> None:
+                if runtime_host is None or seen_turn <= 0:
+                    return
+                try:
+                    runtime_host.complete_llm_turn(
+                        seen_turn,
+                        selected_agent=selected_agent_name,
+                        result_summary=full_text[-300:],
+                    )
+                except Exception:
+                    pass
+
+            def runtime_complete_active_tool(*, error: str | None = None, summary: str = "") -> None:
+                nonlocal active_tool_name
+                if runtime_host is None or not active_tool_name:
+                    return
+                try:
+                    if error:
+                        runtime_host.fail_tool(active_tool_name, error=error)
+                    else:
+                        runtime_host.complete_tool(
+                            active_tool_name,
+                            result_summary=summary,
+                            collaboration_artifacts=runtime_collaboration_snapshot(),
+                        )
+                except Exception:
+                    pass
+                active_tool_name = ""
+
+            def runtime_finalize_success(summary: str, *, verdict: str = "pass_with_warnings") -> None:
+                if runtime_host is None:
+                    return
+                try:
+                    runtime_host.begin_review()
+                    runtime_host.complete_review(verdict=verdict, summary=summary)
+                    runtime_host.complete_session(summary=summary)
+                except Exception:
+                    pass
+
             try:
                 # Create a shared artifact store for this run (Level 4 blackboard).
                 from core.runtime.shared_store import SharedArtifactStore
                 self._run_store = SharedArtifactStore()
+                if runtime_host is not None:
+                    try:
+                        runtime_host.sync_collaboration_store(self._run_store)
+                    except Exception:
+                        pass
 
                 # 规则快速匹配层 - 在LLM路由前进行预判
                 planning_span = _start_manual_span(profiler, "routing_and_planning", kind="agent", metadata={"attempt": attempt + 1, "source": source})
-                route_result = RouterRules.match(raw_query)
-                route_target = route_result.target
+                if getattr(self, "_force_multi_agent", False):
+                    # ── Multi-agent mode short-circuit: skip RouterRules, go direct ──
+                    route_result = RouterRules.match(raw_query)  # still classify for audit
+                    route_target = route_result.target
+                    execution_mode = "multi_agent"
+                    self._force_multi_agent = False
+                else:
+                    route_result = RouterRules.match(raw_query)
+                    route_target = route_result.target
+                    execution_mode = getattr(route_result, "mode", "single_agent")
 
                 # ── Parallel sub-task detection (Level 3) ──
-                parallel_subtasks = RouterRules.try_parallel_split(raw_query) if route_target not in ("chat", None) else None
-                if parallel_subtasks and len(parallel_subtasks) >= 2 and os.environ.get("GA_PARALLEL") == "1":
+                parallel_subtasks = list(getattr(route_result, "parallel_subtasks", []) or [])
+                if execution_mode == "multi_agent" and parallel_subtasks and len(parallel_subtasks) >= 2 and os.environ.get("GA_PARALLEL") == "1":
+                    if runtime_host is not None:
+                        try:
+                            runtime_host.apply_route(
+                                route_target=route_target,
+                                execution_mode=execution_mode,
+                                parallel_subtasks=parallel_subtasks,
+                            )
+                        except Exception as runtime_route_error:
+                            print(f"[runtime_host] route apply failed: {runtime_route_error}")
                     full_text = await self._run_parallel_tasks(
                         parallel_subtasks, source, display_queue, profiler, executor_progress
+                    )
+                    runtime_finalize_success(
+                        _sanitize_runtime_injected_text(
+                            _extract_summary_line(full_text)
+                            or smart_format(full_text.replace("\n", " "), max_str_len=300)
+                        )
                     )
                     # Cleanup and exit after parallel run
                     self._run_store = None
@@ -2430,6 +3116,8 @@ class OpenAIOrchestratedAgent:
 
                 answer_quality_flag = bool(answer_quality_enabled())
                 answer_quality_query_match = should_inject_answer_quality_context(raw_query, route_target=None)
+                problem_framing_flag = bool(problem_framing_enabled())
+                problem_framing_query_match = should_inject_problem_framing(raw_query)
                 answer_quality_route_override = (
                     answer_quality_flag
                     and answer_quality_query_match
@@ -2438,23 +3126,37 @@ class OpenAIOrchestratedAgent:
                 route_hint = None
                 if route_result.target == "chat":
                     route_hint = "[ROUTER_HINT] This is a simple conversation request. Transfer to chat_specialist immediately."
+                elif execution_mode == "multi_agent":
+                    route_hint = "[ROUTER_HINT] This request needs multi-agent collaboration. Transfer to task_router immediately."
                 elif route_result.target == "code":
-                    route_hint = "[ROUTER_HINT] This is a code writing/modification task. Transfer to code_agent immediately."
+                    route_hint = "[ROUTER_HINT] This is a code writing/modification task. Transfer to planner_executor in single-agent mode immediately."
                 elif route_result.target == "review":
-                    route_hint = "[ROUTER_HINT] This is a code review/testing task. Transfer to review_agent immediately."
+                    route_hint = "[ROUTER_HINT] This is a code review/testing task. Transfer to planner_executor in single-agent mode immediately."
                 elif route_result.target == "research":
-                    route_hint = "[ROUTER_HINT] This is an information gathering/research task. Transfer to research_agent immediately."
+                    route_hint = "[ROUTER_HINT] This is an information gathering/research task. Transfer to planner_executor in single-agent mode immediately."
                 elif route_result.target == "executor":
-                    route_hint = "[ROUTER_HINT] This is a complex multi-step task. Transfer to planner_executor immediately."
+                    route_hint = "[ROUTER_HINT] This is an execution task. Transfer to planner_executor in single-agent mode immediately."
                 if answer_quality_route_override:
                     route_target = "executor"
-                    route_hint = "[ROUTER_HINT] This is a roadmap / architecture / capability-planning request. Transfer to planner_executor immediately."
+                    execution_mode = "single_agent"
+                    route_hint = "[ROUTER_HINT] This is a roadmap / architecture / capability-planning request. Transfer to planner_executor in single-agent mode immediately."
+                if runtime_host is not None:
+                    try:
+                        runtime_host.apply_route(
+                            route_target=route_target,
+                            execution_mode=execution_mode,
+                            parallel_subtasks=parallel_subtasks,
+                        )
+                    except Exception as runtime_route_error:
+                        print(f"[runtime_host] route apply failed: {runtime_route_error}")
             
                 graph_mode = "dynamic" if os.environ.get("GA_DYNAMIC_GRAPH") == "1" else "full"
                 agents = self._build_agent_graph(raw_query, executor_progress=executor_progress, graph_mode=graph_mode)
                 inputs = list(self.input_items)
                 memory_span = _start_manual_span(profiler, "working_memory_prepare", kind="memory", metadata={"history_size": len(self.history)})
-                working_memory = _working_memory_message(self.history)
+                working_memory = _sanitize_runtime_injected_text(
+                    _working_memory_message(self.history)
+                )
                 if working_memory:
                     inputs.append({"role": "user", "content": working_memory})
                 _stop_manual_span(memory_span)
@@ -2466,6 +3168,7 @@ class OpenAIOrchestratedAgent:
                     project_root=PROJECT_ROOT,
                     profiler=profiler,
                 )
+                context_packet_text = _sanitize_runtime_injected_text(context_packet_text)
                 if context_packet_text:
                     inputs.append({"role": "user", "content": context_packet_text})
                 _stop_manual_span(context_span)
@@ -2477,6 +3180,7 @@ class OpenAIOrchestratedAgent:
                 from core.context.recent_turns import build_recent_conversation_block as _build_recent_block, recent_turns_enabled as _recent_enabled
                 if _recent_enabled():
                     recent_block = _build_recent_block(self.input_items, max_turns=5, max_chars=6000)
+                    recent_block = _sanitize_runtime_injected_text(recent_block)
                     if recent_block:
                         inputs.append({"role": "user", "content": recent_block})
                         recent_block_chars = len(recent_block)
@@ -2503,28 +3207,23 @@ class OpenAIOrchestratedAgent:
                             _parts.append(f"## L2 (Environment Facts)\n{_l2}")
                             legacy_memory_sources.append("L2")
                         legacy_memory_block = "\n\n".join(_parts)
+                        legacy_memory_block = _sanitize_runtime_injected_text(legacy_memory_block)
                         legacy_memory_chars = len(legacy_memory_block)
                         inputs.append({"role": "user", "content": legacy_memory_block})
                 _stop_manual_span(legacy_memory_span)
                 selected_agent = agents["root"]
                 if route_target == "chat":
                     selected_agent = agents["chat"]
-                elif route_target == "code":
-                    selected_agent = agents["code"]
-                elif route_target == "review":
-                    selected_agent = agents["review"]
-                elif route_target == "research":
-                    selected_agent = agents["research"]
-                elif route_target == "executor":
+                elif execution_mode == "single_agent" and route_target in EXECUTOR_ROUTE_TARGETS:
                     selected_agent = agents["executor"]
-                selected_agent_name = getattr(selected_agent, "name", route_target)
+                selected_agent_name = getattr(selected_agent, "name", route_target or execution_mode)
                 answer_quality_context = {
                     "block": "",
                     "chars": 0,
                     "matched": False,
                     "reason": "disabled",
                 }
-                if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"}:
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS:
                     if answer_quality_flag:
                         if answer_quality_query_match:
                             answer_quality_context = build_answer_quality_context(
@@ -2545,6 +3244,36 @@ class OpenAIOrchestratedAgent:
                             "matched": False,
                             "reason": "answer quality guard disabled",
                         }
+                problem_framing_context = {
+                    "block": "",
+                    "chars": 0,
+                    "matched": False,
+                    "frame": None,
+                    "reason": "disabled",
+                }
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS:
+                    if problem_framing_flag:
+                        if problem_framing_query_match:
+                            problem_framing_context = build_problem_framing_context(
+                                raw_query,
+                                max_chars=1500,
+                            )
+                        else:
+                            problem_framing_context = {
+                                "block": "",
+                                "chars": 0,
+                                "matched": False,
+                                "frame": None,
+                                "reason": "query did not match problem-framing triggers",
+                            }
+                    else:
+                        problem_framing_context = {
+                            "block": "",
+                            "chars": 0,
+                            "matched": False,
+                            "frame": None,
+                            "reason": "problem framing disabled",
+                        }
                 read_prefetch_should_prefetch = False
                 read_prefetch_target_file: str | None = None
                 read_prefetch_reason = "not_checked"
@@ -2552,7 +3281,7 @@ class OpenAIOrchestratedAgent:
                 read_prefetch_max_lines: int | None = None
                 read_prefetch_max_chars: int | None = None
                 read_prefetch_signals: list[str] = []
-                if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"}:
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS:
                     prefetch_decision = detect_read_prefetch(
                         raw_query,
                         project_root=PROJECT_ROOT,
@@ -2671,6 +3400,7 @@ class OpenAIOrchestratedAgent:
                     source=source,
                     attempt=attempt + 1,
                     route_target=route_target,
+                    execution_mode=execution_mode,
                     agent_name=selected_agent_name,
                     turn=max(seen_turn, 1),
                     skill_sop_enabled=skill_sop_flag,
@@ -2685,6 +3415,11 @@ class OpenAIOrchestratedAgent:
                     answer_quality_context_injected=bool(answer_quality_context.get("block")),
                     answer_quality_context_chars=int(answer_quality_context.get("chars") or 0),
                     answer_quality_reason=str(answer_quality_context.get("reason") or ""),
+                    problem_framing_enabled=problem_framing_flag,
+                    problem_framing_context_injected=bool(problem_framing_context.get("block")),
+                    problem_framing_context_chars=int(problem_framing_context.get("chars") or 0),
+                    problem_framing_frame=str(problem_framing_context.get("frame") or ""),
+                    problem_framing_reason=str(problem_framing_context.get("reason") or ""),
                     read_prefetch_should_prefetch=read_prefetch_should_prefetch,
                     read_prefetch_target_file=read_prefetch_target_file,
                     read_prefetch_reason=read_prefetch_reason,
@@ -2709,11 +3444,20 @@ class OpenAIOrchestratedAgent:
                 )
                 # 如果规则匹配命中，添加路由提示
                 if route_hint and selected_agent is agents["root"]:
-                    inputs.append({"role": "user", "content": route_hint})
-                answer_quality_block = str(answer_quality_context.get("block") or "").strip()
-                if selected_agent_name in {"planner_executor", "task_router", "code_agent", "review_agent", "research_agent"} and answer_quality_block:
+                    inputs.append({"role": "user", "content": _sanitize_runtime_injected_text(route_hint)})
+                answer_quality_block = _sanitize_runtime_injected_text(
+                    str(answer_quality_context.get("block") or "").strip()
+                )
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS and answer_quality_block:
                     inputs.append({"role": "user", "content": answer_quality_block})
-                optional_sop_block = str(skill_sop_context.get("block") or "").strip()
+                problem_framing_block = _sanitize_runtime_injected_text(
+                    str(problem_framing_context.get("block") or "").strip()
+                )
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS and problem_framing_block:
+                    inputs.append({"role": "user", "content": problem_framing_block})
+                optional_sop_block = _sanitize_runtime_injected_text(
+                    str(skill_sop_context.get("block") or "").strip()
+                )
                 if selected_agent_name == "planner_executor" and optional_sop_block:
                     inputs.append({"role": "user", "content": optional_sop_block})
                 # ── Read prefetch context injection (P2-1) ──
@@ -2735,6 +3479,7 @@ class OpenAIOrchestratedAgent:
                             read_prefetch_confidence,
                             bool(prefetch_meta.get("truncated")),
                         )
+                        prefetch_block = _sanitize_runtime_injected_text(prefetch_block)
                         inputs.append({"role": "user", "content": prefetch_block})
                         prefetch_injected = True
                         prefetch_chars = len(prefetch_block)
@@ -2827,7 +3572,9 @@ class OpenAIOrchestratedAgent:
                         kind="agent",
                         metadata={
                             "target": route_target,
+                            "execution_mode": execution_mode,
                             "selected_agent": selected_agent_name,
+                            "parallel_subtask_count": len(parallel_subtasks),
                             "skill_sop_enabled": skill_sop_flag,
                             "skill_phase": str(skill_sop_context.get("phase") or "planner"),
                             "selected_skills": list(skill_sop_context.get("selected_skills") or []),
@@ -2886,12 +3633,22 @@ class OpenAIOrchestratedAgent:
                         raise asyncio.CancelledError()
 
                     while result.current_turn > seen_turn:
+                        if runtime_host is not None and seen_turn > 0:
+                            try:
+                                runtime_host.complete_llm_turn(
+                                    seen_turn,
+                                    selected_agent=selected_agent_name,
+                                    result_summary=full_text[-300:],
+                                )
+                            except Exception:
+                                pass
                         _stop_manual_span(active_llm_turn_span)
                         seen_turn += 1
                         self._update_model_audit_context(
                             source=source,
                             attempt=attempt + 1,
                             route_target=route_target,
+                            execution_mode=execution_mode,
                             agent_name=selected_agent_name,
                             turn=seen_turn,
                         )
@@ -2901,6 +3658,11 @@ class OpenAIOrchestratedAgent:
                             kind="llm",
                             metadata={"turn": seen_turn, "attempt": attempt + 1, "selected_agent": selected_agent_name},
                         )
+                        if runtime_host is not None:
+                            try:
+                                runtime_host.begin_llm_turn(seen_turn, selected_agent=selected_agent_name)
+                            except Exception:
+                                pass
                         if full_text and not full_text.endswith("\n\n"):
                             full_text += "\n\n"
                         full_text += f"**LLM Running (Turn {seen_turn}) ...**\n\n"
@@ -2911,8 +3673,10 @@ class OpenAIOrchestratedAgent:
                         if getattr(raw_event, "type", "") == "response.output_text.delta":
                             delta = str(getattr(raw_event, "delta", "") or "")
                             if delta:
-                                full_text += delta
-                                flush_progress(force="\n" in delta)
+                                delta = _strip_stream_artifacts(delta)
+                                if delta:
+                                    full_text += delta
+                                    flush_progress(force="\n" in delta)
                         continue
 
                     if getattr(event, "type", "") == "run_item_stream_event":
@@ -2927,9 +3691,15 @@ class OpenAIOrchestratedAgent:
                                 kind="tool",
                                 metadata={"tool": tool_name, "attempt": attempt + 1, "turn": max(seen_turn, 1)},
                             )
+                            if runtime_host is not None:
+                                try:
+                                    runtime_host.request_tool(tool_name, risk_level="medium")
+                                except Exception:
+                                    pass
                         elif event_name == "tool_output":
                             _stop_manual_span(active_tool_span)
                             active_tool_span = None
+                            tool_output_summary = self._compact_event_text(getattr(event.item, "output", None), max_len=200)
                             if active_tool_name == "run_genericagent_executor":
                                 executor_state = self._consume_executor_result_state()
                                 if self._should_skip_planner_followup(executor_state):
@@ -2949,23 +3719,33 @@ class OpenAIOrchestratedAgent:
                                         result.cancel(mode="immediate")
                                     except Exception:
                                         pass
-                                    active_tool_name = ""
+                                    runtime_complete_active_tool(summary=tool_output_summary)
                                     break
-                            active_tool_name = ""
-                        elif event_name in {"handoff_requested", "handoff_occured"} and profiler is not None:
+                            runtime_complete_active_tool(summary=tool_output_summary)
+                        elif event_name in {"handoff_requested", "handoff_occured"}:
                             target = getattr(event.item, "target_agent", None)
                             target_name = getattr(target, "name", "") if target is not None else ""
-                            profiler.record_event(
-                                event_name,
-                                kind="agent",
-                                metadata={"target_agent": target_name},
-                            )
+                            if profiler is not None:
+                                profiler.record_event(
+                                    event_name,
+                                    kind="agent",
+                                    metadata={"target_agent": target_name},
+                                )
+                            if runtime_host is not None and target_name:
+                                try:
+                                    runtime_host.record_handoff(
+                                        target_agent=target_name,
+                                        completed=(event_name == "handoff_occured"),
+                                    )
+                                except Exception:
+                                    pass
                             if target_name:
                                 selected_agent_name = target_name
                                 self._update_model_audit_context(
                                     source=source,
                                     attempt=attempt + 1,
                                     route_target=route_target,
+                                    execution_mode=execution_mode,
                                     agent_name=selected_agent_name,
                                     turn=max(seen_turn, 1),
                                 )
@@ -3000,12 +3780,20 @@ class OpenAIOrchestratedAgent:
 
                     try:
                         self.input_items = result.to_input_list(mode="normalized")
+                        # Filter out internal execution-engine prompts
+                        self.input_items = [
+                            item for item in self.input_items
+                            if not _is_internal_user_message(item)
+                        ]
                     except Exception:
                         pass
                     if self.llmclient:
                         self.llmclient.backend.history = list(self.input_items)
                     user_line = smart_format(raw_query.replace("\n", " "), max_str_len=200)
-                    agent_line = _extract_summary_line(final_text) or smart_format(final_text.replace("\n", " "), max_str_len=300)
+                    agent_line = _sanitize_runtime_injected_text(
+                        _extract_summary_line(final_text)
+                        or smart_format(final_text.replace("\n", " "), max_str_len=300)
+                    )
                     self.history.append(f"[USER]: {user_line}")
                     self.history.append(f"[Agent] {agent_line}")
                     io_span = _start_manual_span(
@@ -3031,6 +3819,8 @@ class OpenAIOrchestratedAgent:
                             )
                         except Exception:
                             pass
+                    runtime_complete_active_turn()
+                    runtime_finalize_success(agent_line)
                     display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 1)})
                     return
 
@@ -3063,10 +3853,18 @@ class OpenAIOrchestratedAgent:
                         full_text += final_text
 
                 self.input_items = result.to_input_list(mode="normalized")
+                # Filter out internal execution-engine prompts
+                self.input_items = [
+                    item for item in self.input_items
+                    if not _is_internal_user_message(item)
+                ]
                 if self.llmclient:
                     self.llmclient.backend.history = list(self.input_items)
                 user_line = smart_format(raw_query.replace("\n", " "), max_str_len=200)
-                agent_line = _extract_summary_line(final_text) or smart_format(final_text.replace("\n", " "), max_str_len=300)
+                agent_line = _sanitize_runtime_injected_text(
+                    _extract_summary_line(final_text)
+                    or smart_format(final_text.replace("\n", " "), max_str_len=300)
+                )
                 self.history.append(f"[USER]: {user_line}")
                 self.history.append(f"[Agent] {agent_line}")
                 io_span = _start_manual_span(profiler, "save_model_response_log", kind="io", metadata={"attempt": attempt + 1})
@@ -3085,6 +3883,8 @@ class OpenAIOrchestratedAgent:
                     except Exception:
                         pass
                 # 发送done信号通知前端流结束
+                runtime_complete_active_turn()
+                runtime_finalize_success(agent_line)
                 display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 0)})
                 return  # 成功完成，退出重试循环
 
@@ -3104,12 +3904,24 @@ class OpenAIOrchestratedAgent:
                     # 重试次数用尽
                     self._profile_status = "error"
                     error_msg = f"[ERROR] {error_name}: {e}. All {MAX_RETRIES} retries failed."
+                    runtime_complete_active_tool(error=error_msg)
+                    if runtime_host is not None:
+                        try:
+                            runtime_host.fail_session(error=error_msg)
+                        except Exception:
+                            pass
                     print(error_msg)
                     display_queue.put({"done": f"\n**{error_msg}**\n\n请尝试重新发送请求。", "source": "system", "turn": max(seen_turn, 0)})
                     return
             except asyncio.CancelledError:
                 if self._user_abort_requested or self.stop_sig:
                     self._profile_status = "aborted"
+                    runtime_complete_active_tool(error="user_abort")
+                    if runtime_host is not None:
+                        try:
+                            runtime_host.request_stop(reason="user_abort")
+                        except Exception:
+                            pass
                     display_queue.put({"done": full_text + "\n\n[已取消]", "source": "system", "turn": max(seen_turn, 0)})
                     return
                 warn_msg = "[WARN] Unexpected internal cancellation."
@@ -3120,9 +3932,16 @@ class OpenAIOrchestratedAgent:
                     RETRY_DELAY *= 1.5
                     continue
                 self._profile_status = "error"
+                runtime_complete_active_tool(error=warn_msg)
+                if runtime_host is not None:
+                    try:
+                        runtime_host.fail_session(error=warn_msg)
+                    except Exception:
+                        pass
                 display_queue.put({"done": full_text or f"\n**{warn_msg}**\n\n", "source": "system", "turn": max(seen_turn, 0)})
                 return
             except Exception as e:
+                runtime_complete_active_tool(error=format_error(e))
                 if _should_fallback_to_classic(route_target, exc=e):
                     fallback_span = _start_manual_span(profiler, "classic_executor_fallback", kind="tool", metadata={"reason": type(e).__name__})
                     fallback_text = await asyncio.to_thread(
@@ -3135,18 +3954,29 @@ class OpenAIOrchestratedAgent:
                     if fallback_text:
                         full_text = _inject_turn_markers(fallback_text)
                         user_line = smart_format(raw_query.replace("\n", " "), max_str_len=200)
-                        agent_line = _extract_summary_line(fallback_text) or smart_format(
-                            fallback_text.replace("\n", " "), max_str_len=300
+                        agent_line = _sanitize_runtime_injected_text(
+                            _extract_summary_line(fallback_text)
+                            or smart_format(
+                                fallback_text.replace("\n", " "),
+                                max_str_len=300,
+                            )
                         )
                         self.history.append(f"[USER]: {user_line}")
                         self.history.append(f"[Agent] {agent_line}")
                         io_span = _start_manual_span(profiler, "save_model_response_log", kind="io", metadata={"attempt": attempt + 1, "fallback": True})
                         _log_exchange(raw_query, full_text, self.input_items)
                         _stop_manual_span(io_span)
+                        runtime_complete_active_turn()
+                        runtime_finalize_success(agent_line)
                         display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 0)})
                         return
                 # 其他异常 - 直接报错
                 self._profile_status = "error"
+                if runtime_host is not None:
+                    try:
+                        runtime_host.fail_session(error=format_error(e))
+                    except Exception:
+                        pass
                 import traceback
                 traceback.print_exc()
                 display_queue.put({"done": f"\n**[ERROR] {type(e).__name__}: {e}**\n\n", "source": "system", "turn": max(seen_turn, 0)})
@@ -3192,6 +4022,22 @@ class OpenAIOrchestratedAgent:
                     loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
             except Exception:
                 pass
+            # ── Auto-maintenance hook (GA_AUTO_MAINTENANCE=1) ──
+            try:
+                if os.environ.get("GA_AUTO_MAINTENANCE", "0") == "1":
+                    self._maintenance_turn_count = getattr(self, "_maintenance_turn_count", 0) + 1
+                    if self._maintenance_turn_count % 10 == 0:
+                        from core.memory.maintenance import run_memory_maintenance
+                        import threading as _maint_threading
+                        _t = _maint_threading.Thread(
+                            target=run_memory_maintenance,
+                            args=(PROJECT_ROOT,),
+                            daemon=True,
+                            name="auto-maintenance",
+                        )
+                        _t.start()
+            except Exception:
+                pass
 
     def run(self) -> None:
         while True:
@@ -3205,12 +4051,14 @@ class OpenAIOrchestratedAgent:
                 self.task_queue.task_done()
                 continue
 
-            self.is_running = True
+            self._running = True
             self.stop_sig = False
             self._user_abort_requested = False
             self._profile_status = "success"
             self._profile_run_id = run_id
             self.active_profiler = RuntimeProfiler() if profiling_enabled() else None
+            self._runtime_host = None
+            self._runtime_session_id = None
             if self.active_profiler is not None:
                 self.active_profiler.start_run(
                     run_id=run_id,
@@ -3218,9 +4066,29 @@ class OpenAIOrchestratedAgent:
                     metadata={"backend": "openai-agents", "source": source},
                 )
             try:
+                from core.runtime.host import RuntimeHost
+
+                self._runtime_host = RuntimeHost(
+                    project_root=PROJECT_ROOT,
+                    agent_name="openai_orchestrated_agent",
+                )
+                runtime_state = self._runtime_host.start_session(
+                    user_intent=raw_query,
+                    source=source,
+                    session_id=run_id,
+                )
+                self._runtime_session_id = runtime_state.session_id
+            except Exception as runtime_host_error:
+                print(f"[runtime_host] init failed: {runtime_host_error}")
+            try:
                 self._drain_task(raw_query, source, display_queue)
             except Exception as e:
                 self._profile_status = "error"
+                if self._runtime_host is not None:
+                    try:
+                        self._runtime_host.fail_session(error=format_error(e))
+                    except Exception:
+                        pass
                 display_queue.put(
                     {
                         "done": f"[OpenAI Agents Error]\n\n```\n{format_error(e)}\n```",
@@ -3241,9 +4109,11 @@ class OpenAIOrchestratedAgent:
                         self.active_profiler = None
                         self._profile_run_id = None
                 self._store_executor_result_state(None)
-                self.is_running = False
+                self._running = False
                 self.stop_sig = False
                 self._user_abort_requested = False
+                self._runtime_host = None
+                self._runtime_session_id = None
                 self.task_queue.task_done()
 
 
@@ -3325,6 +4195,9 @@ def _run_reflect_mode(agent: OpenAIOrchestratedAgent, args: argparse.Namespace) 
             break
 
 
+# ══ DEPRECATED: use `ga run-openai/serve-openai` CLI instead (core/cli.py). ══
+# This block is kept for the root openai_agentmain.py wrapper.
+# Do NOT add new features here.
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--task", metavar="IODIR", help="Single task mode with file IO.")

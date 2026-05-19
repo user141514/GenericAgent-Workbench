@@ -1,0 +1,23 @@
+{
+  "session_id": "ca3641c07de94149b975fd9791f10e1e",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": "chat",
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 10,
+  "last_user_intent": "一个耦合动力系统，可以去拆成DP问题吗？可以去放在DDPM等扩散模型吗",
+  "snapshot_version": 1,
+  "updated_at": 1778261427.4398453,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

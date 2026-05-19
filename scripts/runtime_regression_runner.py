@@ -44,6 +44,7 @@ MODULES: list[str] = [
     "core.memory.demo_write_gate",
     # ── Tool System ─────────────────────────────────────────────────────
     "core.tools.demo_schema_selector",
+    "core.tools.demo_schema_registry",
 ]
 
 STDERR_TAIL_CHARS: int = 1000
@@ -67,6 +68,11 @@ def _module_exists(module_name: str) -> bool:
         parts[-1] = parts[-1] + ".py"
         candidate = Path(_repo_root(), *parts)
         return candidate.is_file()
+
+
+def _safe_console_text(text: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return str(text).encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
 # ── main ───────────────────────────────────────────────────────────────────
@@ -104,12 +110,12 @@ def main() -> int:
         failed += 1
         print(f"[FAIL] {module_name}")
         if proc.stdout.strip():
-            print(proc.stdout.rstrip())
+            print(_safe_console_text(proc.stdout.rstrip()))
         if proc.stderr.strip():
             tail = proc.stderr.rstrip()
             if len(tail) > STDERR_TAIL_CHARS:
                 tail = "…\n" + tail[-STDERR_TAIL_CHARS:]
-            print(tail)
+            print(_safe_console_text(tail))
 
     # ── summary ─────────────────────────────────────────────────────────
     print()

@@ -1,0 +1,23 @@
+{
+  "session_id": "c46e756ad38847d28b84ccd3bde02599",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": "executor",
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 16,
+  "last_user_intent": "去git上找stars上升趋势最快的前端项目",
+  "snapshot_version": 1,
+  "updated_at": 1779089073.0719657,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

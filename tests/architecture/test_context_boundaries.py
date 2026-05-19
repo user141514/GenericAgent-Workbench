@@ -99,7 +99,7 @@ CANONICAL_READER_WHITELIST = {
     "core/context/memory_reader.py",    # CANONICAL — the single read path going forward
 
     # ── Deprecated wrappers (delegate to canonical, retained for backward compat) ──
-    "core/memory/reader.py",            # DEPRECATED — delegates to core.context.memory_reader
+    # core/memory/reader.py — DELETED (dead wrapper, 0 runtime callers)
     "core/memory/legacy_global.py",     # DEPRECATED — phase=M3, replaced by MemoryReader
 
     # ── Pre-existing callers (to be migrated in M5-M6) ──
@@ -197,12 +197,10 @@ KNOWN_BUILDERS = {
     "core/context/__init__.py",
     "core/context/project_identity.py",
     "core/context/runtime_identity.py",
-    "core/context/session_dump.py",
     "core/context/session_store.py",
     "core/context/workspace_probe.py",
     # pre-existing builders in other modules
     "core/memory/legacy_global.py",
-    "core/memory/reader.py",
     "core/skills/skill_prompt_injector.py",
     "core/openai_agentmain.py",
     "core/agentmain.py",

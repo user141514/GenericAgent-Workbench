@@ -1,6 +1,5 @@
 import glob
 import os
-import queue
 import re
 import subprocess
 import sys
@@ -52,6 +51,7 @@ else:
     BackendAgent = GeneraticAgent
 try:
     from frontends.chatapp_common import (
+        clean_reply,
         delete_history_file,
         distill_conversation,
         format_restore,
@@ -71,6 +71,7 @@ try:
     )
 except ImportError:
     from chatapp_common import (
+        clean_reply,
         delete_history_file,
         distill_conversation,
         format_restore,
@@ -105,20 +106,24 @@ st.markdown(
   --bg-card: #fefdfb;
   --border: #e2dbcf;
   --border-focus: #c8845c;
-  --text-primary: #1e1b17;
-  --text-secondary: #6b6358;
-  --text-muted: #9a9388;
+  --text-primary: #0f0d0a;
+  --text-secondary: #49433a;
+  --text-muted: #6b6358;
   --accent: #c87854;
   --accent-hover: #ae6543;
   --accent-soft: #fef7f2;
-  --accent-glow: rgba(200, 120, 84, 0.10);
+  --accent-glow: rgba(200, 120, 84, 0.12);
+  --accent-bar: #d49270;
   --shadow: 0 1px 2px rgba(60, 40, 20, 0.04);
-  --shadow-card: 0 2px 8px rgba(60, 40, 20, 0.05);
+  --shadow-card: 0 2px 8px rgba(60, 40, 20, 0.06);
+  --shadow-float: 0 4px 16px rgba(60, 40, 20, 0.10);
   --radius-sm: 10px;
   --radius: 14px;
   --radius-lg: 18px;
-  --font-display: 'Cormorant Garamond', 'Noto Serif SC', 'Source Han Serif SC', serif;
-  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+  --radius-xl: 24px;
+  --font-display: 'Cormorant Garamond', 'Noto Serif SC', 'Source Han Serif SC', 'Songti SC', 'STSong', serif;
+  --font-body: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Noto Sans CJK SC', 'WenQuanYi Micro Hei', sans-serif;
+  --font-mono: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'SF Mono', 'Consolas', monospace;
 }
 
 /* ── Paper texture ── */
@@ -133,17 +138,39 @@ st.markdown(
   background-size: 256px 256px;
 }
 
+/* ── Box-sizing reset + mobile viewport lock ── */
+[data-testid="stChatMessage"],
+[data-testid="stChatMessage"] *,
+[data-testid="stChatInput"],
+[data-testid="stChatInput"] * { box-sizing: border-box; }
+.stApp {
+  max-width: 100vw;
+}
+[data-testid="stAppViewContainer"] {
+  max-width: 100vw;
+  overflow-x: hidden;
+}
+
 /* ── Global ── */
 .stApp {
   background: var(--bg-root);
   color: var(--text-primary);
   font-family: var(--font-body);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
 }
 h1, h2, h3, h4 {
   font-family: var(--font-display);
   font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+}
+[data-testid="stAppViewContainer"] {
+  max-width: 100vw;
+  overflow-x: hidden;
 }
 
 /* ── Sidebar ── */
@@ -151,9 +178,23 @@ section[data-testid="stSidebar"] {
   background: var(--bg-sidebar);
   border-right: 1px solid var(--border);
 }
-section[data-testid="stSidebar"] .stMarkdown,
+section[data-testid="stSidebar"] .stMarkdown {
+  color: var(--text-primary) !important;
+}
 section[data-testid="stSidebar"] .stCaption {
   color: var(--text-secondary) !important;
+}
+section[data-testid="stSidebar"] h3 {
+  color: var(--text-primary) !important;
+}
+/* Checkbox labels — text is inside span/p children */
+section[data-testid="stSidebar"] label,
+section[data-testid="stSidebar"] label *,
+section[data-testid="stSidebar"] .stCheckbox,
+section[data-testid="stSidebar"] .stCheckbox *,
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"],
+section[data-testid="stSidebar"] [data-testid="stWidgetLabel"] * {
+  color: var(--text-primary) !important;
 }
 section[data-testid="stSidebar"] div[data-testid="stButton"] > button {
   min-height: 2.3rem;
@@ -195,17 +236,86 @@ section[data-testid="stSidebar"] button[kind="primary"]:hover {
   padding: 14px 18px;
   box-shadow: var(--shadow);
   font-family: var(--font-body);
-  line-height: 1.65;
+  font-size: 0.95rem;
+  line-height: 1.7;
+  color: var(--text-primary) !important;
+  overflow-wrap: break-word;
+  word-break: break-word;
 }
+
+/* ── Assistant message: subtle left accent ── */
+[data-testid="stChatMessage"][data-testid="stChatMessageAssistant"] {
+  border-left: 3px solid var(--accent-bar);
+}
+
+/* ── User message: warm tint ── */
 [data-testid="stChatMessage"][data-testid="stChatMessageUser"] {
   background: var(--accent-soft);
   border-color: #edd5be;
   box-shadow: var(--shadow-card);
 }
 
+/* Text color enforcement */
+[data-testid="stChatMessage"] .stMarkdown,
+[data-testid="stChatMessage"] [data-testid="stMarkdownContainer"],
+[data-testid="stChatMessage"] [data-testid="stChatMessageContent"],
+[data-testid="stChatMessage"] p,
+[data-testid="stChatMessage"] li,
+[data-testid="stChatMessage"] span {
+  color: var(--text-primary) !important;
+  max-width: 100%;
+}
+
+/* Bold / strong emphasis */
+[data-testid="stChatMessage"] strong,
+[data-testid="stChatMessage"] b {
+  color: var(--text-primary);
+  font-weight: 700;
+}
+
+/* ── Tables: horizontal scroll on overflow ── */
+[data-testid="stChatMessage"] table {
+  display: block;
+  overflow-x: auto;
+  max-width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+  -webkit-overflow-scrolling: touch;
+}
+[data-testid="stChatMessage"] th {
+  padding: 7px 12px;
+  background: #f7f2e9;
+  border: 1px solid var(--border);
+  font-weight: 600;
+  white-space: nowrap;
+}
+[data-testid="stChatMessage"] td {
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+/* ── Blockquote ── */
+[data-testid="stChatMessage"] blockquote {
+  border-left: 3px solid var(--accent-bar);
+  margin: 10px 0;
+  padding: 6px 14px;
+  color: var(--text-secondary);
+  background: rgba(200, 120, 84, 0.04);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+/* ── HR / divider ── */
+[data-testid="stChatMessage"] hr {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 16px 0;
+}
+
 /* ── Chat input ── */
 [data-testid="stChatInput"] {
   background: var(--bg-root) !important;
+  padding: 8px 4px 4px 4px !important;
 }
 [data-testid="stChatInput"] > div {
   background: var(--bg-card) !important;
@@ -213,7 +323,7 @@ section[data-testid="stSidebar"] button[kind="primary"]:hover {
   border-radius: var(--radius-lg) !important;
   transition: border-color 0.25s ease, box-shadow 0.25s ease;
 }
-/* Kill backgrounds on ALL inner children — they inherit from the container */
+/* Kill backgrounds on ALL inner children */
 [data-testid="stChatInput"] > div > *,
 [data-testid="stChatInput"] > div > * > * {
   background: transparent !important;
@@ -227,8 +337,9 @@ textarea[data-testid="stChatInputTextArea"] {
   border: none !important;
   color: var(--text-primary) !important;
   font-family: var(--font-body) !important;
-  font-size: 0.95rem !important;
+  font-size: 1rem !important;
   line-height: 1.6 !important;
+  padding: 10px 14px !important;
   -webkit-appearance: none !important;
   box-shadow: none !important;
 }
@@ -237,7 +348,6 @@ textarea[data-testid="stChatInputTextArea"]::placeholder {
   font-style: italic;
   opacity: 1 !important;
 }
-/* Override browser autofill — the #1 cause of cool-tinted input patches */
 textarea[data-testid="stChatInputTextArea"]:-webkit-autofill,
 textarea[data-testid="stChatInputTextArea"]:-webkit-autofill:hover,
 textarea[data-testid="stChatInputTextArea"]:-webkit-autofill:focus {
@@ -247,6 +357,27 @@ textarea[data-testid="stChatInputTextArea"]:-webkit-autofill:focus {
 }
 [data-testid="stBottomBlockContainer"] {
   background: var(--bg-root) !important;
+}
+/* Send button */
+[data-testid="stChatInput"] button {
+  border-radius: 50% !important;
+  width: 38px !important;
+  height: 38px !important;
+  min-width: 38px !important;
+  min-height: 38px !important;
+  margin: auto 6px !important;
+  transition: all 0.2s ease !important;
+  background: var(--accent) !important;
+  border: none !important;
+  color: #fff !important;
+}
+[data-testid="stChatInput"] button:hover {
+  background: var(--accent-hover) !important;
+  box-shadow: 0 2px 8px rgba(200, 120, 84, 0.35) !important;
+}
+[data-testid="stChatInput"] button svg {
+  fill: #fff !important;
+  color: #fff !important;
 }
 
 /* ── Scrollbar ── */
@@ -268,28 +399,104 @@ section[data-testid="stSidebar"] div[data-testid="stExpander"] details summary p
   color: var(--text-secondary) !important;
 }
 
-/* ── Code blocks ── */
-pre, code {
-  font-family: 'Cascadia Code', 'JetBrains Mono', 'Fira Code', 'Consolas', monospace !important;
-  font-size: 0.85rem;
+/* ── File uploader ── */
+/* Nuke Streamlit's dark uploader theme: force warm paper on every nested element */
+[data-testid="stFileUploader"] {
+  background: var(--bg-card) !important;
+  border: 2px dashed var(--border) !important;
+  border-radius: var(--radius) !important;
+  padding: 20px 16px !important;
 }
+[data-testid="stFileUploader"] * {
+  background-color: transparent !important;
+  color: var(--text-secondary) !important;
+  border-color: var(--border) !important;
+  font-family: var(--font-body) !important;
+}
+[data-testid="stFileUploader"]:hover {
+  border-color: var(--accent-bar) !important;
+}
+/* Browse button — outline style, dark text matching the theme */
+[data-testid="stFileUploader"] button,
+[data-testid="stFileUploader"] button[data-testid="baseButton-secondary"] {
+  background: var(--bg-card) !important;
+  background-color: var(--bg-card) !important;
+  border: 1px solid var(--accent-bar) !important;
+  color: var(--text-primary) !important;
+  border-radius: var(--radius-sm) !important;
+  font-weight: 500;
+  padding: 6px 16px !important;
+}
+[data-testid="stFileUploader"] button:hover {
+  background: var(--accent-soft) !important;
+  background-color: var(--accent-soft) !important;
+  border-color: var(--accent) !important;
+}
+/* Uploaded file entries */
+[data-testid="stFileUploaderFileList"] [data-testid="stFileUploaderFile"] {
+  background: var(--bg-card) !important;
+  border: 1px solid var(--border) !important;
+  border-radius: var(--radius-sm) !important;
+  padding: 8px 12px !important;
+}
+[data-testid="stFileUploaderFileList"] p {
+  color: var(--text-primary) !important;
+}
+/* Delete button on files */
+[data-testid="stFileUploaderFileList"] button {
+  background: transparent !important;
+  border: 1px solid var(--border) !important;
+  color: var(--text-secondary) !important;
+}
+[data-testid="stFileUploaderFileList"] button:hover {
+  background: var(--accent-soft) !important;
+  border-color: var(--accent-bar) !important;
+  color: var(--accent) !important;
+}
+
+/* ── Code ── */
+pre, code {
+  font-family: var(--font-mono) !important;
+  font-size: 0.84rem;
+}
+/* Inline code */
+code:not(pre code) {
+  background: #f4efe5;
+  color: #8b4513;
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.88em;
+  border: 1px solid #e8e0d0;
+}
+/* Block code */
 pre {
   background: #f7f4ee !important;
   border: 1px solid var(--border) !important;
   border-radius: var(--radius-sm) !important;
   padding: 14px 16px !important;
   line-height: 1.55 !important;
+  overflow-x: auto !important;
+  white-space: pre-wrap !important;
+  word-break: break-all !important;
+  -webkit-overflow-scrolling: touch;
+}
+/* ── Images ── */
+[data-testid="stChatMessage"] img {
+  max-width: 100%;
+  height: auto;
+  border-radius: var(--radius-sm);
 }
 
 /* ── Links ── */
 a {
   color: var(--accent) !important;
   text-decoration: none;
-  transition: color 0.15s;
+  background: linear-gradient(currentColor, currentColor) 0 100% / 0 1px no-repeat;
+  transition: background-size 0.25s ease, color 0.15s;
 }
 a:hover {
   color: var(--accent-hover) !important;
-  text-decoration: underline;
+  background-size: 100% 1px;
 }
 
 /* Ensure text is selectable */
@@ -304,48 +511,78 @@ body, .stApp, [data-testid="stAppViewContainer"],
 }
 
 /* ── Status indicator ── */
-.status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 6px; }
-.status-active { background: #7a9a6e; box-shadow: 0 0 6px rgba(122,154,110,0.35); }
-.status-idle { background: #b8aa98; }
+.status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 6px; vertical-align: middle; }
+.status-active { background: #7a9a6e; box-shadow: 0 0 0 3px rgba(122,154,110,0.25); animation: statusPulse 2s ease-in-out infinite; }
+.status-idle  { background: #b8aa98; }
+@keyframes statusPulse {
+  0%, 100% { box-shadow: 0 0 0 3px rgba(122,154,110,0.25); }
+  50%      { box-shadow: 0 0 0 7px rgba(122,154,110,0.08); }
+}
 
 /* ── Stream cursor blink ── */
 @keyframes cursor-blink {
   0%, 100% { opacity: 1; }
-  50% { opacity: 0; }
+  50%      { opacity: 0.08; }
 }
-#stream-cursor { font-weight: 200; color: var(--accent); }
+#stream-cursor {
+  font-weight: 300;
+  font-size: 1.1rem;
+  color: var(--accent);
+  animation: cursor-blink 1s ease-in-out infinite;
+}
 
-/* ── Jump-to-bottom button ── */
+/* ── Jump-to-bottom FAB ── */
 #jump-to-bottom {
   position: fixed;
-  bottom: 100px;
-  right: 30px;
+  bottom: 110px;
+  right: 20px;
   z-index: 9999;
   background: var(--accent);
   color: #fff;
-  padding: 6px 14px;
-  border-radius: 20px;
+  padding: 8px 18px;
+  border-radius: 22px;
   cursor: pointer;
   display: none;
   font-size: 0.85rem;
+  font-weight: 600;
   font-family: var(--font-body);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
-  transition: opacity 0.2s;
+  box-shadow: 0 4px 14px rgba(200, 120, 84, 0.35);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease;
+  letter-spacing: 0.02em;
 }
 #jump-to-bottom:hover {
   background: var(--accent-hover);
+  transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(200, 120, 84, 0.45);
 }
 
-/* ── Title refinement ── */
+/* ── Title ── */
 h1 {
-  font-size: 2.2rem !important;
+  font-size: clamp(1.6rem, 5vw, 2.2rem) !important;
   font-style: italic;
+  font-weight: 600;
   color: var(--text-primary) !important;
-  animation: titleIn 0.8s ease both;
+  animation: titleIn 0.7s ease both;
+  padding-bottom: 0.3rem;
+  margin-bottom: 0.5rem;
 }
 @keyframes titleIn {
-  from { opacity: 0; transform: translateY(8px); }
+  from { opacity: 0; transform: translateY(10px); }
   to   { opacity: 1; transform: translateY(0); }
+}
+
+/* ── Caption text ── */
+.stCaption, .stCaptionContainer {
+  color: var(--text-muted) !important;
+  font-size: 0.82rem;
+}
+
+/* ── Mobile touch-friendly: larger expander hit area ── */
+[data-testid="stExpander"] details summary {
+  padding: 10px 4px;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
 }
 </style>
 """,
@@ -384,7 +621,7 @@ def get_orchestrator():
         from core.openai_agentmain import OpenAIOrchestratedAgent
 
         orch = OpenAIOrchestratedAgent()
-        orch.llm_no = getattr(agent, "llm_no", 0)
+        orch.sync_from_classic_key_index(getattr(agent, "llm_no", 0))
         if not getattr(orch, "_ui_thread_started", False):
             threading.Thread(target=orch.run, daemon=True).start()
             orch._ui_thread_started = True
@@ -501,6 +738,7 @@ def reset_agent_state():
     st.session_state.stop_requested = False
     st.session_state.stop_requested_at = 0
     st.session_state.display_queue = None
+    st.session_state._drainer = None
     st.session_state.partial_response = ""
     st.session_state.current_turn = 0
     st.session_state.task_id = ""
@@ -508,11 +746,14 @@ def reset_agent_state():
     st.session_state.task_start_time = 0
 
 
-def start_agent_task(display_queue):
-    """Initialize agent state for a new task — guards against duplicate submit."""
+def start_agent_task(prompt, dispatch_agent, task_id=""):
+    """Initialize agent state via AgentBackend protocol — Phase S2 migration."""
+    from core.agent_factory import ensure_agent_backend
+    from core.protocol.input import AgentInput
+    from core.protocol.drain import AgentOutputDrainer
+
     if st.session_state.agent_running:
-        return False  # already running, reject duplicate
-    st.session_state.display_queue = display_queue
+        return False
     st.session_state.agent_running = True
     st.session_state.stream_started = False
     st.session_state.stop_requested = False
@@ -522,6 +763,11 @@ def start_agent_task(display_queue):
     st.session_state.content_event += 1
     st.session_state.pending_routing = None
     st.session_state.task_start_time = time.time()
+
+    backend = ensure_agent_backend(dispatch_agent)
+    channel = backend.submit(AgentInput(query=prompt, run_id=task_id or None))
+    drainer = AgentOutputDrainer(channel, task_id=task_id, stop_requested=False)
+    st.session_state._drainer = drainer
     return True
 
 
@@ -634,7 +880,8 @@ def message_content_to_text(content):
     return str(content or "")
 
 
-def extract_last_user_question(filepath):
+def extract_first_user_question(filepath):
+    """Extract the first user question from a history file to use as conversation title."""
     result, err = format_restore(filepath, backend_kind=BACKEND_KIND)
     if not err and result:
         restored, _, _, fmt_type = unpack_restore_result(result)
@@ -650,7 +897,7 @@ def extract_last_user_question(filepath):
         else:
             questions = [line[8:] for line in restored if isinstance(line, str) and line.startswith("[USER]: ")]
         if questions:
-            title = questions[-1].replace("\n", " ").strip()
+            title = questions[0].replace("\n", " ").strip()
             return title[:42] + ("..." if len(title) > 42 else "")
     return None
 
@@ -712,7 +959,7 @@ def render_history_panel():
         fname = os.path.basename(filepath)
         mtime = datetime.fromtimestamp(os.path.getmtime(filepath)).strftime("%m-%d %H:%M")
         size_kb = max(1, os.path.getsize(filepath) // 1024)
-        title = extract_last_user_question(filepath)
+        title = extract_first_user_question(filepath)
         display_title = title or f"{mtime} ({size_kb}KB)"
 
         with st.container(border=True):
@@ -985,8 +1232,13 @@ def render_sidebar():
             hist_path = os.path.join(script_dir, "..", "assets", "tool_usable_history.json")
             with open(hist_path, "r", encoding="utf-8") as f:
                 tool_hist = __import__("json").load(f)
-            agent.llmclient.backend.history.extend(tool_hist)
-            st.toast(f"已重新注入工具，追加了 {len(tool_hist)} 条示范记录")
+            # Deduplicate: skip if tool history already injected
+            if not st.session_state.get("_tools_injected"):
+                agent.llmclient.backend.history.extend(tool_hist)
+                st.session_state._tools_injected = True
+                st.toast(f"已注入工具示范，追加了 {len(tool_hist)} 条记录")
+            else:
+                st.toast("工具示范已存在，跳过重复注入")
         except Exception as e:
             st.toast(f"注入工具示范失败: {e}")
     if st.button("🐱 桌面宠物", use_container_width=True):
@@ -1092,9 +1344,9 @@ def render_segments(segments, suffix="", key_prefix="", fold_expanded=False):
                 for bit in f"{byte:08b}"
             )
             with st.expander(seg["title"] + invisible_suffix, expanded=fold_expanded):
-                st.markdown(seg["content"])
+                st.markdown(clean_reply(seg["content"]))
         else:
-            st.markdown(seg["content"] + suffix)
+            st.markdown(clean_reply(seg["content"]) + suffix)
 
 
 def should_show_live_turn(text, turn):
@@ -1104,32 +1356,6 @@ def should_show_live_turn(text, turn):
     return f"Turn {turn}" not in text
 
 
-def agent_backend_stream(prompt):
-    display_queue = agent.put_task(prompt, source="user")
-    response = ""
-    current_turn = 0
-    while True:
-        try:
-            item = display_queue.get(timeout=1)
-        except queue.Empty:
-            yield {"response": response, "turn": current_turn}
-            continue
-        # structured events: consume silently, backward compat via fallthrough
-        if isinstance(item, dict) and item.get("event") in ("turn_start", "turn_end", "turn_delta", "final"):
-            pass
-        if isinstance(item, dict) and item.get("event") == "error":
-            yield {"response": response, "turn": current_turn, "error": item.get("error", "")}
-        if item.get("turn") is not None:
-            try:
-                current_turn = max(current_turn, int(item.get("turn") or 0))
-            except Exception:
-                pass
-        if "next" in item:
-            response = item["next"]
-            yield {"response": response, "turn": current_turn}
-        if "done" in item:
-            yield {"response": item["done"], "turn": current_turn, "done": True}
-            break
 
 
 if "messages" not in st.session_state:
@@ -1153,11 +1379,11 @@ for msg_idx, msg in enumerate(st.session_state.messages):
                 )
             else:
                 st.markdown(message_content_to_text(msg["content"]))
-    # Persistent scroll anchor — placed after all messages so JS can scroll to bottom
-    st.markdown(
-        f'<div id="content-end" data-content-event="{st.session_state.content_event}"></div>',
-        unsafe_allow_html=True,
-    )
+# Persistent scroll anchor — placed once after all messages so JS can scroll to bottom
+st.markdown(
+    f'<div id="content-end" data-content-event="{st.session_state.content_event}"></div>',
+    unsafe_allow_html=True,
+)
 
 try:
     from streamlit import iframe as _st_iframe
@@ -1179,7 +1405,7 @@ _js_scroll_fix = (
     "var lastScrollEvent=0,lastContentEvent=0;"
     "var isNearBottom=function(){"
     "var m=d.querySelector('section.main');if(!m)return 1;"
-    "return m.scrollTop+m.clientHeight>=m.scrollHeight-200;"
+    "return m.scrollTop+m.clientHeight>=m.scrollHeight-80;"
     "};"
     "var doScroll=function(smooth){"
     "var m=d.querySelector('section.main');if(!m)return;"
@@ -1230,13 +1456,13 @@ _js_scroll_fix = (
     "var ev=parseInt(ce.getAttribute('data-content-event')||'0',10);"
     "if(ev!==lastContentEvent){"
     "lastContentEvent=ev;"
-    "setTimeout(function(){doScroll(true);},150);"
+    "if(isNearBottom()){setTimeout(function(){doScroll(true);},150);}"
     "}"
     "}"
     "updateCursorUI();"
     "});"
     "var target=d.querySelector('section.main .block-container')||d.body;"
-    "obs.observe(target,{childList:1,subtree:1,characterData:1});"
+    "obs.observe(target,{childList:1,subtree:1});"
     "}()"
 )
 _js_ime_fix = (
@@ -1255,65 +1481,21 @@ _js_ime_fix = (
 _embed_html(f"<script>{_js_scroll_fix};{_js_ime_fix}</script>", height=0)
 
 def poll_agent_output():
-    """Non-blocking drain the display queue. Returns True when agent signals done/stopped."""
-    q = st.session_state.display_queue
-    if q is None:
+    """Non-blocking drain via AgentOutputDrainer. Returns True when done/stopped/error."""
+    d = st.session_state.get("_drainer")
+    if d is None:
         return False
-    task_id = st.session_state.task_id
-    stop_requested = st.session_state.stop_requested
-
-    for _ in range(20):
-        try:
-            item = q.get_nowait()
-        except queue.Empty:
-            break
-
-        # Discard items from old tasks
-        item_tid = item.get("task_id", "")
-        if item_tid and item_tid != task_id:
-            continue
-
-        # ── Stop-requested path: only process terminal markers ──
-        if stop_requested:
-            if item.get("event") == "stopped":
-                st.session_state.partial_response = item.get("next", st.session_state.partial_response)
-                st.session_state.agent_running = False
-                return True
-            if item.get("event") == "error":
-                st.session_state.partial_response = item.get("error", st.session_state.partial_response)
-                st.session_state.agent_running = False
-                return True
-            if "done" in item:
-                st.session_state.partial_response = item["done"]
-                st.session_state.agent_running = False
-                return True
-            continue
-
-        # ── Normal path ──
-        if item.get("turn") is not None:
-            try:
-                st.session_state.current_turn = max(
-                    st.session_state.current_turn, int(item.get("turn") or 0)
-                )
-            except Exception:
-                pass
-        if "next" in item:
-            st.session_state.partial_response = item["next"]
-            if not st.session_state.stream_started:
-                st.session_state.stream_started = True
-        if item.get("event") == "stopped":
-            st.session_state.partial_response = item.get("next", st.session_state.partial_response)
-            st.session_state.agent_running = False
-            return True
-        if item.get("event") == "error":
-            st.session_state.partial_response = item.get("error", st.session_state.partial_response)
-            st.session_state.agent_running = False
-            return True
-        if "done" in item:
-            st.session_state.partial_response = item["done"]
-            st.session_state.agent_running = False
-            return True
-
+    # Sync filters before collecting
+    d.stop_requested = st.session_state.stop_requested
+    d.task_id = st.session_state.task_id
+    d.collect(max_items=20)
+    st.session_state.partial_response = d.full_text
+    st.session_state.current_turn = d.current_turn
+    if d.full_text and not st.session_state.stream_started:
+        st.session_state.stream_started = True
+    if d.is_terminal:
+        st.session_state.agent_running = False
+        return True
     return False
 
 
@@ -1338,7 +1520,7 @@ if st.session_state.agent_running:
         live = st.container()
         response = st.session_state.partial_response
         current_turn = st.session_state.current_turn
-        cursor = "" if state == "stopping" else " ▌"
+        cursor = "" if state in ("stopping", "running") else " ▌"
 
         with live:
             # ── Elapsed-aware status text ──
@@ -1412,9 +1594,9 @@ if st.session_state.agent_running:
         st.session_state.last_reply_time = int(time.time())
         reset_agent_state()
         st.rerun()
-
-    time.sleep(0.2)
-    st.rerun()
+    else:
+        time.sleep(0.2)
+        st.rerun()
 
 if not st.session_state.agent_running:
     # ── Routing suggestion UI (shown after complexity detection, before dispatch) ──
@@ -1434,26 +1616,21 @@ if not st.session_state.agent_running:
                     else:
                         dispatch_agent = agent
                         st.toast("编排器不可用，使用经典模式")
-                    dq = dispatch_agent.put_task(
-                        pending["task_prompt"], source="user", run_id=st.session_state.task_id
-                    )
-                    start_agent_task(dq)
+                    start_agent_task(pending["task_prompt"], dispatch_agent, st.session_state.task_id)
                     st.rerun()
             with c2:
                 if st.button("直接执行", key="route_classic", use_container_width=True):
-                    dq = agent.put_task(
-                        pending["task_prompt"], source="user", run_id=st.session_state.task_id
-                    )
-                    start_agent_task(dq)
+                    start_agent_task(pending["task_prompt"], agent, st.session_state.task_id)
                     st.rerun()
             with c3:
                 st.caption("Planner 会先规划再执行，适合复杂任务。直接执行跳过规划步骤，更快但缺少验证闭环。")
-            # Force scroll to bottom — st.stop() may prevent MutationObserver from firing reliably
+            # Scroll to bottom only if user is already near bottom
             _embed_html(
                 "<script>"
                 "var m=window.parent.document.querySelector('section.main');"
-                "if(m){var b=m.querySelector('.block-container');"
-                "if(b)b.scrollIntoView({block:'end',behavior:'instant'});}"
+                "if(m){var near=m.scrollTop+m.clientHeight>=m.scrollHeight-80;"
+                "if(near){var b=m.querySelector('.block-container');"
+                "if(b)b.scrollIntoView({block:'end',behavior:'instant'});}}"
                 "</script>",
                 height=0,
             )
@@ -1486,13 +1663,18 @@ if not st.session_state.agent_running:
             else:
                 dispatch_agent = agent
                 st.toast("编排器不可用，使用经典模式")
-            dq = dispatch_agent.put_task(task_prompt, source="user", run_id=task_id)
-            start_agent_task(dq)
+            start_agent_task(task_prompt, dispatch_agent, task_id)
+            st.rerun()
+        elif route in ("code", "review", "research", "executor") and st.session_state.routing_mode == "ask":
+            # Ask mode + complex task — show routing choice UI
+            st.session_state.pending_routing = {
+                "route": route,
+                "task_prompt": task_prompt,
+            }
             st.rerun()
         else:
             # Simple chat, routing disabled, or autonomous — dispatch directly to classic
-            dq = agent.put_task(task_prompt, source="user", run_id=task_id)
-            start_agent_task(dq)
+            start_agent_task(task_prompt, agent, task_id)
             st.rerun()
 
 if st.session_state.autonomous_enabled:

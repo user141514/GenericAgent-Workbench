@@ -61,6 +61,118 @@ def _safe_audit_llm_call(*, session, call_site, messages, response, duration_ms,
     except Exception as exc:
         print(f"[LLM AUDIT] {call_site} failed: {exc}")
 
+
+# ── Error classification — turn HTTP responses into semantic categories ─────
+# Category    → user-facing action
+# AUTH_ERROR  → check API key
+# MODEL_NOT_FOUND → check key/group/model match
+# PROTOCOL_ERROR  → report + protocol snapshot, DO NOT auto-fallback
+# RATE_LIMITED / SERVER_ERROR / CONNECTION_ERROR → retry with backoff
+
+from enum import Enum, auto
+
+
+class ErrorCategory(Enum):
+    AUTH_ERROR = auto()
+    MODEL_NOT_FOUND = auto()
+    PROTOCOL_ERROR = auto()
+    RATE_LIMITED = auto()
+    SERVER_ERROR = auto()
+    CONNECTION_ERROR = auto()
+    UNKNOWN = auto()
+
+
+class ErrorAction(Enum):
+    SUGGEST_KEY_CHECK = auto()
+    SUGGEST_MATCH = auto()
+    REPORT_WITH_SNAPSHOT = auto()
+    RETRY_BACKOFF = auto()
+    NO_RETRY = auto()
+
+
+def classify_http_error(status_code, body=""):
+    """Classify an HTTP error into a semantic category and recommended action.
+
+    Returns ``(ErrorCategory, ErrorAction)``.  The caller decides whether to
+    retry, report, or escalate based on the action.
+    """
+    lowered = (body or "").lower()
+
+    if status_code in (401, 403):
+        return ErrorCategory.AUTH_ERROR, ErrorAction.SUGGEST_KEY_CHECK
+
+    if status_code == 404:
+        return ErrorCategory.MODEL_NOT_FOUND, ErrorAction.SUGGEST_MATCH
+
+    if status_code == 429:
+        return ErrorCategory.RATE_LIMITED, ErrorAction.RETRY_BACKOFF
+
+    if status_code in (500, 502, 503, 504):
+        return ErrorCategory.SERVER_ERROR, ErrorAction.RETRY_BACKOFF
+
+    if status_code == 400:
+        protocol_markers = (
+            "unknown variant", "failed to deserialize",
+            "invalid content block", "unexpected content",
+            "thinking blocks are not supported",
+        )
+        if any(m in lowered for m in protocol_markers):
+            return ErrorCategory.PROTOCOL_ERROR, ErrorAction.REPORT_WITH_SNAPSHOT
+
+    # Model-not-found markers in body (even without 404)
+    model_markers = (
+        "model_not_found", "no available channel",
+        "model not found", "channel not found",
+    )
+    if any(m in lowered for m in model_markers):
+        return ErrorCategory.MODEL_NOT_FOUND, ErrorAction.SUGGEST_MATCH
+
+    # Auth markers in body (even without 401/403)
+    auth_markers = (
+        "invalid_api_key", "authentication_error",
+        "permission denied", "credential",
+    )
+    if any(m in lowered for m in auth_markers):
+        return ErrorCategory.AUTH_ERROR, ErrorAction.SUGGEST_KEY_CHECK
+
+    return ErrorCategory.UNKNOWN, ErrorAction.NO_RETRY
+
+
+# ── Provider protocol snapshot (diagnostic, gated by GA_PROTOCOL_SNAPSHOT=1) ──
+
+def _protocol_snapshot(*, model: str = "", api_base: str = "", api_key: str = "",
+                        session: Any = None, messages: list | None = None,
+                        tools: list | None = None, label: str = "") -> None:
+    """Print the active provider profile once when ``GA_PROTOCOL_SNAPSHOT=1``.
+
+    Shows key/mode/base_url/thinking/stream/history at every API call gateway
+    so mismatches between key, model, and protocol are visible immediately.
+    """
+    if os.environ.get("GA_PROTOCOL_SNAPSHOT", "0") != "1":
+        return
+    key_prefix = (api_key or "")[:8] + "..." if len(api_key or "") > 8 else "(empty)"
+    backend_name = getattr(session, "name", "") or ""
+    thinking_type = getattr(session, "thinking_type", "not_set")
+    thinking_budget = getattr(session, "thinking_budget_tokens", "not_set")
+    stream_mode = getattr(session, "stream", True)
+    api_mode = getattr(session, "api_mode", "chat_completions")
+    history_count = len(getattr(session, "history", []))
+    tool_count = len(tools or [])
+    label_str = f"[{label}] " if label else ""
+    print(
+        f"\n[PROTOCOL SNAPSHOT] {label_str}"
+        f"provider={backend_name or 'unknown'} "
+        f"model={model} "
+        f"base_url={api_base} "
+        f"key={key_prefix} "
+        f"session_cls={type(session).__name__ if session else 'N/A'} "
+        f"thinking={thinking_type}/{thinking_budget} "
+        f"stream={stream_mode} "
+        f"api_mode={api_mode} "
+        f"history_msgs={history_count} "
+        f"tools={tool_count}\n"
+    )
+
 def _load_mykeys_from_env():
     """Build a mykeys-compatible config dict from GA_* / GA_KEY1_* / GA_KEY2_* env vars."""
     result = {}
@@ -422,6 +534,162 @@ def _stamp_oai_cache_markers(messages, model):
             c = list(c); c[-1] = dict(c[-1], cache_control={'type': 'ephemeral'})
             messages[idx] = {**messages[idx], 'content': c}
 
+def _normalize_thinking_blocks(messages):
+    """Strip ``{"type":"thinking"}`` blocks from content arrays and move them to
+    ``reasoning_content`` on assistant messages.  OpenAI-compatible endpoints
+    (DeepSeek, etc.) reject ``thinking`` content-block variants in requests."""
+    cleaned: list[dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            cleaned.append(msg)
+            continue
+        thinking_texts: list[str] = []
+        clean_blocks: list[dict[str, Any]] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "thinking":
+                t = str(block.get("thinking", "") or "")
+                if t.strip():
+                    thinking_texts.append(t)
+            else:
+                clean_blocks.append(block)
+        if not thinking_texts:
+            cleaned.append(msg)
+            continue
+        msg = dict(msg)
+        msg["content"] = clean_blocks or ""
+        if msg.get("role") == "assistant":
+            new_reasoning = "\n".join(thinking_texts)
+            existing = str(msg.get("reasoning_content", "") or "")
+            msg["reasoning_content"] = (existing + "\n" + new_reasoning) if existing else new_reasoning
+        cleaned.append(msg)
+    return cleaned
+
+
+# ── Provider switch sanitization: canonicalize + rebuild ──────────────────
+
+def _canonicalize_history(history):
+    """Convert any provider's ``session.history`` to canonical text-only messages.
+
+    Strips provider-specific fields: ``{"type": "thinking"}`` blocks,
+    ``reasoning_content``, ``cache_control``, and other metadata.
+    Keeps: role, plain-text content, tool_calls, tool_results.
+    """
+    canonical = []
+    for msg in history:
+        role = msg.get("role", "user")
+        content = msg.get("content", "")
+        result = {"role": role}
+
+        # Extract plain text from any content format
+        if isinstance(content, str):
+            text = content
+            tool_results = []
+        elif isinstance(content, list):
+            text_parts = []
+            tool_results = []
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type", "")
+                if btype == "text":
+                    text_parts.append(str(block.get("text", "") or ""))
+                elif btype == "thinking":
+                    pass  # DROP: provider-specific
+                elif btype == "tool_result":
+                    tr_content = block.get("content", "")
+                    if isinstance(tr_content, list):
+                        tr_text = "\n".join(
+                            b.get("text", "") for b in tr_content
+                            if isinstance(b, dict) and b.get("type") == "text"
+                        )
+                    else:
+                        tr_text = str(tr_content)
+                    tool_results.append({
+                        "tool_use_id": str(block.get("tool_use_id", "") or ""),
+                        "content": tr_text,
+                    })
+            text = "\n".join(p for p in text_parts if p)
+        else:
+            text = str(content)
+            tool_results = []
+
+        result["content"] = text
+
+        if tool_results:
+            result["tool_results"] = tool_results
+
+        # Preserve tool_calls from assistant messages
+        if role == "assistant" and msg.get("tool_calls"):
+            result["tool_calls"] = msg["tool_calls"]
+
+        # Preserve tool_call_id for tool messages
+        if role == "tool" and msg.get("tool_call_id"):
+            result["tool_call_id"] = msg["tool_call_id"]
+
+        # DROP: reasoning_content (provider-specific reasoning format)
+
+        canonical.append(result)
+    return canonical
+
+
+def rebuild_history_for_session(canonical, session):
+    """Rebuild canonical messages into the native format for ``session``.
+
+    The result is a list of message dicts ready to assign to
+    ``session.history``.
+    """
+    rebuilt = []
+    for msg in canonical:
+        role = msg["role"]
+        content = msg["content"]
+        tool_results = msg.get("tool_results", [])
+
+        if role == "user":
+            blocks = [{"type": "text", "text": content}]
+            for tr in tool_results:
+                blocks.append({
+                    "type": "tool_result",
+                    "tool_use_id": tr["tool_use_id"],
+                    "content": tr["content"],
+                })
+            rebuilt.append({"role": "user", "content": blocks})
+
+        elif role == "assistant":
+            blocks = []
+            if content:
+                blocks.append({"type": "text", "text": content})
+            for tc in (msg.get("tool_calls") or []):
+                tc_name = tc.get("function", {}).get("name", tc.get("name", ""))
+                tc_args = tc.get("function", {}).get("arguments", {})
+                if isinstance(tc_args, str):
+                    try:
+                        tc_args = json.loads(tc_args)
+                    except Exception:
+                        tc_args = {"_raw": tc_args}
+                blocks.append({
+                    "type": "tool_use",
+                    "id": str(tc.get("id", "") or ""),
+                    "name": str(tc_name),
+                    "input": tc_args,
+                })
+            if not blocks:
+                blocks = [{"type": "text", "text": ""}]
+            rebuilt.append({"role": "assistant", "content": blocks})
+
+        elif role == "tool":
+            rebuilt.append({
+                "role": "tool",
+                "tool_call_id": msg.get("tool_call_id", ""),
+                "content": content,
+            })
+
+        else:
+            rebuilt.append(msg)
+
+    return rebuilt
+
+
 def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completions', *,
                    temperature=0.5, max_tokens=None, tools=None, reasoning_effort=None,
                    max_retries=0, connect_timeout=10, read_timeout=300, proxies=None, stream=True,
@@ -430,6 +698,13 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
     start_perf = time.perf_counter()
     response_parts = []
     ml = model.lower()
+    # ── Defense-in-depth: strip leaked thinking blocks ──
+    messages = _normalize_thinking_blocks(messages)
+    _protocol_snapshot(
+        model=model, api_base=api_base, api_key=api_key,
+        session=audit_session, messages=messages, tools=tools,
+        label="_openai_stream",
+    )
     if 'kimi' in ml or 'moonshot' in ml: temperature = 1
     elif 'minimax' in ml: temperature = max(0.01, min(temperature, 1.0))  # MiniMax requires temp in (0, 1]
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -458,7 +733,17 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
                 else: resp_tools.append(t)
             payload["tools"] = resp_tools
         else: payload["tools"] = tools
-    RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+    RETRYABLE_STATUSES = {408, 409, 425, 429, 500, 502, 503, 504, 529}
+    def _should_retry(status, body, attempt, max_retries, streamed):
+        """Decide retry using semantic classification + legacy retryable set."""
+        if attempt >= max_retries or streamed:
+            return False
+        if status is not None and status in RETRYABLE_STATUSES:
+            return True
+        if status is None:
+            return True  # connection-level errors are always retryable
+        return False
+
     def _delay(resp, attempt):
         try: ra = float((resp.headers or {}).get("retry-after"))
         except: ra = None
@@ -473,17 +758,29 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
             with _post(url, headers=headers, json=payload, stream=stream,
                        timeout=(connect_timeout, read_timeout)) as r:
                 if r.status_code >= 400:
-                    if r.status_code in RETRYABLE and attempt < max_retries:
-                        d = _delay(r, attempt)
-                        print(f"[LLM Retry] HTTP {r.status_code}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
-                        time.sleep(d); continue
-                    # Read error body before raise (stream mode closes connection after raise)
                     err_body = ""
                     try: err_body = r.text.strip()[:1200]
                     except: pass
+                    cat, act = classify_http_error(r.status_code, err_body)
+                    if _should_retry(r.status_code, err_body, attempt, max_retries, False):
+                        d = _delay(r, attempt)
+                        print(f"[LLM Retry] {cat.name} HTTP {r.status_code}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
+                        time.sleep(d); continue
+                    # Build semantic error message
+                    if act is ErrorAction.SUGGEST_KEY_CHECK:
+                        hint = "Check that the API key is valid and not expired."
+                    elif act is ErrorAction.SUGGEST_MATCH:
+                        hint = "Check that the model matches the key's authorized models/channels."
+                    elif act is ErrorAction.REPORT_WITH_SNAPSHOT:
+                        hint = "Protocol mismatch — message format is incompatible with this provider."
+                    else:
+                        hint = ""
                     try: r.raise_for_status()
                     except requests.HTTPError as e:
-                        e._err_body = err_body; raise
+                        e._err_body = err_body
+                        e._err_category = cat.name
+                        e._err_hint = hint
+                        raise
                 if stream:
                     gen = _parse_openai_sse(r.iter_lines(), api_mode)
                     try:
@@ -525,16 +822,27 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
                     return blocks
         except requests.HTTPError as e:
             resp = getattr(e, "response", None); status = getattr(resp, "status_code", None)
-            if status in RETRYABLE and attempt < max_retries and not streamed:
-                d = _delay(resp, attempt)
-                print(f"[LLM Retry] HTTP {status}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
-                time.sleep(d); continue
             body = ""; rid = ""; ra = ""; ct = ""
             try: body = getattr(e, '_err_body', '') or (resp.text or "").strip()[:1200]
             except: pass
             try: h = resp.headers or {}; rid = h.get("x-request-id","") or h.get("request-id",""); ra = h.get("retry-after",""); ct = h.get("content-type","")
             except: pass
-            err = f"Error: HTTP {status} {e}; content_type: {ct or '<empty>'}; retry_after: {ra or '<empty>'}; request_id: {rid or '<empty>'}; body: {body or '<empty>'}"
+            cat, act = classify_http_error(status, body)
+            if _should_retry(status, body, attempt, max_retries, streamed):
+                d = _delay(resp, attempt)
+                print(f"[LLM Retry] {cat.name} HTTP {status}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
+                time.sleep(d); continue
+            hint = getattr(e, '_err_hint', '')
+            if not hint:
+                if act is ErrorAction.SUGGEST_KEY_CHECK:
+                    hint = "Check that the API key is valid and not expired."
+                elif act is ErrorAction.SUGGEST_MATCH:
+                    hint = "Check that the model matches the key's authorized models/channels."
+                elif act is ErrorAction.REPORT_WITH_SNAPSHOT:
+                    hint = "Protocol mismatch — message format is incompatible with this provider."
+            err = f"Error: HTTP {status} ({cat.name}) {e}; content_type: {ct or '<empty>'}; retry_after: {ra or '<empty>'}; request_id: {rid or '<empty>'}; body: {body or '<empty>'}"
+            if hint:
+                err += f" -- {hint}"
             yield err
             if audit_session is not None:
                 _safe_audit_llm_call(
@@ -548,11 +856,11 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
                 )
             return [{"type": "text", "text": err}]
         except (requests.Timeout, requests.ConnectionError) as e:
-            if attempt < max_retries and not streamed:
+            if _should_retry(None, "", attempt, max_retries, streamed):
                 d = _delay(None, attempt)
-                print(f"[LLM Retry] {type(e).__name__}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
+                print(f"[LLM Retry] CONNECTION_ERROR {type(e).__name__}, retry in {d:.1f}s ({attempt+1}/{max_retries+1})")
                 time.sleep(d); continue
-            err = f"Error: {type(e).__name__}: {e}"
+            err = f"Error: CONNECTION_ERROR {type(e).__name__}: {e}"
             yield err
             if audit_session is not None:
                 _safe_audit_llm_call(
@@ -722,6 +1030,10 @@ class BaseSession:
 class ClaudeSession(BaseSession):
     def raw_ask(self, messages):
         start_perf = time.perf_counter()
+        _protocol_snapshot(
+            model=self.model, api_base=self.api_base, api_key=self.api_key,
+            session=self, messages=messages, label="ClaudeSession.raw_ask",
+        )
         headers = {"x-api-key": self.api_key, "Content-Type": "application/json", "anthropic-version": "2023-06-01", "anthropic-beta": "prompt-caching-2024-07-31"}
         payload = {"model": self.model, "messages": messages, "max_tokens": self.max_tokens, "stream": True}
         if self.temperature != 1: payload["temperature"] = self.temperature
@@ -765,9 +1077,10 @@ class ClaudeSession(BaseSession):
 
 class LLMSession(BaseSession):
     def raw_ask(self, messages):
-        return (yield from _openai_stream(self.api_base, self.api_key, messages, self.model, self.api_mode,
+        msgs = _msgs_claude2oai(messages)
+        return (yield from _openai_stream(self.api_base, self.api_key, msgs, self.model, self.api_mode,
                                   temperature=self.temperature, reasoning_effort=self.reasoning_effort,
-                                  max_tokens=self.max_tokens, max_retries=self.max_retries, 
+                                  max_tokens=self.max_tokens, max_retries=self.max_retries,
                                   connect_timeout=self.connect_timeout, read_timeout=self.read_timeout,
                                   proxies=self.proxies, stream=self.stream,
                                   audit_session=self, call_site="llmcore.LLMSession.raw_ask"))
@@ -802,6 +1115,11 @@ class NativeClaudeSession(BaseSession):
     def raw_ask(self, messages):
         start_perf = time.perf_counter()
         messages = _fix_messages(messages)
+        _protocol_snapshot(
+            model=self.model, api_base=self.api_base, api_key=self.api_key,
+            session=self, messages=messages, tools=self.tools,
+            label="NativeClaudeSession.raw_ask",
+        )
         model = self.model
         beta_parts = ["claude-code-20250219", "interleaved-thinking-2025-05-14", "redact-thinking-2026-02-12", "prompt-caching-scope-2026-01-05"]
         if "[1m]" in model.lower():
@@ -1033,38 +1351,84 @@ Follow these steps to think and act:
         self.last_tools = tools_json
         return tool_instruction
 
+    def _compact_tool_glossary(self, tools):
+        lines = []
+        for tool in tools or []:
+            fn = tool.get("function", tool) if isinstance(tool, dict) else {}
+            if not isinstance(fn, dict):
+                continue
+            name = str(fn.get("name") or "").strip()
+            if not name:
+                continue
+            desc = " ".join(str(fn.get("description") or "").split()).strip()
+            if len(desc) > 140:
+                desc = desc[:137].rstrip() + "..."
+            if desc:
+                lines.append(f"- {name}: {desc}")
+            else:
+                lines.append(f"- {name}")
+        if not lines:
+            return ""
+        title = "### Mounted tools (still active):\n" if os.environ.get('GA_LANG') == 'en' else "### 当前可调用工具（持续生效）：\n"
+        return title + "\n".join(lines) + "\n"
+
     def _prepare_tool_instruction_v2(self, tools):
         tool_instruction = ""
         if not tools:
             return tool_instruction
         tools_json = json.dumps(tools, ensure_ascii=False, separators=(',', ':'))
         _en = os.environ.get('GA_LANG') == 'en'
-        critical_rules = (
-            "\nCritical tool rules:\n"
-            "- code_run: NEVER call with empty arguments. Provide arguments.script, or put exactly one fenced code block immediately before the tool call.\n"
-            "- code_run defaults to runtime scratch cwd ./temp. For the repo root/current project folder, use cwd:'../'.\n"
-            "- If you only need to inspect existing file contents, prefer file_read over code_run.\n"
-        )
         format_instruction = '\nFormat: ```<tool_use>{{"name": "tool_name", "arguments": {{...}}}}</tool_use>```\n'
         if _en:
+            critical_rules = (
+                "\nCritical tool rules:\n"
+                "- Prefer the smallest evidence-producing action. Do not assume tool results before seeing them.\n"
+                "- Read before write: inspect the current file/context with file_read before editing.\n"
+                "- Use file_patch for surgical edits; use file_write only for full-file or very large rewrites.\n"
+                "- code_run: NEVER call with empty arguments. Provide arguments.script, or put exactly one fenced code block immediately before the tool call.\n"
+                "- code_run defaults to runtime scratch cwd ./temp. For the repo root/current project folder, use cwd:'../'.\n"
+                "- Prefer file_read over code_run when you only need to inspect existing files.\n"
+                "- Use ask_user only for decisions, missing credentials, permissions, or true blockers you cannot resolve with tools.\n"
+                "- After emitting one or more <tool_use> blocks, stop. Do not fabricate the tool result in the same turn.\n"
+            )
             tool_instruction = (
                 "\n### Interaction Protocol (must follow strictly, always in effect)\n"
-                "Follow these steps to think and act:\n"
-                "1. **Think**: Analyze the current situation and strategy inside `<thinking>` tags.\n"
-                "2. **Summarize**: Output a minimal one-line (<30 words) physical snapshot in `<summary>`: new info from last tool result + current tool call intent. This goes into long-term working memory. Must contain real information, no filler.\n"
-                "3. **Act**: If you need to call tools, output one or more **<tool_use> blocks** after your reply, then stop.\n"
+                "Follow these steps on every turn:\n"
+                "1. **Think** inside `<thinking>`: current objective, evidence gap, and best next step.\n"
+                "2. **Summarize** inside `<summary>` using one factual line (usually <=30 words): last new fact or current grounded state + current intent. No filler like 'continue working'.\n"
+                "3. **Act**: if tools are needed, choose the smallest high-information action, emit one or more **<tool_use> blocks**, then stop.\n"
+                "4. **Answer directly** only when no tool is needed. Do not use tools just for ceremony.\n"
             )
-            cached_prefix = "\n### Tools: still active, **ready to call**. Protocol unchanged.\n"
+            cached_prefix = (
+                "\n### Tools: still active, ready to call.\n"
+                "Protocol unchanged: factual summary, read before write, do not invent tool results.\n"
+            )
         else:
-            tool_instruction = (
-                "\n### Interaction Protocol\n"
-                "1. Think inside <thinking>.\n"
-                "2. Write a short factual <summary>.\n"
-                "3. If tools are needed, output <tool_use> blocks and stop.\n"
+            critical_rules = (
+                "\n关键工具规则：\n"
+                "- 优先做能产出客观证据的最小动作，不要在拿到结果前脑补结果。\n"
+                "- 读先于写：改文件前先用 file_read 看最新上下文。\n"
+                "- 小改优先 file_patch；只有整文件重写或超大块写入时才用 file_write。\n"
+                "- code_run 绝不能空参调用；要么提供 arguments.script，要么在工具调用前紧贴一个代码块。\n"
+                "- code_run 默认工作目录是 ./temp；需要项目根目录时显式传 cwd:'../'。\n"
+                "- 只是查看已有文件时优先 file_read，不要滥用 code_run。\n"
+                "- ask_user 只用于用户决策、缺失凭证/权限、不可逆操作确认或真实阻塞。\n"
+                "- 输出一个或多个 <tool_use> 块后立即停止，不要在同一轮假装看到了工具结果。\n"
             )
-            cached_prefix = "\n### Tools: still active and ready to call.\n"
+            tool_instruction = (
+                "\n### 交互协议（严格执行，持续有效）\n"
+                "每一轮都按下面顺序执行：\n"
+                "1. 在 <thinking> 中判断：当前目标、证据缺口、最优下一步。\n"
+                "2. 在 <summary> 中写一行事实快照（通常 <=50 个中文字符）：上一轮得到的新事实或当前已知状态 + 本轮意图。禁止空话，例如“继续处理”“继续分析”。\n"
+                "3. 如果需要工具，选择当前信息增量最大的最小动作，输出一个或多个 <tool_use> 块，然后停止等待结果。\n"
+                "4. 如果不需要工具，直接回答用户；不要为了走流程而硬调工具。\n"
+            )
+            cached_prefix = (
+                "\n### 工具库仍然生效，可直接调用。\n"
+                "协议不变：summary 要写事实，先读后写，不要伪造工具结果。\n"
+            )
         if self.auto_save_tokens and self.last_tools == tools_json:
-            tool_instruction = cached_prefix + critical_rules + format_instruction
+            tool_instruction = cached_prefix + critical_rules + format_instruction + self._compact_tool_glossary(tools)
         else:
             self.total_cd_tokens = 0
             tool_instruction += critical_rules
@@ -1241,16 +1605,18 @@ class MixinSession:
 THINKING_PROMPT_ZH = """
 ### 行动规范（持续有效）
 每次回复请遵循：
-1. 在 <thinking></thinking> 标签中先分析现状和策略
-2. 在 <summary></summary> 中输出极简单行（<30字）物理快照：上次结果新信息+本次意图。此内容进入长期工作记忆。
-3. 然后才能输出工具调用
+1. 在 <thinking></thinking> 中判断当前目标、证据缺口、下一步策略。
+2. 在 <summary></summary> 中输出一行事实快照（通常 <=50 个中文字符）：上一轮新事实或当前已知状态 + 本轮意图，禁止空话。
+3. 若需工具，只做当前信息增量最大的最小动作；输出工具调用后停止，等待结果。
+4. 读先于写，小改优先 file_patch，需要真实输出/日志/测试时用 code_run，不要假装已经看到了工具结果。
 """.strip()
 THINKING_PROMPT_EN = """
 ### Action Protocol (always in effect)
 For every reply, follow these steps:
-1. Analyze the current situation and strategy inside <thinking></thinking>
-2. Output a minimal one-line (<30 words) physical snapshot in <summary></summary>: new info from last result + current intent. This goes into long-term working memory.
-3. Then output tool calls
+1. Analyze the current objective, evidence gap, and next step inside <thinking></thinking>.
+2. Output one factual line in <summary></summary> (usually <=30 words): last grounded fact or current state + current intent. No filler.
+3. If tools are needed, take the smallest high-information action and stop after the tool call.
+4. Read before write, prefer surgical edits, and never invent tool results before you see them.
 """.strip()
 
 class NativeToolClient:

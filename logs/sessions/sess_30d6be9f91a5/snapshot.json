@@ -1,0 +1,23 @@
+{
+  "session_id": "sess_30d6be9f91a5",
+  "project_id": "gagent-multi",
+  "current_mode": "stopped",
+  "route_target": null,
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": null,
+  "collaboration_artifacts": {},
+  "event_log_position": 5,
+  "last_user_intent": "ping",
+  "snapshot_version": 1,
+  "updated_at": 1779122756.3668919,
+  "metadata": {
+    "status": "stopped",
+    "last_error": ""
+  }
+}

@@ -16,14 +16,6 @@ from .distillation import (
     write_distillation_candidate,
 )
 from .legacy_global import build_legacy_memory_block, read_legacy_l1_l2
-from .reader import (
-    STRUCTURED_MEMORY_ENV_VAR,
-    build_memory_source_report,
-    read_global_memory,
-    read_working_memory,
-    search_structured_memory,
-    structured_memory_enabled,
-)
 from .store import MemoryStore
 from .types import EvidenceChunk, MemoryCandidate, MemoryEvent, MemoryItem
 from .write_gate import (
@@ -52,15 +44,9 @@ __all__ = [
     "MemoryWriteDecision",
     "MemoryWriteSource",
     "MemoryWriteTarget",
-    "STRUCTURED_MEMORY_ENV_VAR",
-    "build_memory_source_report",
     "archive_inbox_to_structured",
     "build_scoped_memory_context",
     "dedup_inbox",
-    "read_global_memory",
-    "read_working_memory",
     "run_memory_maintenance",
     "score_inbox_entries",
-    "search_structured_memory",
-    "structured_memory_enabled",
 ]

@@ -8,7 +8,7 @@ from core.skills.skill_phase import normalize_skill_phase
 from core.skills.skill_registry import SkillRegistry
 
 POLICY_ENV_VAR = "GENERIC_AGENT_EXECUTION_POLICY"
-_POLICY_MODE_DEFAULT = "observe"
+_POLICY_MODE_DEFAULT = "soft"
 
 _HIGH_RISK_PATTERNS: list[tuple[str, str, str]] = [
     # (regex, risk_level, description)
@@ -25,6 +25,18 @@ _HIGH_RISK_PATTERNS: list[tuple[str, str, str]] = [
     (r"(?:^|\s|[/\\])mykey\.json(?:\s|$)", "high", "access to mykey.json"),
     (r"\bdrop\s+table\b", "critical", "SQL drop table"),
     (r"\bdelete\s+from\b", "medium", "SQL delete from"),
+    # Process termination — explicit kill commands
+    (r"\btaskkill\b", "critical", "Windows taskkill process termination"),
+    (r"\bStop-Process\b", "critical", "PowerShell Stop-Process"),
+    (r"\bkill\s+-9\b", "critical", "force kill with SIGKILL"),
+    (r"\bkill\s+-KILL\b", "critical", "force kill with SIGKILL"),
+    (r"\bkillall\b", "high", "killall process termination"),
+    (r"\bpkill\b", "high", "pkill process termination"),
+    (r"\bterminate\b", "medium", "process terminate call"),
+    (r"\bos\.kill\b", "medium", "Python os.kill signal"),
+    (r"\bsubprocess\.call\s*\(.*taskkill", "high", "subprocess.call taskkill"),
+    (r"\bproc\.kill\b", "medium", "Popen.kill method"),
+    (r"\bproc\.terminate\b", "medium", "Popen.terminate method"),
 ]
 
 

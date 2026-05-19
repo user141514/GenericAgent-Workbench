@@ -1,8 +1,9 @@
 """
-Dynamic agent graph tests — Level 3 Task→DAG compiler.
+Dynamic graph tests for the minimal runtime graph.
 
-Verifies that _build_dynamic_graph() creates only the agents needed
-for each task type, and that the handoff topology is correct.
+The current runtime keeps the agent graph minimal for all tasks and uses
+routing plus execution mode to decide behavior instead of creating
+specialist agent nodes on demand.
 """
 
 from __future__ import annotations
@@ -13,8 +14,6 @@ import pytest
 
 from core.router_rules import RouterRules
 
-
-# ── Helper ─────────────────────────────────────────────────────────
 
 def _build_dynamic(query: str) -> dict:
     """Build a dynamic agent graph for a specific query."""
@@ -36,143 +35,103 @@ def _build_dynamic(query: str) -> dict:
         return orchestrator._build_dynamic_graph(query)
 
 
-# ── Tests ──────────────────────────────────────────────────────────
+def _build_static(query: str) -> dict:
+    """Build the default runtime graph for a specific query."""
+    from core.openai_agentmain import OpenAIOrchestratedAgent
 
-class TestDynamicGraphSize:
-    """The dynamic graph should create fewer agents for simple tasks."""
+    mock_model = MagicMock()
+    orchestrator = OpenAIOrchestratedAgent.__new__(OpenAIOrchestratedAgent)
+    orchestrator._active_sdk_model = mock_model
+    orchestrator.input_items = []
+    orchestrator.history = []
+    orchestrator.llm_no = 0
+    orchestrator._cached_agent_graph = None
+    orchestrator._cached_agent_graph_model_id = None
+    orchestrator._run_store = None
+    orchestrator._run_classic_executor_task = MagicMock()
+    orchestrator._store_executor_result_state = MagicMock()
 
-    def test_chat_query_has_minimal_agents(self):
-        agents = _build_dynamic("你好，今天天气怎么样")
-        keys = set(agents.keys())
-        # chat + root + executor = 3 (no code/review/research)
-        assert "root" in keys
-        assert "chat" in keys
-        assert "executor" in keys
-        assert "code" not in keys
-        assert "review" not in keys
-        assert "research" not in keys
-
-    def test_code_query_has_code_agent(self):
-        agents = _build_dynamic("帮我写一个快速排序")
-        keys = set(agents.keys())
-        assert "code" in keys
-        assert "review" not in keys
-        assert "research" not in keys
-
-    def test_review_query_has_review_agent(self):
-        agents = _build_dynamic("审查这段代码的安全性")
-        keys = set(agents.keys())
-        assert "review" in keys
-        assert "code" not in keys
-        assert "research" not in keys
-
-    def test_research_query_has_research_agent(self):
-        agents = _build_dynamic("查一下 Django 5.0 的新特性")
-        keys = set(agents.keys())
-        assert "research" in keys
-        assert "code" not in keys
-        assert "review" not in keys
-
-    def test_complex_query_has_multiple_agents(self):
-        agents = _build_dynamic("帮我写一个认证模块并审查它的安全性")
-        keys = set(agents.keys())
-        # Should have both code and review
-        assert "code" in keys
-        assert "review" in keys
-
-    def test_full_research_to_code_query(self):
-        agents = _build_dynamic("查一下 JWT 怎么用然后帮我实现")
-        keys = set(agents.keys())
-        assert "research" in keys
-        assert "code" in keys
+    with patch.object(OpenAIOrchestratedAgent, "_build_model", return_value=mock_model):
+        return orchestrator._build_agent_graph(query, graph_mode="full")
 
 
-class TestDynamicHandoffs:
-    """Handoff topology should match the created agents."""
+RUNTIME_QUERIES = [
+    "/chat explain this",
+    "/run pytest",
+    "/review auth middleware",
+    "/research jwt docs",
+    "review this bug against the API docs",
+]
 
-    def test_code_handoffs_to_review_when_both_exist(self):
-        agents = _build_dynamic("帮我写代码并审查安全性")
-        if "code" in agents and "review" in agents:
-            code_handoffs = {h.name for h in agents["code"].handoffs}
-            assert "review_agent" in code_handoffs
 
-    def test_no_handoffs_when_only_code(self):
-        agents = _build_dynamic("帮我写一个函数")
-        if "code" in agents and "review" not in agents:
-            assert len(agents["code"].handoffs) == 0
+class TestDynamicGraphShape:
+    """The dynamic builder currently returns the same minimal runtime graph."""
 
-    def test_root_handoffs_match_created_agents(self):
-        agents = _build_dynamic("查文档然后写代码然后审查")
-        root_handoff_names = {h.name for h in agents["root"].handoffs}
-        for key in ("chat", "executor", "code", "review", "research"):
-            if key in agents:
-                assert agents[key].name in root_handoff_names
+    @pytest.mark.parametrize("query", RUNTIME_QUERIES)
+    def test_dynamic_graph_has_minimal_runtime_keys(self, query):
+        agents = _build_dynamic(query)
+        assert set(agents.keys()) == {"root", "chat", "executor"}
 
-    def test_root_never_has_code_agent_when_not_needed(self):
-        agents = _build_dynamic("你好")
-        root_handoff_names = {h.name for h in agents["root"].handoffs}
-        assert "code_agent" not in root_handoff_names
-        assert "review_agent" not in root_handoff_names
-        assert "research_agent" not in root_handoff_names
+    @pytest.mark.parametrize("query", RUNTIME_QUERIES)
+    def test_dynamic_graph_never_creates_specialist_keys(self, query):
+        agents = _build_dynamic(query)
+        assert "code" not in agents
+        assert "review" not in agents
+        assert "research" not in agents
+
+    @pytest.mark.parametrize("query", RUNTIME_QUERIES)
+    def test_dynamic_root_handoffs_are_stable(self, query):
+        agents = _build_dynamic(query)
+        handoff_names = {handoff.name for handoff in agents["root"].handoffs}
+        assert handoff_names == {"chat_specialist", "planner_executor"}
+
+
+class TestDynamicVsRouting:
+    """Routing varies per query even though the runtime graph stays minimal."""
+
+    def test_chat_route_keeps_single_agent_mode(self):
+        result = RouterRules.match("/chat explain this")
+        assert result.target == "chat"
+        assert result.mode == "single_agent"
+
+    def test_mixed_query_can_switch_to_multi_agent_mode_without_specialist_nodes(self):
+        result = RouterRules.match("review this bug against the API docs")
+        agents = _build_dynamic("review this bug against the API docs")
+        assert result.mode == "multi_agent"
+        assert set(agents.keys()) == {"root", "chat", "executor"}
 
 
 class TestDynamicVsStatic:
-    """Compare dynamic graph with full static graph."""
+    """Dynamic and static builders currently use the same runtime graph."""
 
-    def test_dynamic_graph_smaller_or_equal(self):
-        """Dynamic graph should never have more agents than static."""
-        from core.openai_agentmain import OpenAIOrchestratedAgent
+    @pytest.mark.parametrize("query", RUNTIME_QUERIES)
+    def test_dynamic_graph_matches_static_graph_shape(self, query):
+        static = _build_static(query)
+        dynamic = _build_dynamic(query)
+        assert set(dynamic.keys()) == set(static.keys())
 
-        mock_model = MagicMock()
-        orchestrator = OpenAIOrchestratedAgent.__new__(OpenAIOrchestratedAgent)
-        orchestrator._active_sdk_model = mock_model
-        orchestrator.input_items = []
-        orchestrator.history = []
-        orchestrator.llm_no = 0
-        orchestrator._cached_agent_graph = None
-        orchestrator._cached_agent_graph_model_id = None
-        orchestrator._run_store = None
-        orchestrator._run_classic_executor_task = MagicMock()
-        orchestrator._store_executor_result_state = MagicMock()
-
-        queries = [
-            "你好",
-            "帮我写代码",
-            "审查安全性",
-            "查文档",
-            "写代码然后审查",
-        ]
-        with patch.object(OpenAIOrchestratedAgent, "_build_model", return_value=mock_model):
-            for q in queries:
-                static = orchestrator._build_agent_graph(q, graph_mode="full")
-                dynamic = orchestrator._build_dynamic_graph(q)
-                assert len(dynamic) <= len(static), (
-                    f"Dynamic graph ({len(dynamic)} agents) should be <= "
-                    f"static graph ({len(static)} agents) for '{q}'"
-                )
-
-    def test_dynamic_graph_always_has_root_executor_chat(self):
-        """Every dynamic graph must have root, chat, executor."""
-        for q in ["你好", "帮我写代码", "查文档", "审查代码"]:
-            agents = _build_dynamic(q)
-            assert "root" in agents, f"Missing root for '{q}'"
-            assert "executor" in agents, f"Missing executor for '{q}'"
-            assert "chat" in agents, f"Missing chat for '{q}'"
+    @pytest.mark.parametrize("query", RUNTIME_QUERIES)
+    def test_dynamic_root_matches_static_root_handoffs(self, query):
+        static = _build_static(query)
+        dynamic = _build_dynamic(query)
+        static_handoffs = {handoff.name for handoff in static["root"].handoffs}
+        dynamic_handoffs = {handoff.name for handoff in dynamic["root"].handoffs}
+        assert dynamic_handoffs == static_handoffs
 
 
 class TestDynamicGraphInstructions:
-    """Dynamic graph agents should have correct instructions."""
+    """Dynamic graph instructions should reflect the minimal runtime graph."""
 
-    def test_root_mentions_available_agents(self, agent_graph):
-        """Static graph root should mention all agents (existing test, unchanged)."""
+    def test_static_root_mentions_only_runtime_agents(self, agent_graph):
         instructions = agent_graph["root"].instructions
-        assert "code_agent" in instructions
-        assert "review_agent" in instructions
-        assert "research_agent" in instructions
+        assert "chat_specialist" in instructions
+        assert "planner_executor" in instructions
+        assert "code_agent" not in instructions
+        assert "review_agent" not in instructions
+        assert "research_agent" not in instructions
 
-    def test_dynamic_root_only_mentions_available(self):
-        """Dynamic root should only mention agents that exist."""
-        agents = _build_dynamic("你好")
+    def test_dynamic_root_mentions_only_runtime_agents(self):
+        agents = _build_dynamic("/review auth middleware")
         instructions = agents["root"].instructions
         assert "chat_specialist" in instructions
         assert "planner_executor" in instructions

@@ -1,0 +1,23 @@
+{
+  "session_id": "sess_6e8074707d60",
+  "project_id": "gagent-multi",
+  "current_mode": "failed",
+  "route_target": null,
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": null,
+  "collaboration_artifacts": {},
+  "event_log_position": 5,
+  "last_user_intent": "You are the execution engine inside a multi-agent workflow.\nExecute the task with your normal GenericAgent tools and internal loop.\nFocus on doing the work, not re-routing or re-explaining the workflow.\nWhen you finish, provide a concise execution report with actions taken, evidence gathered, and remaining gaps.\n\n=== SHARED WORKSPACE ===\n(workspace is empty)\nTo reference an existing artifact, use its key name.\nTo create or update an artifact, write the file and mention [artifact: <key>] in your output.\nOriginal user request:\n给我看看git上最火的前端项目\n\nExecution plan or corrective follow-up:\n1. google搜索 \"github most starred frontend projects\"\n2. 返回搜索结果",
+  "snapshot_version": 1,
+  "updated_at": 1779085714.6531456,
+  "metadata": {
+    "status": "completed",
+    "last_error": "'RuntimeHost' object has no attribute '_emit'"
+  }
+}

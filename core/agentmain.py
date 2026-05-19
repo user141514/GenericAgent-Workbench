@@ -29,16 +29,33 @@ from .runtime import (
     read_shortcut_enabled,
     try_direct_answer_from_tool_result,
 )
-from .tools import ToolSchemaSelector, slim_tools_enabled
+from .tools import ToolSchemaSelector, load_runtime_tool_schema, slim_tools_enabled
+from core.protocol.agent import AgentBackend
+from core.protocol.input import AgentInput
 
 
 script_dir = PROJECT_ROOT
 
 
-def load_tool_schema(suffix=''):
-    global TOOLS_SCHEMA
-    ts = open(os.path.join(script_dir, f'assets/tools_schema{suffix}.json'), 'r', encoding='utf-8').read()
-    TOOLS_SCHEMA = json.loads(ts if os.name == 'nt' else ts.replace('powershell', 'bash'))
+def load_tool_schema(suffix='', llm_name=None):
+    global TOOLS_SCHEMA, TOOL_SCHEMA_REPORT
+    preferred_lang = None
+    if suffix == '_cn':
+        preferred_lang = 'zh'
+    elif suffix == '_en':
+        preferred_lang = 'en'
+    TOOLS_SCHEMA, TOOL_SCHEMA_REPORT = load_runtime_tool_schema(
+        preferred_lang=preferred_lang,
+        llm_name=llm_name,
+    )
+    if TOOL_SCHEMA_REPORT.get('fallback_to_english'):
+        print(
+            "[tool-schema] localized schema required English fallback: "
+            f"locale={TOOL_SCHEMA_REPORT.get('locale')} "
+            f"missing_tools={len(TOOL_SCHEMA_REPORT.get('missing_tools', []))} "
+            f"missing_tool_descriptions={len(TOOL_SCHEMA_REPORT.get('missing_tool_descriptions', []))} "
+            f"missing_param_descriptions={len(TOOL_SCHEMA_REPORT.get('missing_param_descriptions', []))}"
+        )
 
 
 load_tool_schema()
@@ -227,7 +244,7 @@ def _history_to_input_items(history: list[str], max_lines: int = 12) -> list[dic
     return items
 
 
-class GeneraticAgent:
+class GeneraticAgent(AgentBackend):
     def __init__(self):
         script_dir = PROJECT_ROOT
         os.makedirs(os.path.join(script_dir, 'temp'), exist_ok=True)
@@ -235,7 +252,10 @@ class GeneraticAgent:
 
         llm_sessions = []
         for k, cfg in mykeys.items():
-            if not any(x in k for x in ['api', 'config', 'cookie']):
+            if not isinstance(cfg, dict):
+                continue
+            # Skip known non-key entries (proxy, templates, metadata)
+            if k in ('proxy', 'proxies', 'template', 'TEMPLATE', 'mykey_template'):
                 continue
             try:
                 if 'native' in k and 'claude' in k:
@@ -265,7 +285,7 @@ class GeneraticAgent:
         self.task_dir = None
         self.history = []
         self.task_queue = queue.Queue()
-        self.is_running = False
+        self._running = False
         self.stop_sig = False
         self._stop_event = None
         self.llm_no = 0
@@ -284,6 +304,8 @@ class GeneraticAgent:
         self._available_tool_count = len(TOOLS_SCHEMA)
         self._selected_tool_names = [_tool_name(tool) for tool in TOOLS_SCHEMA]
         self._selected_tools_schema_chars = _tool_schema_chars(TOOLS_SCHEMA)
+        self._active_display_queue = None
+        self._active_source = None
 
     def switch_to_key(self, n: int) -> str:
         """Switch directly to a specific LLM key index. Returns the new model name."""
@@ -292,13 +314,23 @@ class GeneraticAgent:
         lastc = self.llmclient
         self.llm_no = n
         self.llmclient = self.llmclients[self.llm_no]
-        self.llmclient.backend.history = lastc.backend.history
+        # ── Provider switch: canonicalize + rebuild to avoid format pollution ──
+        try:
+            from .llmcore import _canonicalize_history, rebuild_history_for_session
+            old_backend = getattr(lastc, 'backend', None)
+            new_backend = getattr(self.llmclient, 'backend', None)
+            same_cls = (type(old_backend) is type(new_backend)) if (old_backend and new_backend) else False
+            if same_cls:
+                new_backend.history = list(getattr(old_backend, 'history', []))
+            elif old_backend and new_backend:
+                canonical = _canonicalize_history(getattr(old_backend, 'history', []))
+                new_backend.history = rebuild_history_for_session(canonical, new_backend)
+        except Exception as e:
+            print(f"[SWITCH] Canonical rebuild failed ({e}), falling back to raw copy")
+            self.llmclient.backend.history = getattr(lastc.backend, 'history', [])
         self.llmclient.last_tools = ''
-        name = self.get_llm_name().lower()
-        if 'glm' in name or 'minimax' in name or 'kimi' in name:
-            load_tool_schema('_cn')
-        else:
-            load_tool_schema()
+        name = self.get_llm_name()
+        load_tool_schema(llm_name=name)
         return self.get_llm_name()
 
     def next_llm(self, n=-1):
@@ -428,8 +460,43 @@ class GeneraticAgent:
             "tool_error": False,
         }
 
+    # ── AgentBackend protocol (Phase 5) ─────────────────────────────────
+
+    @property
+    def is_running(self) -> bool:
+        """Whether a task is currently being processed (AgentBackend protocol)."""
+        return self._running
+
+    def submit(self, task):
+        """Submit a task via the AgentBackend protocol.
+
+        Returns an AgentOutputChannel for consuming streaming output.
+        This is the canonical submission path. ``put_task()`` delegates here.
+        """
+        from core.protocol.channel import QueueOutputChannel
+
+        display_queue = queue.Queue()
+        stop_event = threading.Event()
+        self.task_queue.put({
+            "query": task.query, "source": task.source,
+            "images": task.images or [], "output": display_queue,
+            "run_id": task.run_id, "stop_event": stop_event,
+        })
+        return QueueOutputChannel.from_legacy_queue(display_queue)
+
+    def put_task(self, query, source="user", images=None, run_id=None):
+        """Submit a task (legacy API). Delegates to ``submit()`` internally.
+
+        Returns a raw ``queue.Queue`` for backward compatibility.
+        Prefer ``submit(AgentInput(...))`` for new code.
+        """
+        task = AgentInput(query=query, source=source, images=images, run_id=run_id)
+        channel = self.submit(task)
+        # Return the raw legacy queue so existing callers can get_nowait() dicts
+        return channel.legacy_queue
+
     def abort(self):
-        if not self.is_running:
+        if not self._running:
             return
         print('Abort current task...')
         self.stop_sig = True
@@ -438,15 +505,17 @@ class GeneraticAgent:
         if self.handler is not None:
             self.handler.code_stop_signal.append(1)
 
-    def put_task(self, query, source="user", images=None, run_id=None):
-        display_queue = queue.Queue()
-        stop_event = threading.Event()
-        self.task_queue.put({
-            "query": query, "source": source, "images": images or [],
-            "output": display_queue, "run_id": run_id,
-            "stop_event": stop_event,
-        })
-        return display_queue
+    def _emit_status_event(self, payload):
+        q = self._active_display_queue
+        if q is None or not isinstance(payload, dict):
+            return
+        item = dict(payload)
+        item.setdefault("source", self._active_source or "user")
+        item.setdefault("task_id", self._profile_run_id)
+        try:
+            q.put(item)
+        except Exception:
+            pass
 
     # i know it is dangerous, but raw_query is dangerous enough it doesn't enlarge
     def _handle_slash_cmd(self, raw_query, display_queue):
@@ -482,9 +551,11 @@ class GeneraticAgent:
                 self.task_queue.task_done()
                 continue
 
-            self.is_running = True
+            self._running = True
             self._profile_status = 'success'
             self._profile_run_id = run_id
+            self._active_display_queue = display_queue
+            self._active_source = source
             self._current_user_input = raw_query
             self._last_read_shortcut = None
             self._last_direct_answer = None
@@ -503,6 +574,20 @@ class GeneraticAgent:
             handler = None
             full_resp = ""
             turn_value = 1
+            # ── RuntimeHost: session recording (Phase 3) ──
+            _runtime_host = None
+            _runtime_mapper = None
+            try:
+                from core.runtime.host import RuntimeHost
+                from core.runtime.protocol_bridge import RuntimeEventMapper
+                _runtime_host = RuntimeHost(
+                    project_root=PROJECT_ROOT,
+                    agent_name="classic_agent",
+                )
+                _runtime_host.start_session(user_intent=raw_query, source=source)
+                _runtime_mapper = RuntimeEventMapper(_runtime_host)
+            except Exception:
+                pass  # runtime unavailable — continue without session recording
             try:
                 shortcut_check_span = self.active_profiler.span('read_shortcut_check', kind='agent', metadata={'source': source}) if self.active_profiler is not None else nullcontext()
                 with shortcut_check_span:
@@ -562,6 +647,16 @@ class GeneraticAgent:
                     if source == 'feishu' and len(self.history) > 1:
                         user_input = handler._get_anchor_prompt() + f"\n\n### 鐢ㄦ埛褰撳墠娑堟伅\n{raw_query}"
                     initial_user_content = None
+                    # Compute turn gap from env (moved here from agent_loop.py)
+                    _turn_gap = 0.0
+                    _gap_raw = os.environ.get("GENERIC_AGENT_FRONTEND_TURN_GAP_MS", "").strip()
+                    if _gap_raw:
+                        try:
+                            _gap_ms = float(_gap_raw)
+                            if _gap_ms > 0:
+                                _turn_gap = _gap_ms / 1000.0
+                        except (ValueError, TypeError):
+                            pass
                     gen = agent_runner_loop(
                         self.llmclient,
                         sys_prompt,
@@ -572,6 +667,8 @@ class GeneraticAgent:
                         verbose=self.verbose,
                         initial_user_content=initial_user_content,
                         stop_event=stop_event,
+                        runtime_mapper=_runtime_mapper,
+                        turn_gap=_turn_gap,
                     )
 
                 stream_span = self.active_profiler.span('stream_output', kind='frontend', metadata={'source': source}) if self.active_profiler is not None else nullcontext()
@@ -622,10 +719,26 @@ class GeneraticAgent:
                 error_msg = full_resp + f'\n```\n{format_error(e)}\n```' if full_resp else f'```\n{format_error(e)}\n```'
                 display_queue.put({'event': 'error', 'error': str(e), 'source': source, 'turn': turn_value, 'task_id': run_id})
                 display_queue.put({'done': error_msg, 'source': source, 'turn': turn_value, 'task_id': run_id})
+                # ── Runtime: record error ──
+                if _runtime_mapper is not None:
+                    try:
+                        _runtime_mapper.on_error(str(e))
+                    except Exception:
+                        pass
             finally:
                 if self.stop_sig:
                     print('User aborted the task.')
                     self._profile_status = 'aborted'
+                    if _runtime_mapper is not None:
+                        try:
+                            _runtime_mapper.on_stop_requested()
+                        except Exception:
+                            pass
+                elif _runtime_mapper is not None:
+                    try:
+                        _runtime_mapper.on_done(full_resp[:200] if full_resp else "")
+                    except Exception:
+                        pass
                 if self.active_profiler is not None:
                     try:
                         summary = self.active_profiler.end_run(status=_profile_status_label(self._profile_status))
@@ -642,7 +755,9 @@ class GeneraticAgent:
                 self._last_read_shortcut = None
                 self._last_direct_answer = None
                 self._last_early_stop = None
-                self.is_running = False
+                self._active_display_queue = None
+                self._active_source = None
+                self._running = False
                 self.stop_sig = False
                 self._stop_event = None
                 self.task_queue.task_done()
@@ -650,6 +765,9 @@ class GeneraticAgent:
                     self.handler.code_stop_signal.append(1)
 
 
+# ══ DEPRECATED: use `ga run/serve/reflect` CLI instead (core/cli.py). ══
+# This block is kept for backward compatibility with launch.pyw --sched
+# and the root agentmain.py wrapper.  Do NOT add new features here.
 if __name__ == '__main__':
     import argparse
     from datetime import datetime

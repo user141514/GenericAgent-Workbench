@@ -1,0 +1,23 @@
+{
+  "session_id": "3e8601a431f140ccbc2ad229cea3b2fc",
+  "project_id": "gagent-multi",
+  "current_mode": "code",
+  "route_target": "executor",
+  "execution_mode": "single_agent",
+  "pending_tool_call": "run_genericagent_executor",
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": null,
+  "collaboration_artifacts": {},
+  "event_log_position": 7,
+  "last_user_intent": "好，测试项目先放一边，现在的前端最火的新兴项目是哪些？我记得之前还有个视频流替代前端框架的项目",
+  "snapshot_version": 1,
+  "updated_at": 1779087220.6542642,
+  "metadata": {
+    "status": "running",
+    "last_error": ""
+  }
+}

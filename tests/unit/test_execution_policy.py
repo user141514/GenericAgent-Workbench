@@ -13,9 +13,9 @@ from core.runtime.execution_policy import (
 # ── Policy mode tests ─────────────────────────────────────────────
 
 
-def test_default_mode_is_observe(monkeypatch):
+def test_default_mode_is_soft(monkeypatch):
     monkeypatch.delenv(POLICY_ENV_VAR, raising=False)
-    assert get_policy_mode() == "observe"
+    assert get_policy_mode() == "soft"
 
 
 def test_explicit_off(monkeypatch):
@@ -38,9 +38,9 @@ def test_explicit_hard(monkeypatch):
     assert get_policy_mode() == "hard"
 
 
-def test_invalid_value_defaults_to_observe(monkeypatch):
+def test_invalid_value_defaults_to_soft(monkeypatch):
     monkeypatch.setenv(POLICY_ENV_VAR, "invalid")
-    assert get_policy_mode() == "observe"
+    assert get_policy_mode() == "soft"
 
 
 # ── Observe mode: always allow, record only ────────────────────────

@@ -1,13 +1,15 @@
 """
-Memory Reader — unified read-only facade for all memory sources.
+Memory Reader - unified read-only facade for all memory sources.
 
 L1/L2 are PRIMARY (always readable, not gated).
 Structured memory is SUPPLEMENTARY (gated by GA_CONTEXT_RUNTIME_ENABLED).
 Session/task state is VOLATILE (gated by GA_CONTEXT_RUNTIME_ENABLED).
 
 ContextBuilder MUST consume pre-built MemoryBundle from this reader.
-Never reads files or DB directly — that's the reader's job.
+Never reads files or DB directly - that's the reader's job.
 """
+
+from __future__ import annotations
 
 import os
 import time
@@ -15,17 +17,22 @@ from dataclasses import dataclass, field
 
 from . import _context_enabled
 
-# Priority ordering for sorting
 _PRIORITY_ORDER = {"primary": 0, "supplementary": 1, "volatile": 2}
+_PLANE_ORDER = {
+    "project_memory": 0,
+    "session_memory": 1,
+    "run_memory": 2,
+    "collaboration_memory": 3,
+}
 
 
 @dataclass
 class MemoryBlock:
     """A scoped chunk of memory from any source."""
 
-    source: str                       # "L1" | "L2" | "structured:supplementary" | "session" | "task"
-    source_priority: str              # "primary" | "supplementary" | "volatile"
-    source_path: str | None = None    # file path or db reference
+    source: str
+    source_priority: str
+    source_path: str | None = None
     content: str = ""
     relevance_score: float = 0.0
     chars: int = 0
@@ -34,7 +41,6 @@ class MemoryBlock:
     def __post_init__(self):
         if self.chars == 0 and self.content:
             self.chars = len(self.content)
-        # Clamp score
         self.relevance_score = max(0.0, min(1.0, self.relevance_score))
 
 
@@ -50,27 +56,44 @@ class MemoryBundle:
     def __post_init__(self):
         if self.queried_at == 0.0:
             self.queried_at = time.time()
-        # Always sort blocks by priority DESC, relevance_score DESC
         if self.blocks:
             self.blocks.sort(
                 key=lambda b: (_PRIORITY_ORDER.get(b.source_priority, 99), -b.relevance_score)
             )
         if not self.source_counts:
             counts: dict[str, int] = {}
-            for b in self.blocks:
-                counts[b.source] = counts.get(b.source, 0) + 1
+            for block in self.blocks:
+                counts[block.source] = counts.get(block.source, 0) + 1
             self.source_counts = counts
         if self.total_chars == 0 and self.blocks:
-            self.total_chars = sum(b.chars for b in self.blocks)
+            self.total_chars = sum(block.chars for block in self.blocks)
+
+
+@dataclass
+class MemoryPlane:
+    """Runtime-facing memory plane contract."""
+
+    plane: str
+    description: str
+    scope: str
+    default_sources: list[str] = field(default_factory=list)
+    write_policy: str = "read_only"
+    active_in_modes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class MemoryPlaneReport:
+    """Structured view of runtime memory planes and current attachments."""
+
+    planes: list[MemoryPlane] = field(default_factory=list)
+    attachments: dict[str, dict] = field(default_factory=dict)
+
+    def __post_init__(self):
+        self.planes.sort(key=lambda plane: _PLANE_ORDER.get(plane.plane, 99))
 
 
 class MemoryReader:
-    """Unified read-only facade for all memory sources.
-
-    Usage:
-        reader = MemoryReader(project_root="F:/GAgent-Multi")
-        bundle = reader.scoped_query("auth middleware", project_id="proj_abc")
-    """
+    """Unified read-only facade for all memory sources."""
 
     def __init__(self, project_root: str | None = None, db_path: str | None = None):
         self._project_root = project_root or os.path.abspath(
@@ -78,10 +101,8 @@ class MemoryReader:
         )
         self._db_path = db_path
 
-    # ═══ L1 / L2 — Primary, ALWAYS readable ═══
-
     def read_global_memory(self) -> dict[str, str]:
-        """Return {l1: str, l2: str}. Not gated — L1/L2 are always available."""
+        """Return {l1: str, l2: str}. L1/L2 are always available."""
         memory_dir = os.path.join(self._project_root, "memory")
         result: dict[str, str] = {}
 
@@ -91,8 +112,8 @@ class MemoryReader:
         ]:
             path = os.path.join(memory_dir, filename)
             try:
-                with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                    result[key] = f.read()
+                with open(path, "r", encoding="utf-8", errors="ignore") as handle:
+                    result[key] = handle.read()
             except FileNotFoundError:
                 result[key] = ""
 
@@ -109,7 +130,7 @@ class MemoryReader:
                 source_priority="primary",
                 source_path=os.path.join(self._project_root, "memory", "global_mem_insight.txt"),
                 content=mem["l1"],
-                relevance_score=1.0,  # L1 always relevant
+                relevance_score=1.0,
             ))
 
         if mem.get("l2"):
@@ -118,18 +139,13 @@ class MemoryReader:
                 source_priority="primary",
                 source_path=os.path.join(self._project_root, "memory", "global_mem.txt"),
                 content=mem["l2"],
-                relevance_score=0.9,  # L2 highly relevant
+                relevance_score=0.9,
             ))
 
         return blocks
 
-    # ═══ Structured Memory — Supplementary, gated ═══
-
     def read_structured_memory(self, query: str, limit: int = 5) -> list[MemoryBlock]:
-        """FTS5 search in structured memory. Returns supplementary blocks.
-
-        Gated by GA_CONTEXT_RUNTIME_ENABLED. Returns empty list when disabled.
-        """
+        """FTS5 search in structured memory. Returns supplementary blocks."""
         if not _context_enabled():
             return []
 
@@ -152,7 +168,7 @@ class MemoryReader:
                 source_priority="supplementary",
                 source_path=f"sqlite://{db_path}#{getattr(chunk, 'id', '')}",
                 content=content,
-                relevance_score=0.5,  # FTS5 match — moderate relevance
+                relevance_score=0.5,
                 metadata={
                     "chunk_id": getattr(chunk, "id", ""),
                     "session_id": getattr(chunk, "session_id", None),
@@ -163,8 +179,6 @@ class MemoryReader:
             ))
 
         return blocks
-
-    # ═══ Session / Task State — Volatile, gated ═══
 
     def read_session_state(self, session_id: str) -> "SessionRecord | None":
         """Read session record from SessionStore."""
@@ -199,6 +213,17 @@ class MemoryReader:
         except Exception:
             return []
 
+    def read_session_snapshot(self, session_id: str) -> "SessionSnapshot | None":
+        """Read the persisted runtime snapshot for a session."""
+        if not _context_enabled():
+            return None
+        try:
+            from .session_store import SessionStore
+            store = SessionStore(db_path=self._db_path)
+            return store.get_snapshot(session_id)
+        except Exception:
+            return None
+
     def read_session_history(self, session_id: str, limit: int = 10) -> list[MemoryBlock]:
         """Read recent completed tasks for a session as volatile memory blocks."""
         if not _context_enabled():
@@ -206,8 +231,6 @@ class MemoryReader:
         try:
             from .session_store import SessionStore
             store = SessionStore(db_path=self._db_path)
-            # Query the most recent completed tasks for this session
-            # via the session store's get_last_completed_task
             last = store.get_last_completed_task(session_id)
             if last and last.summary:
                 return [MemoryBlock(
@@ -221,7 +244,100 @@ class MemoryReader:
             pass
         return []
 
-    # ═══ Unified Scoped Query ═══
+    def read_session_snapshot_block(self, session_id: str) -> MemoryBlock | None:
+        """Render the latest runtime snapshot as a volatile memory block."""
+        snapshot = self.read_session_snapshot(session_id)
+        if snapshot is None:
+            return None
+
+        summary_lines = [
+            f"Mode: {snapshot.current_mode}",
+            f"Execution mode: {snapshot.execution_mode}",
+        ]
+        if snapshot.route_target:
+            summary_lines.append(f"Route target: {snapshot.route_target}")
+        if snapshot.pending_tool_call:
+            summary_lines.append(f"Pending tool: {snapshot.pending_tool_call}")
+        if snapshot.last_user_intent:
+            summary_lines.append(f"Last intent: {snapshot.last_user_intent}")
+        if snapshot.pending_steps:
+            summary_lines.append("Pending steps: " + "; ".join(snapshot.pending_steps[:5]))
+        if snapshot.completed_steps:
+            summary_lines.append("Completed steps: " + "; ".join(snapshot.completed_steps[:5]))
+        if snapshot.modified_files:
+            summary_lines.append("Modified files: " + ", ".join(snapshot.modified_files[:5]))
+        if snapshot.review_status:
+            summary_lines.append(f"Review status: {snapshot.review_status}")
+        if snapshot.collaboration_artifacts:
+            summary_lines.append(
+                "Collaboration artifacts: " + ", ".join(sorted(snapshot.collaboration_artifacts.keys())[:5])
+            )
+
+        return MemoryBlock(
+            source="session:snapshot",
+            source_priority="volatile",
+            source_path=f"sqlite://{self._db_path or ''}#session_snapshots/{session_id}",
+            content="\n".join(summary_lines),
+            relevance_score=0.95,
+            metadata={
+                "session_id": snapshot.session_id,
+                "current_mode": snapshot.current_mode,
+                "execution_mode": snapshot.execution_mode,
+                "review_status": snapshot.review_status,
+                "snapshot_version": snapshot.snapshot_version,
+            },
+        )
+
+    def describe_memory_planes(self, session_id: str | None = None) -> MemoryPlaneReport:
+        """Return the memory plane contract for the current runtime design."""
+        attachments: dict[str, dict] = {}
+        if session_id:
+            snapshot = self.read_session_snapshot(session_id)
+            if snapshot is not None:
+                attachments["session_memory"] = {
+                    "session_id": snapshot.session_id,
+                    "current_mode": snapshot.current_mode,
+                    "execution_mode": snapshot.execution_mode,
+                    "has_collaboration_artifacts": bool(snapshot.collaboration_artifacts),
+                }
+
+        return MemoryPlaneReport(
+            planes=[
+                MemoryPlane(
+                    plane="project_memory",
+                    description="Durable project facts and rules.",
+                    scope="project",
+                    default_sources=["L1", "L2", "structured:supplementary"],
+                    write_policy="host_promoted_only",
+                    active_in_modes=["direct_answer", "plan", "code", "diagnose", "review", "recovery"],
+                ),
+                MemoryPlane(
+                    plane="session_memory",
+                    description="Session progress, mode, and recovery state.",
+                    scope="session",
+                    default_sources=["session:snapshot", "task"],
+                    write_policy="runtime_host_only",
+                    active_in_modes=["plan", "code", "diagnose", "review", "recovery", "stopped"],
+                ),
+                MemoryPlane(
+                    plane="run_memory",
+                    description="Transient per-run working context and recent turns.",
+                    scope="run",
+                    default_sources=["recent_turns", "working_memory"],
+                    write_policy="executor_only",
+                    active_in_modes=["direct_answer", "plan", "code", "diagnose", "review"],
+                ),
+                MemoryPlane(
+                    plane="collaboration_memory",
+                    description="Shared artifacts for multi-agent collaboration.",
+                    scope="run",
+                    default_sources=["shared_artifact_store"],
+                    write_policy="multi_agent_only",
+                    active_in_modes=["code", "review", "diagnose"],
+                ),
+            ],
+            attachments=attachments,
+        )
 
     def scoped_query(
         self,
@@ -230,92 +346,90 @@ class MemoryReader:
         session_id: str | None = None,
         max_chars: int = 2000,
     ) -> MemoryBundle:
-        """Assemble a MemoryBundle from all sources, respecting priority order.
-
-        Priority: L1 (primary) → L2 (primary) → structured (supplementary) → session/task (volatile)
-
-        Fills blocks up to max_chars budget.
-        Primary blocks are ALWAYS included (never truncated).
-        Supplementary and volatile blocks fill remaining budget.
-        """
+        """Assemble a MemoryBundle from all sources, respecting priority order."""
         blocks: list[MemoryBlock] = []
         budget = max_chars
 
-        # 1. L1/L2 — PRIMARY, always included
         primary_blocks = self.read_global_memory_blocks()
-        for b in primary_blocks:
-            if b.chars <= budget:
-                blocks.append(b)
-                budget -= b.chars
+        for block in primary_blocks:
+            if block.chars <= budget:
+                blocks.append(block)
+                budget -= block.chars
             else:
-                # Truncate to fit
                 blocks.append(MemoryBlock(
-                    source=b.source,
-                    source_priority=b.source_priority,
-                    source_path=b.source_path,
-                    content=b.content[:budget],
-                    relevance_score=b.relevance_score,
-                    metadata=b.metadata,
+                    source=block.source,
+                    source_priority=block.source_priority,
+                    source_path=block.source_path,
+                    content=block.content[:budget],
+                    relevance_score=block.relevance_score,
+                    metadata=block.metadata,
                 ))
                 budget = 0
 
-        # 2. Structured memory — SUPPLEMENTARY, only if budget remains
         if budget > 50 and user_query:
-            structured = self.read_structured_memory(user_query, limit=5)
-            for b in structured:
+            structured_blocks = self.read_structured_memory(user_query, limit=5)
+            for block in structured_blocks:
                 if budget <= 50:
                     break
-                content = b.content
+                content = block.content
                 if len(content) > budget:
-                    content = content[:budget] + "…"
+                    content = content[:budget] + "..."
                 blocks.append(MemoryBlock(
-                    source=b.source,
-                    source_priority=b.source_priority,
-                    source_path=b.source_path,
+                    source=block.source,
+                    source_priority=block.source_priority,
+                    source_path=block.source_path,
                     content=content,
-                    relevance_score=b.relevance_score,
-                    metadata=b.metadata,
+                    relevance_score=block.relevance_score,
+                    metadata=block.metadata,
                 ))
                 budget -= len(content)
 
-        # 3. Session/Task state — VOLATILE, only if budget remains
         if budget > 50 and session_id:
+            snapshot_block = self.read_session_snapshot_block(session_id)
+            if snapshot_block is not None and budget > 50:
+                snapshot_content = snapshot_block.content
+                if len(snapshot_content) > budget:
+                    snapshot_content = snapshot_content[:budget] + "..."
+                blocks.append(MemoryBlock(
+                    source=snapshot_block.source,
+                    source_priority=snapshot_block.source_priority,
+                    source_path=snapshot_block.source_path,
+                    content=snapshot_content,
+                    relevance_score=snapshot_block.relevance_score,
+                    metadata=snapshot_block.metadata,
+                ))
+                budget -= len(snapshot_content)
+
             session_blocks = self.read_session_history(session_id, limit=5)
-            for b in session_blocks:
+            for block in session_blocks:
                 if budget <= 50:
                     break
-                content = b.content
+                content = block.content
                 if len(content) > budget:
-                    content = content[:budget] + "…"
+                    content = content[:budget] + "..."
                 blocks.append(MemoryBlock(
-                    source=b.source,
-                    source_priority=b.source_priority,
-                    source_path=b.source_path,
+                    source=block.source,
+                    source_priority=block.source_priority,
+                    source_path=block.source_path,
                     content=content,
-                    relevance_score=b.relevance_score,
-                    metadata=b.metadata,
+                    relevance_score=block.relevance_score,
+                    metadata=block.metadata,
                 ))
                 budget -= len(content)
 
-        # Sort: priority DESC, relevance_score DESC
         blocks.sort(key=lambda b: (_PRIORITY_ORDER.get(b.source_priority, 99), -b.relevance_score))
 
         counts: dict[str, int] = {}
-        for b in blocks:
-            counts[b.source] = counts.get(b.source, 0) + 1
+        for block in blocks:
+            counts[block.source] = counts.get(block.source, 0) + 1
 
         return MemoryBundle(
             blocks=blocks,
-            total_chars=sum(b.chars for b in blocks),
+            total_chars=sum(block.chars for block in blocks),
             source_counts=counts,
             queried_at=time.time(),
         )
 
-
-# ═══ Standalone wrapper functions — backward-compatible with core/memory/reader.py ═══
-# These allow core/memory/reader.py to delegate to the canonical MemoryReader
-# without changing its public API. Once all callers migrate to MemoryReader,
-# core/memory/reader.py can be fully deprecated.
 
 _STRUCTURED_MEMORY_ENV_VAR = "GENERIC_AGENT_STRUCTURED_MEMORY"
 
@@ -324,11 +438,12 @@ def _structured_memory_enabled() -> bool:
     return os.environ.get(_STRUCTURED_MEMORY_ENV_VAR, "").strip() == "1"
 
 
+def structured_memory_enabled() -> bool:
+    return _structured_memory_enabled()
+
+
 def read_global_memory(project_root: str | None = None) -> dict:
-    """Standalone wrapper — matches core/memory/reader.py API.
-    Returns {global_mem_insight, global_mem, sources, total_chars}.
-    Delegates to canonical MemoryReader.
-    """
+    """Standalone wrapper matching the legacy reader API."""
     reader = MemoryReader(project_root=project_root)
     raw = reader.read_global_memory()
     result: dict = {
@@ -358,10 +473,7 @@ def search_structured_memory(
     db_path: str | None = None,
     limit: int = 5,
 ) -> dict:
-    """Standalone wrapper — matches core/memory/reader.py API.
-    Returns {results, total_hits, error, disabled}.
-    Delegates to canonical MemoryReader.
-    """
+    """Standalone wrapper matching the legacy reader API."""
     if not _structured_memory_enabled():
         return {"results": [], "total_hits": 0, "error": None, "disabled": True}
 
@@ -369,20 +481,18 @@ def search_structured_memory(
     blocks = reader.read_structured_memory(query, limit=limit)
     results = [
         {
-            "source_path": b.source_path or "",
-            "summary": b.metadata.get("chunk_id", ""),
-            "content_preview": (b.content or "")[:500],
-            "created_at": b.metadata.get("created_at", ""),
+            "source_path": block.source_path or "",
+            "summary": block.metadata.get("chunk_id", ""),
+            "content_preview": (block.content or "")[:500],
+            "created_at": block.metadata.get("created_at", ""),
         }
-        for b in blocks
+        for block in blocks
     ]
     return {"results": results, "total_hits": len(results), "error": None, "disabled": False}
 
 
 def read_working_memory(history: list[str], max_items: int = 20) -> str:
-    """Standalone wrapper — matches core/memory/reader.py API.
-    Delegates to canonical MemoryReader.
-    """
+    """Standalone wrapper matching the legacy reader API."""
     if not history:
         return ""
     h_str = "\n".join(history[-max_items:])
@@ -394,9 +504,7 @@ def read_working_memory(history: list[str], max_items: int = 20) -> str:
 
 
 def build_memory_source_report() -> dict:
-    """Standalone wrapper — matches core/memory/reader.py API.
-    Delegates to canonical MemoryReader.
-    """
+    """Standalone wrapper matching the legacy reader API."""
     reader = MemoryReader()
     global_mem = reader.read_global_memory()
     l1_chars = len(global_mem.get("l1") or "")

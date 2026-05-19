@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 MODULES = [
+    "core.runtime.demo_tool_contract",
     "core.runtime.demo_read_shortcut",
     "core.runtime.demo_read_prefetch",
     "core.quality.demo_answer_quality_context",
@@ -18,6 +19,8 @@ MODULES = [
     "core.memory.demo_write_gate",
     "core.memory.demo_memory_store",
     "core.memory.demo_memory_indexer",
+    "core.tools.demo_schema_selector",
+    "core.tools.demo_schema_registry",
 ]
 
 
@@ -26,7 +29,12 @@ def _repo_root() -> Path:
 
 
 def _module_exists(module_name: str) -> bool:
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        return importlib.util.find_spec(module_name) is not None
+    except Exception:
+        parts = module_name.split(".")
+        parts[-1] = parts[-1] + ".py"
+        return Path(_repo_root(), *parts).is_file()
 
 
 def main() -> int:

@@ -3,7 +3,6 @@ Context Injection Adapters — thin wrappers that convert ContextPacket
 into backend-specific injection formats.
 
 M5: OpenAIContextAdapter for the OpenAI orchestration path.
-    ClassicContextAdapter stub for future Classic path migration.
 
 Design rules:
   1. Adapters only format/reorder — they never read files or compute context.
@@ -158,17 +157,6 @@ class OpenAIContextAdapter:
         )
 
 
-class ClassicContextAdapter:
-    """Stub adapter for the Classic path (future M6).
-
-    Will wrap get_system_prompt() + _build_recent_context() into
-    a single call to ContextBuilder.build().
-    """
-
-    def __init__(self, *, policy_mode: str = "preview"):
-        self._policy_mode = policy_mode
-
-
 # ═══ Helpers ════════════════════════════════════════════════════════════════
 
 def _add_marked(inputs: list[dict[str, Any]], content: str, marker: str) -> None:
@@ -193,7 +181,7 @@ def _serialize_packet(packet: Any) -> str:
         return ""
     if hasattr(packet, "serialize"):
         # ContextBuilder.serialize() if we have the builder
-        return ""
+        return packet.serialize()
     # Fallback: use to_dict and format manually
     try:
         d = packet.to_dict()

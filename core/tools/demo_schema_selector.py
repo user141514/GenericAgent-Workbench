@@ -44,12 +44,15 @@ def main() -> None:
     assert "web_scan" in web_names
     assert "web_execute_js" in web_names
 
+    browser_names = _names(selector.select_tools_for_task("登录网站后上传文件并下载报表", schema))
+    assert "browser_agent" in browser_names
+
     memory_names = _names(selector.select_tools_for_task("回忆上次怎么修的", schema))
     assert "file_read" in memory_names
     assert "code_run" in memory_names
 
     minimal_names = _names(selector.select_tools_for_task("你好，简单聊聊吧", schema))
-    assert minimal_names.issubset({"file_read", "ask_user"})
+    assert minimal_names.issubset({"file_read", "code_run", "ask_user"})
     assert "file_read" in minimal_names
 
     print("demo_schema_selector: OK")

@@ -48,12 +48,16 @@ def _remove_suffix(s, suffix):
 
 
 def _load_module_direct(module_path: str):
-    """Load a .py module directly, bypassing package __init__.py chains.
-
-    This avoids triggering pre-existing type-annotation incompatibilities
-    (e.g. `str | None` in unrelated modules) on Python < 3.10.
-    """
+    """Load a .py module. Uses normal import on Python >= 3.10, falls back
+    to isolated file loading on older Python versions."""
     parts = _remove_suffix(module_path.replace("/", ".").replace("\\", "."), ".py")
+
+    # On Python 3.10+, use normal import (no syntax issues with PEP 604)
+    if sys.version_info >= (3, 10):
+        import importlib as _il
+        return _il.import_module(parts)
+
+    # Legacy path for Python < 3.10: load module file directly with fake stubs
     file_path = PROJECT_ROOT / module_path.replace("/", os.sep)
     if not file_path.exists():
         raise FileNotFoundError(f"Module not found: {file_path}")
@@ -67,8 +71,9 @@ def _load_module_direct(module_path: str):
             @staticmethod
             def _context_enabled():
                 return os.environ.get("GA_CONTEXT_RUNTIME_ENABLED", "1") == "1"
-        sys.modules["core.context"] = _FakeContextModule()
-        sys.modules["core.context.__init__"] = _FakeContextModule()
+        # Use setdefault to avoid clobbering real packages
+        sys.modules.setdefault("core.context", _FakeContextModule())
+        sys.modules.setdefault("core.context.__init__", _FakeContextModule())
 
     if "memory" in module_path:
         class _FakeMemoryModule:
@@ -85,10 +90,14 @@ def _load_module_direct(module_path: str):
 
 
 def _load_legacy_global():
-    """Load core/memory/legacy_global.py, providing minimal dependencies."""
+    """Load core/memory/legacy_global.py. Uses normal import on Python >= 3.10."""
+    if sys.version_info >= (3, 10):
+        import core.memory.legacy_global as mod
+        return mod
+
+    # Legacy path for Python < 3.10
     mod_path = str(PROJECT_ROOT / "core" / "memory" / "legacy_global.py")
 
-    # Provide minimal package stubs
     class _FakeMemoryModule:
         pass
     sys.modules.setdefault("core.memory", _FakeMemoryModule())
@@ -200,13 +209,13 @@ def test_working_memory_empty():
 def test_working_memory_truncation():
     """read_working_memory respects max_items."""
     reader_mod = _load_module_direct("core/context/memory_reader.py")
-    history = [f"[USER]: msg {i}" for i in range(50)]
+    history = [f"[USER]: msg {i:02d}" for i in range(50)]
     result = reader_mod.read_working_memory(history, max_items=5)
     # Only last 5 entries should appear
     for i in range(45):
-        assert f"msg {i}" not in result
+        assert f"msg {i:02d}" not in result, f"msg {i:02d} should NOT be in truncated result"
     for i in range(45, 50):
-        assert f"msg {i}" in result
+        assert f"msg {i:02d}" in result, f"msg {i:02d} should be in truncated result"
 
 
 # ═══ Scoped query ══════════════════════════════════════════════════════════

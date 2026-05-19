@@ -1,0 +1,23 @@
+{
+  "session_id": "1e98e814-058d-460c-9ef6-6a09070db209",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": "executor",
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 16,
+  "last_user_intent": "不是怎么多智能体模式下你回复的还更快了，看看项目文件",
+  "snapshot_version": 1,
+  "updated_at": 1778063353.8969884,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

@@ -89,11 +89,10 @@ class TestRouterChatDetection:
         ("你好", "chat", "greeting"),
         ("谢谢", "chat", "thanks"),
         ("什么是闭包？", "chat", "explanation_question"),
-        # Note: "服务" matches EXECUTOR_KEYWORDS, so this routes executor despite being opinion.
-        # This is a known limitation of the current keyword-based router (baseline behavior).
-        ("你觉得微服务架构怎么样？", "executor", "opinion_question_services_keyword"),
+        ("你觉得微服务架构怎么样？", "chat", "opinion_question_services_keyword"),
         ("Python 和 Java 有什么区别？", "chat", "comparison"),
         ("hi there", "chat", "english_greeting"),
+        ("HELLO there", "chat", "english_greeting_uppercase"),
     ]
 
     @pytest.mark.parametrize("query,expected_target,description", CHAT_QUERIES)
@@ -274,3 +273,16 @@ class TestBaseline:
                 print(f"  '{issue['query']}' -> expected={issue['expected']}, "
                       f"actual={issue['actual']} ({issue['rule']})")
         assert len(known_issues) >= 0, "This should never fail"
+
+
+class TestRouteMode:
+    """Verify the route contract now carries execution mode information."""
+
+    def test_chat_route_stays_single_agent(self):
+        result = RouterRules.match("/chat explain this")
+        assert result.mode == "single_agent"
+        assert result.parallel_subtasks == []
+
+    def test_mixed_specialist_route_switches_to_multi_agent(self):
+        result = RouterRules.match("review this bug against the API docs")
+        assert result.mode == "multi_agent"

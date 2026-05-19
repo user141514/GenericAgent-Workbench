@@ -1,0 +1,23 @@
+{
+  "session_id": "dcc37d2b7fc04d93bfdd8361c8e3c5df",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": null,
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 22,
+  "last_user_intent": "看看E:\\agentlearn\\biojob",
+  "snapshot_version": 1,
+  "updated_at": 1778339648.408049,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import math, os, sys, json, glob, re, base64, time, threading
-import queue as _queue
 from datetime import datetime
 from typing import Optional
 from http.server import HTTPServer, BaseHTTPRequestHandler
@@ -812,7 +811,7 @@ class ChatPanel(QWidget):
         self._settings_health_checked = False
 
         # streaming state
-        self._display_queue: Optional[_queue.Queue] = None
+        self._display_queue: Optional["queue.Queue"] = None
         self._streaming_row: Optional[_MsgRow] = None
         self._streaming_text = ""
         self._user_scrolled_up = False
@@ -1493,38 +1492,45 @@ class ChatPanel(QWidget):
         self._set_stop_mode()
         self._streaming_badge.show()
 
-        self._display_queue = self.agent.put_task(full_prompt, source="user")
-        self._poll_timer.start(40)
+        self._display_queue = None  # legacy, replaced by _drainer below
+
+        # Start streaming via AgentBackend protocol (Phase 6b)
+        from core.agent_factory import ensure_agent_backend
+        from core.protocol.input import AgentInput
+        from core.protocol.drain import AgentOutputDrainer
+
+        backend = ensure_agent_backend(self.agent)
+        channel = backend.submit(AgentInput(query=full_prompt))
+        self._drainer = AgentOutputDrainer(channel)
+        self._poll_timer.start(200)
 
     def _poll_queue(self):
-        if not self._display_queue:
+        d = getattr(self, "_drainer", None)
+        if d is None:
             return
-        try:
-            while True:
-                item = self._display_queue.get_nowait()
-                if "next" in item:
-                    self._streaming_text = item["next"]
-                    if self._streaming_row:
-                        self._streaming_row.set_text(self._streaming_text + " ▌")
-                    self._update_token_usage()
-                    self._scroll_bottom()
-                if "done" in item:
-                    final = item["done"]
-                    if self._streaming_row:
-                        self._streaming_row.set_text(final)
-                        self._streaming_row.set_finished(True)
-                    self._messages.append({"role": "assistant", "content": final})
-                    self._streaming_row = None
-                    self._poll_timer.stop()
-                    self._set_send_mode()
-                    self._streaming_badge.hide()
-                    self.last_reply_time = time.time()
-                    self._update_token_usage()
-                    self._scroll_bottom()
-                    self._auto_save()
-                    break
-        except _queue.Empty:
-            pass
+        d.collect(max_items=20)
+        new_text = d.full_text
+        if new_text and new_text != self._streaming_text:
+            self._streaming_text = new_text
+            if self._streaming_row:
+                self._streaming_row.set_text(self._streaming_text + " ▌")
+            self._update_token_usage()
+            self._scroll_bottom()
+        if d.is_terminal:
+            final = d.full_text or ""
+            if self._streaming_row:
+                self._streaming_row.set_text(final)
+                self._streaming_row.set_finished(True)
+            self._messages.append({"role": "assistant", "content": final})
+            self._streaming_row = None
+            self._poll_timer.stop()
+            self._set_send_mode()
+            self._streaming_badge.hide()
+            self.last_reply_time = time.time()
+            self._update_token_usage()
+            self._scroll_bottom()
+            self._auto_save()
+            self._drainer = None
 
     def _add_msg_row(self, role: str, text: str) -> _MsgRow:
         row = _MsgRow(text, role, on_resend=self._regenerate_response if role != "user" else None)
@@ -1665,6 +1671,11 @@ class ChatPanel(QWidget):
     def _do_stop(self):
         self.agent.abort()
         self._poll_timer.stop()
+        # Drain remaining items via drainer to prevent memory leak
+        d = getattr(self, "_drainer", None)
+        if d is not None:
+            d.collect(max_items=100)
+            self._drainer = None
         self._set_send_mode()
         self._streaming_badge.hide()
         if self._streaming_row:

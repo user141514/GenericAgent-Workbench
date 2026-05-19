@@ -26,8 +26,9 @@ ctypes.windll.user32.ReleaseDC(0, _hdc)
 cwidth = win32api.GetSystemMetrics(win32con.SM_CXSCREEN)  # 逻辑
 cheight = win32api.GetSystemMetrics(win32con.SM_CYSCREEN)
 dpi_scale = cwidth / swidth
-print('Screen width & height:', swidth, sheight)
-print('dpi_scale:', dpi_scale)
+if __name__ == '__main__':
+    print('Screen width & height:', swidth, sheight)
+    print('dpi_scale:', dpi_scale)
 
 def MouseDown(): win32api.mouse_event(win32con.MOUSEEVENTF_LEFTDOWN,0,0) 
 def MouseUp(): win32api.mouse_event(win32con.MOUSEEVENTF_LEFTUP,0,0)

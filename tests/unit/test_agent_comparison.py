@@ -244,15 +244,12 @@ class TestSubclassificationAccuracy:
         ("实现一个二叉树遍历", "code"),
         ("帮我把这段代码改成异步的", "code"),
         ("写一个装饰器来计时", "code"),
-        # Ambiguous: could be code ("add" error handling) or review ("error handling" review).
-        # Keyword router conservatively falls back to executor.
-        ("帮我添加错误处理逻辑", "executor"),
+        ("帮我添加错误处理逻辑", "code"),
     ]
 
     REVIEW_QUERIES = [
         ("审查一下这个函数的线程安全性", "review"),
-        # Ambiguous: "找一下" (research) vs "bug" (review) → executor fallback
-        ("帮我找一下这段代码的 bug", "executor"),
+        ("帮我找一下这段代码的 bug", "review"),
         ("检查代码是否符合 PEP8 规范", "review"),
         ("review 一下这个模块的设计", "review"),
         ("检查这段代码有没有 SQL 注入风险", "review"),

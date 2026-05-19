@@ -3,7 +3,7 @@ import os
 import pytest
 import tempfile
 import time
-from core.context.session_store import SessionStore, SessionRecord, TaskState
+from core.context.session_store import SessionStore, SessionRecord, SessionSnapshot, TaskState
 
 
 @pytest.fixture
@@ -202,8 +202,68 @@ class TestSessionStoreDisabled:
             assert s.update_task(TaskState("t1", "r1")) is None
             assert s.get_active_tasks() == []
             assert s.get_last_completed_task("s1") is None
+            assert s.save_snapshot(SessionSnapshot(session_id="s1", project_id="p1")) is None
+            assert s.get_snapshot("s1") is None
+            assert s.build_recovery_payload("s1") is None
         finally:
             os.unlink(path)
 
 
-import pytest
+class TestSessionSnapshots:
+    """Runtime snapshot persistence for recovery and memory read-side."""
+
+    def test_save_and_get_snapshot(self, store):
+        snapshot = SessionSnapshot(
+            session_id="sess_snapshot_001",
+            project_id="proj_abc",
+            current_mode="recovery",
+            route_target="executor",
+            execution_mode="multi_agent",
+            pending_tool_call="run_tests",
+            completed_steps=["route request", "write patch"],
+            pending_steps=["run tests", "review diff"],
+            modified_files=["core/openai_agentmain.py"],
+            diff_refs=["diff_001"],
+            diagnostic_refs=["diag_001"],
+            review_status="needs_fix",
+            collaboration_artifacts={"notes.md": {"version": 1}},
+            event_log_position=42,
+            last_user_intent="resume task",
+            metadata={"source": "unit-test"},
+        )
+        saved = store.save_snapshot(snapshot)
+        assert saved is not None
+
+        got = store.get_snapshot("sess_snapshot_001")
+        assert got is not None
+        assert got.current_mode == "recovery"
+        assert got.execution_mode == "multi_agent"
+        assert got.pending_steps == ["run tests", "review diff"]
+        assert got.collaboration_artifacts["notes.md"]["version"] == 1
+
+    def test_build_recovery_payload(self, store):
+        store.create_session("sess_recover_001", "proj_abc")
+        store.create_task(TaskState(
+            task_id="task_done",
+            run_id="run_done",
+            status="completed",
+            summary="Implemented routing split",
+            parent_session_id="sess_recover_001",
+            project_id="proj_abc",
+            started_at=time.time() - 10,
+            completed_at=time.time(),
+        ))
+        store.save_snapshot(SessionSnapshot(
+            session_id="sess_recover_001",
+            project_id="proj_abc",
+            current_mode="stopped",
+            execution_mode="single_agent",
+            pending_steps=["review changes"],
+            last_user_intent="continue from last stop",
+        ))
+
+        payload = store.build_recovery_payload("sess_recover_001")
+        assert payload is not None
+        assert payload["session"]["session_id"] == "sess_recover_001"
+        assert payload["snapshot"]["current_mode"] == "stopped"
+        assert payload["last_task"]["summary"] == "Implemented routing split"

@@ -1,0 +1,23 @@
+{
+  "session_id": "5c9961dbd9334eb684b617b73069694d",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": "executor",
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 28,
+  "last_user_intent": "给我看看git上最火的前端项目",
+  "snapshot_version": 1,
+  "updated_at": 1779085744.2849042,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

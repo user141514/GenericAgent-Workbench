@@ -21,7 +21,7 @@ def _all_tools() -> list[dict]:
         _tool("file_read"), _tool("file_write"), _tool("file_patch"),
         _tool("code_run"), _tool("web_scan"), _tool("web_execute_js"),
         _tool("ask_user"), _tool("update_working_checkpoint"),
-        _tool("start_long_term_update"),
+        _tool("start_long_term_update"), _tool("browser_agent"),
     ]
 
 
@@ -76,6 +76,15 @@ class TestToolPermissionBasics:
         )
         names = _names(result)
         assert "web_scan" in names or "web_execute_js" in names
+
+    def test_browser_workflow_query_includes_browser_agent(self):
+        """Multi-step browser workflows should expose browser_agent."""
+        selector = ToolSchemaSelector()
+        result = selector.select_tools_for_task(
+            "登录网站后上传文件并下载报表", _all_tools(), "classic"
+        )
+        names = _names(result)
+        assert "browser_agent" in names
 
     def test_memory_query_includes_read_tools(self):
         """Memory query should include file_read and code_run."""
@@ -147,6 +156,15 @@ class TestToolPermissionBoundary:
         )
         names = _names(result)
         assert "code_run" in names
+
+    def test_review_fix_query_includes_patch_tools(self):
+        """Review+fix tasks should not hide edit tools."""
+        selector = ToolSchemaSelector()
+        result = selector.select_tools_for_task(
+            "审查这个函数并修复 bug", _all_tools(), "classic"
+        )
+        names = _names(result)
+        assert "file_patch" in names or "file_write" in names
 
 
 class TestToolNameExtraction:

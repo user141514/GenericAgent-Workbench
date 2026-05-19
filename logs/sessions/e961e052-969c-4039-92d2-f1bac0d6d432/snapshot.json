@@ -1,0 +1,23 @@
+{
+  "session_id": "e961e052-969c-4039-92d2-f1bac0d6d432",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": "chat",
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 10,
+  "last_user_intent": "我该怎么提升你的回复速度但是尽可能不降低回复质量？",
+  "snapshot_version": 1,
+  "updated_at": 1778062830.1831622,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

@@ -1,0 +1,23 @@
+{
+  "session_id": "7f9c18d5d23f4dc082e76eb1552f41e7",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": "chat",
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 10,
+  "last_user_intent": "不是，你这不是又卡住？",
+  "snapshot_version": 1,
+  "updated_at": 1778210072.428705,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

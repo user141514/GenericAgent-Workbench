@@ -1,0 +1,23 @@
+{
+  "session_id": "5b5b3aa16bd1491bb1abc8705f0c737a",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": null,
+  "execution_mode": "single_agent",
+  "pending_tool_call": "transfer_to_chat_specialist",
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 16,
+  "last_user_intent": "现在卡住的位置，数学上可以非常明确地说：\n\n不是卡在“几何先验能不能定义”，也不是卡在“loss 有没有梯度”，而是卡在：当前 DDPM 的反向采样算子没有保持局部分子几何流形。\n\n更短：\n\n训练侧能把几何信号送到 pos_pred；\n但采样动力学会把这些几何优势重新抹掉。\n1. 当前数学对象\n\n你的真实目标不是生成裸坐标 X，而是生成固定 scaffold 条件下的局部 fragment 几何：\n\nY=(X−a)B\n\n其中：\n\na = scaffold anchor\nB = anchor-local orthonormal frame\nY = fragment 在局部坐标系中的坐标\n\n然后你真正关心的是：\n\nϕ(Y)=[orientation,projection,interface distance matrix,local rotation,scale,shape residual]\n\n所以理想目标是：\n\nY\n^\n∈M\nchem,interface\n\t​\n\n\n也就是生成结果落在局部接口化学几何流形上。\n\n2. DDPM 当前实际在做什么\n\nDDPM 训练时学的是：\n\nϵ\nθ\n\t​\n\n(x\nt\n\t​\n\n,t,c)\n\n或者等价地预测：\n\nx\n^\n0\n\t​\n\n=\nα\nˉ\nt\n\t​\n\n\t​\n\nx\nt\n\t​\n\n−\n1−\nα\nˉ\nt\n\t​\n\n\t​\n\nϵ\nθ\n\t​\n\n(x\nt\n\t​\n\n,t,c)\n\t​\n\n\n你加的 aux loss 作用在：\n\nϕ(\nx\n^\n0\n\t​\n\n)\n\n这一步已经被 Z5 证明是通的：梯度能到 pos_pred，anchor 和 orientation 都能到，bond_ref 对有内部边的 case 也能到。Z6 里再调 orientation、anchor、fallback 后，所有 variant 反而比 PRE 差，尤其 orientation x2 恶化最明显。\n\n所以数学上不是：\n\n∇\nθ\n\t​\n\nL\ngeom\n\t​\n\n=0\n\n而是：\n\n∇\nθ\n\t​\n\nL\ngeom\n\t​\n\n\n=0\n\n但最终：\n\nϕ(x\nfinal\n)\n\n≈ϕ(x\nmid\ngood\n\t​\n\n)\n3. 真正的断点：\nx\n^\n0\n\t​\n\n 到 x\nt−1\n\t​\n\n 的采样算子\n\nDDPM 每一步不是直接输出 \nx\n^\n0\n\t​\n\n，而是走 posterior mean：\n\nx\nt−1\n\t​\n\n=μ\nθ\n\t​\n\n(x\nt\n\t​\n\n,t)+σ\nt\n\t​\n\nz\n\n其中：\n\nμ\nθ\n\t​\n\n(x\nt\n\t​\n\n,t)=c\n1\n\t​\n\n(t)\nx\n^\n0\n\t​\n\n+c\n2\n\t​\n\n(t)x\nt\n\t​\n\n\n这就是关键。\n\n你的几何 target 改的是：\n\nx\n^\n0\n\t​\n\n\n但最终轨迹走的是：\n\nx\nt\n\t​\n\n→μ\nθ\n\t​\n\n→x\nt−1\n\t​\n\n→...→x\n0\nfinal\n\t​\n\n\n如果这个 transition operator 本身会收缩、平均、拉回到错误几何，那么即使某个 timestep 的 \nx\n^\n0\n\t​\n\n 是好的，最终也会被链式采样抹掉。\n\n也就是：\n\nϕ(\nx\n^\n0\n\t​\n\n(t)) 好\n\n不代表：\n\nϕ(x\n0\nfinal\n\t​\n\n) 好\n\n这就是现在真正卡住的位置。\n\n4. 用动力系统语言说\n\n当前 DDPM 反向过程是一个离散随机动力系统：\n\nx\nt−1\n\t​\n\n=F\nθ\n\t​\n\n(x\nt\n\t​\n\n,t)+σ\nt\n\t​\n\nz\n\n你希望它沿着几何流形走：\n\nx\nt\n\t​\n\n→M\nchem,interface\n\t​\n\n\n但实际是：\n\n中间某些 x0_pred 有几何优势\n↓\nposterior mean / reverse chain 继续迭代\n↓\n优势被收敛过程抹平\n↓\nfinal POST geometry 变差\n\n所以当前不是“单步预测问题”，而是：\n\n多步反向动力系统的轨迹稳定性问题。\n\n训练时你优化的是局部一步：\n\nL(\nx\n^\n0\n\t​\n\n(t),x\n0\n\t​\n\n)\n\n但评估的是完整轨迹末端：\n\nΦ(x\n0\nfinal\n\t​\n\n)\n\n两者之间存在 train-inference mismatch：\n\nL\ntrain\n\t​\n\n(\nx\n^\n0\n\t​\n\n)\n\n⇒Φ(x\n0\nfinal\n\t​\n\n)\n5. 用矩阵论语言说\n\nZ3/Z4 已经证明：\n\nanchor-local frame 是合法的\nanchor/exit/attach 定义没有问题\nattach 点位已经饱和\n\n所以问题不在：\n\nY=(X−a)B\n\n这个变换。\n\n真正的问题在：\n\nY\nt−1\n\t​\n\n=Π\nt\n\t​\n\n(Y\nt\n\t​\n\n,\nY\n^\n0\n\t​\n\n)\n\n其中 Π\nt\n\t​\n\n 是 DDPM posterior transition。\n\n你现在发现的是：\n\nϕ(\nY\n^\n0\n\t​\n\n)\n\n可以被 loss 改一点，但：\n\nϕ(Π\nt\n\t​\n\n(Y\nt\n\t​\n\n,\nY\n^\n0\n\t​\n\n))\n\n不稳定，甚至变差。\n\n所以卡点不是局部坐标矩阵 Y 的定义，而是：\n\nDDPM 的 posterior transition Π\nt\n\t​\n\n 不是 geometry-preserving operator。",
+  "snapshot_version": 1,
+  "updated_at": 1778306720.5319731,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

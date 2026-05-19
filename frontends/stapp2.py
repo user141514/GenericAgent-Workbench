@@ -800,10 +800,22 @@ ANTHROPIC_SELECTBOX_SCRIPT = """
     if (hostWin[TIMER_KEY]) {
         hostWin.clearInterval(hostWin[TIMER_KEY]);
     }
-    hostWin[TIMER_KEY] = hostWin.setInterval(applyFixedWidth, 300);
-    hostWin.setTimeout(applyFixedWidth, 60);
-    hostWin.setTimeout(applyFixedWidth, 300);
-    hostWin.setTimeout(applyFixedWidth, 1000);
+    hostWin[TIMER_KEY] = hostWin.setInterval(applyFixedWidth, 1000);
+    // Pause timer when page hidden to save CPU
+    if (!hostWin.__visHandler) {
+        hostWin.__visHandler = function() {
+            if (hostDoc.hidden) {
+                hostWin.clearInterval(hostWin[TIMER_KEY]);
+                hostWin[TIMER_KEY] = null;
+            } else if (!hostWin[TIMER_KEY]) {
+                hostWin[TIMER_KEY] = hostWin.setInterval(applyFixedWidth, 1000);
+                applyFixedWidth();
+            }
+        };
+        hostDoc.addEventListener('visibilitychange', hostWin.__visHandler);
+    }
+    hostWin.setTimeout(applyFixedWidth, 100);
+    hostWin.setTimeout(applyFixedWidth, 500);
     applyFixedWidth();
 })();
 </script>
@@ -945,9 +957,22 @@ def build_header_agent_badge_script() -> str:
     if (hostWin.__genericAgentHeaderBadgeTimer) {
         hostWin.clearInterval(hostWin.__genericAgentHeaderBadgeTimer);
     }
-    hostWin.__genericAgentHeaderBadgeTimer = hostWin.setInterval(ensureBadge, 500);
-    hostWin.setTimeout(ensureBadge, 80);
-    hostWin.setTimeout(ensureBadge, 400);
+    hostWin.__genericAgentHeaderBadgeTimer = hostWin.setInterval(ensureBadge, 2000);
+    // Pause timer when page hidden
+    if (!hostWin.__badgeVisHandler) {
+        hostWin.__badgeVisHandler = function() {
+            if (hostDoc.hidden) {
+                hostWin.clearInterval(hostWin.__genericAgentHeaderBadgeTimer);
+                hostWin.__genericAgentHeaderBadgeTimer = null;
+            } else if (!hostWin.__genericAgentHeaderBadgeTimer) {
+                hostWin.__genericAgentHeaderBadgeTimer = hostWin.setInterval(ensureBadge, 2000);
+                ensureBadge();
+            }
+        };
+        hostDoc.addEventListener('visibilitychange', hostWin.__badgeVisHandler);
+    }
+    hostWin.setTimeout(ensureBadge, 200);
+    hostWin.setTimeout(ensureBadge, 600);
     ensureBadge();
 })();
 </script>
@@ -959,7 +984,7 @@ def init_session_state():
     for key, value in {
         'agent_name': 'GenericAgent', 'streaming': False, 'stopping': False, 'display_queue': None,
         'partial_response': '', 'reply_ts': '', 'current_prompt': '', 'selected_llm_idx': agent.llm_no,
-        'autonomous_enabled': False, 'messages': [],
+        'autonomous_enabled': False, 'messages': [], 'content_event': 0,
     }.items(): st.session_state.setdefault(key, value)
 
 init_session_state()
@@ -969,6 +994,34 @@ st.markdown(ANTHROPIC_CSS, unsafe_allow_html=True)
 st.markdown(build_dynamic_font_css(110.0), unsafe_allow_html=True)
 _embed_html(ANTHROPIC_SELECTBOX_SCRIPT, height=0, width=0)
 _embed_html(build_header_agent_badge_script(), height=0, width=0)
+# Scroll fix: MutationObserver that respects user scroll position
+_SCROLL_FIX_JS = (
+    "<script>"
+    "!function(){var p=window.parent;if(p.__sfx)return;p.__sfx=1;"
+    "var d=p.document,lastEv=0;"
+    "var near=function(){var m=d.querySelector('section.main');"
+    "return m?m.scrollTop+m.clientHeight>=m.scrollHeight-80:1;};"
+    "var scr=function(s){var m=d.querySelector('section.main');"
+    "if(!m)return;var b=m.querySelector('.block-container');"
+    "if(b)b.scrollIntoView({block:'end',behavior:s?'smooth':'instant'});};"
+    "var btn=d.createElement('div');"
+    "btn.textContent='↓';btn.style.cssText="
+    "'position:fixed;bottom:90px;right:30px;z-index:9999;background:#CC785C;"
+    "color:#fff;padding:6px 14px;border-radius:20px;cursor:pointer;display:none;"
+    "font-size:0.85rem;box-shadow:0 2px 8px rgba(0,0,0,0.15)';"
+    "btn.onclick=function(){scr(false);};d.body.appendChild(btn);"
+    "var upd=function(){btn.style.display=near()?'none':'block';};"
+    "var sc=d.querySelector('section.main');"
+    "if(sc)sc.addEventListener('scroll',upd,{passive:true});"
+    "new MutationObserver(function(){"
+    "var ce=d.querySelector('#content-end');"
+    "if(ce){var ev=parseInt(ce.getAttribute('data-content-event')||'0');"
+    "if(ev!==lastEv){lastEv=ev;if(near())setTimeout(function(){scr(true);},150);}}"
+    "upd();}).observe(d.querySelector('section.main .block-container')||d.body,"
+    "{childList:1,subtree:1});}()"
+    "</script>"
+)
+_embed_html(_SCROLL_FIX_JS, height=0)
 
 st.session_state.agent_name = 'Generic Agent'
 with st.chat_message("assistant"):
@@ -998,30 +1051,35 @@ with st.sidebar: render_sidebar()
 
 
 def start_agent_task(prompt):
-    st.session_state.display_queue = agent.put_task(prompt, source="user")
+    """Submit task via AgentBackend protocol — Phase 6 migration."""
+    from core.protocol.input import AgentInput
+    from core.protocol.drain import AgentOutputDrainer
+
+    channel = agent.submit(AgentInput(query=prompt))
+    st.session_state._channel = channel
+    st.session_state._drainer = AgentOutputDrainer(channel)
     st.session_state.streaming, st.session_state.stopping, st.session_state.partial_response = True, False, ''
     st.session_state.reply_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     st.session_state.current_prompt = prompt
 
 
 def poll_agent_output(max_items=20):
-    q = st.session_state.display_queue
-    if q is None:
+    d = st.session_state.get("_drainer")
+    if d is None:
         st.session_state.streaming = False
         return False
-    done = False
-    for _ in range(max_items):
-        try:
-            item = q.get_nowait()
-        except queue.Empty:
-            break
-        if 'next' in item: st.session_state.partial_response = item['next']
-        if 'done' in item:
-            st.session_state.partial_response = item['done']
-            done = True
-            break
-    if done: st.session_state.streaming = st.session_state.stopping = False; st.session_state.display_queue = None
-    return done
+    # Sync stop flag to drainer so it skips non-terminal chunks
+    d.stop_requested = st.session_state.stopping
+    d.collect(max_items=max_items)
+    st.session_state.partial_response = d.full_text
+    if d.is_terminal:
+        st.session_state.streaming = st.session_state.stopping = False
+        if d.is_stopped:
+            st.session_state.partial_response = d.full_text or "(已停止)"
+        st.session_state._channel = None
+        st.session_state._drainer = None
+        return True
+    return False
 
 
 def _get_response_segments(text):
@@ -1036,6 +1094,7 @@ def finish_streaming_message():
     reply_ts = st.session_state.reply_ts
     st.session_state.messages.extend({"role": "assistant", "content": seg, "time": reply_ts} for seg in _get_response_segments(st.session_state.partial_response))
     st.session_state.last_reply_time = int(time.time())
+    st.session_state.content_event += 1
     st.session_state.partial_response = st.session_state.reply_ts = st.session_state.current_prompt = ''
 
 def render_streaming_area():
@@ -1043,19 +1102,40 @@ def render_streaming_area():
     with st.container():
         st.markdown('<span class="stop-btn-anchor"></span>', unsafe_allow_html=True)
         if st.button("⏹️ 停止生成", type="primary"):
-            agent.abort(); st.session_state.stopping = True; st.toast("已发送停止信号"); st.rerun()
+            agent.abort()
+            st.session_state.stopping = True
+            st.session_state.stop_requested_at = time.time()
+            d = st.session_state.get("_drainer")
+            if d is not None:
+                d.collect(max_items=100)
+            st.toast("已发送停止信号")
+            st.rerun()
     reply_ts = st.session_state.reply_ts
     with st.empty().container():
         segments = _get_response_segments(st.session_state.partial_response)
         for i, seg in enumerate(segments): render_message("assistant", seg + ("" if i < len(segments) - 1 else "▌"), ts=reply_ts, unsafe_allow_html=False)
-    if poll_agent_output(): finish_streaming_message()
-    else: time.sleep(0.2)
+    done = poll_agent_output()
+    # Force-complete after stop timeout
+    if not done and st.session_state.stopping:
+        elapsed = time.time() - st.session_state.get("stop_requested_at", time.time())
+        if elapsed > 1.5:
+            done = True
+    if done:
+        finish_streaming_message()
+    else:
+        time.sleep(0.2)
     st.rerun()
 
 for msg in st.session_state.messages: render_message(msg["role"], msg["content"], ts=msg.get("time", ""), unsafe_allow_html=True)
+# Scroll anchor — placed after all messages
+st.markdown(
+    f'<div id="content-end" data-content-event="{st.session_state.content_event}"></div>',
+    unsafe_allow_html=True,
+)
 if st.session_state.streaming: render_streaming_area()
 if prompt := st.chat_input("请输入指令", disabled=st.session_state.streaming):
     st.session_state.messages.append({"role": "user", "content": prompt, "time": datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
+    st.session_state.content_event += 1
     start_agent_task(prompt)
     st.rerun()
 

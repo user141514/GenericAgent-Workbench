@@ -8,7 +8,7 @@ string matching while keeping the fallback path available for ambiguous cases.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 
@@ -17,6 +17,8 @@ class RouteResult:
     target: str | None  # "chat" / "executor" / None
     matched_rule: str = ""
     confidence: float = 1.0
+    mode: str = "single_agent"
+    parallel_subtasks: list[str] = field(default_factory=list)
 
 
 class RouterRules:
@@ -35,7 +37,9 @@ class RouterRules:
         "打开链接", "点击", "输入", "填写", "提交",
         # System operations.
         "命令", "终端", "shell", "bash", "cmd", "powershell",
-        "进程", "服务", "启动", "停止", "重启",
+        "进程", "服务状态", "服务日志", "启动服务", "停止服务", "重启服务",
+        "systemctl", "service ", "service.exe", "daemon", "pid",
+        "启动", "停止", "重启",
         # Development workflow.
         "git", "commit", "push", "pull", "clone", "merge",
         "调试", "测试", "build", "编译",
@@ -61,12 +65,12 @@ class RouterRules:
     CODE_KEYWORDS = [
         # Code writing / modification.
         "写一个", "写代码", "编写", "实现一个", "添加一个",
-        "加一个", "加功能", "修改代码", "改代码", "重构", "重写",
+        "加一个", "加功能", "添加", "修改代码", "改代码", "重构", "重写",
         "创建类", "新建", "生成代码", "实现功能", "开发",
         "写段", "写个", "帮我写", "写函数", "写方法", "写接口",
         "写模块", "代码实现", "编程",
         # More code variants (multi-word only to avoid noise)
-        "改成", "改一下", "修改", "添加", "实现", "增加功能",
+        "改成", "改一下", "修改", "实现", "增加功能", "错误处理", "异常处理",
         "优化代码", "改进代码", "完善代码",
         "提取方法", "封装成", "抽象出",
         "算法实现", "数据结构", "设计模式", "单例模式", "工厂模式",
@@ -190,96 +194,251 @@ class RouterRules:
         "验证",
     ]
 
+    CHAT_INTENT_HINTS = [
+        "你觉得",
+        "你认为",
+        "怎么看",
+        "怎么看待",
+        "什么是",
+        "为什么",
+        "如何理解",
+        "怎么理解",
+        "有什么区别",
+        "优点",
+        "缺点",
+        "好处",
+        "坏处",
+    ]
+
+    FILE_OR_PATH_PATTERN = re.compile(
+        r"([a-zA-Z]:\\|/|\.?/)?[\w.\-\\/]+\.(py|js|ts|tsx|jsx|json|ya?ml|toml|ini|cfg|md|txt|sh|ps1|bat|java|go|rs|c|cpp|h)\b"
+    )
+
     # Pre-compiled regex patterns (built once at class-load time).
     _EXCLUDE_RES = [re.compile(p) for p in EXCLUDE_PATTERNS]  # type: ignore[name-defined]
     _COMMAND_RES = [(re.compile(p), t) for p, t in COMMAND_PATTERNS]  # type: ignore[name-defined]
+    _ACTION_START_VERBS_LOWER = tuple(v.lower() for v in ACTION_START_VERBS)
+    _CHAT_INTENT_HINTS_LOWER = tuple(v.lower() for v in CHAT_INTENT_HINTS)
+
+    @staticmethod
+    def _normalize(query: str) -> str:
+        return " ".join(str(query or "").strip().lower().split())
+
+    @classmethod
+    def _count_hits(cls, normalized_query: str, keywords: list[str]) -> int:
+        return sum(1 for kw in keywords if kw.lower() in normalized_query)
+
+    @classmethod
+    def keyword_hit_counts(cls, query: str) -> dict[str, int]:
+        normalized = cls._normalize(query)
+        return {
+            "executor": cls._count_hits(normalized, cls.EXECUTOR_KEYWORDS),
+            "chat": cls._count_hits(normalized, cls.CHAT_KEYWORDS),
+            "code": cls._count_hits(normalized, cls.CODE_KEYWORDS),
+            "review": cls._count_hits(normalized, cls.REVIEW_KEYWORDS),
+            "research": cls._count_hits(normalized, cls.RESEARCH_KEYWORDS),
+        }
+
+    @classmethod
+    def _looks_like_chat_intent(cls, query: str, normalized_query: str) -> bool:
+        if any(hint in normalized_query for hint in cls._CHAT_INTENT_HINTS_LOWER):
+            return True
+        if query.endswith(("？", "?")) and not any(normalized_query.startswith(v) for v in cls._ACTION_START_VERBS_LOWER):
+            return True
+        return False
+
+    @classmethod
+    def _has_file_or_path_signal(cls, query: str) -> bool:
+        return bool(cls.FILE_OR_PATH_PATTERN.search(query or ""))
+
+    @staticmethod
+    def _count_active_specialists(*hits: int) -> int:
+        return sum(1 for hit in hits if hit > 0)
+
+    @classmethod
+    def _derive_mode(
+        cls,
+        target: str | None,
+        code_hits: int,
+        review_hits: int,
+        research_hits: int,
+        parallel_subtasks: list[str] | None = None,
+    ) -> tuple[str, list[str]]:
+        subtasks = list(parallel_subtasks or [])
+        specialist_count = cls._count_active_specialists(code_hits, review_hits, research_hits)
+
+        if target == "chat":
+            return "single_agent", []
+        if subtasks:
+            return "multi_agent", subtasks
+        if specialist_count >= 2:
+            return "multi_agent", []
+        return "single_agent", []
+
+    @classmethod
+    def _build_result(
+        cls,
+        *,
+        target: str | None,
+        matched_rule: str = "",
+        confidence: float = 1.0,
+        code_hits: int = 0,
+        review_hits: int = 0,
+        research_hits: int = 0,
+        parallel_subtasks: list[str] | None = None,
+    ) -> RouteResult:
+        mode, subtasks = cls._derive_mode(
+            target=target,
+            code_hits=code_hits,
+            review_hits=review_hits,
+            research_hits=research_hits,
+            parallel_subtasks=parallel_subtasks,
+        )
+        return RouteResult(
+            target=target,
+            matched_rule=matched_rule,
+            confidence=confidence,
+            mode=mode,
+            parallel_subtasks=subtasks,
+        )
 
     @classmethod
     def match(cls, query: str) -> RouteResult:
         if not query or not query.strip():
-            return RouteResult(target=None)
+            return cls._build_result(target=None)
 
         query = query.strip()
-        query_lower = query.lower()
+        query_lower = cls._normalize(query)
+        parallel_subtasks = cls.try_parallel_split(query) or []
 
         # Pre-compiled exclude pattern check
         for pattern in cls._EXCLUDE_RES:
             if pattern.search(query):
-                return RouteResult(target=None, matched_rule="excluded")
+                return cls._build_result(target=None, matched_rule="excluded")
+
+        hits = cls.keyword_hit_counts(query)
+        executor_hits = hits["executor"]
+        chat_hits = hits["chat"]
+        code_hits = hits["code"]
+        review_hits = hits["review"]
+        research_hits = hits["research"]
 
         # Pre-compiled command pattern check
         for pattern, target in cls._COMMAND_RES:
             if pattern.match(query_lower):
-                return RouteResult(
+                return cls._build_result(
                     target=target,
                     matched_rule=f"command:{pattern.pattern}",
                     confidence=1.0,
+                    code_hits=code_hits,
+                    review_hits=review_hits,
+                    research_hits=research_hits,
+                    parallel_subtasks=parallel_subtasks,
                 )
 
-        # Single-pass keyword scan: count hits for all categories at once.
-        executor_hits = 0
-        chat_hits = 0
-        code_hits = 0
-        review_hits = 0
-        research_hits = 0
+        file_signal = cls._has_file_or_path_signal(query)
+        chat_intent = cls._looks_like_chat_intent(query, query_lower)
 
-        for kw in cls.EXECUTOR_KEYWORDS:
-            if kw in query:
-                executor_hits += 1
-        for kw in cls.CHAT_KEYWORDS:
-            if kw in query:
-                chat_hits += 1
-        for kw in cls.CODE_KEYWORDS:
-            if kw in query:
-                code_hits += 1
-        for kw in cls.REVIEW_KEYWORDS:
-            if kw in query:
-                review_hits += 1
-        for kw in cls.RESEARCH_KEYWORDS:
-            if kw in query:
-                research_hits += 1
+        executor_score = executor_hits * 1.5 + (1.2 if file_signal else 0.0)
+        chat_score = chat_hits * 1.0 + (1.5 if chat_intent else 0.0)
 
-        executor_score = executor_hits * 1.5
-        chat_score = chat_hits * 1.0
-
-        for verb in cls.ACTION_START_VERBS:
-            if query.startswith(verb):
-                target = cls._pick_subtype(code_hits, review_hits, research_hits, fallback="executor")
-                return RouteResult(
+        for verb in cls._ACTION_START_VERBS_LOWER:
+            if query_lower.startswith(verb):
+                target = cls._pick_subtype(
+                    code_hits,
+                    review_hits,
+                    research_hits,
+                    fallback="executor",
+                    normalized_query=query_lower,
+                )
+                return cls._build_result(
                     target=target,
                     matched_rule=f"action_start:{verb}->{target}",
                     confidence=0.95,
+                    code_hits=code_hits,
+                    review_hits=review_hits,
+                    research_hits=research_hits,
+                    parallel_subtasks=parallel_subtasks,
                 )
 
+        if chat_intent and executor_hits <= 1 and code_hits == 0 and review_hits == 0 and research_hits == 0:
+            return cls._build_result(
+                target="chat",
+                matched_rule=f"chat_intent({chat_hits}c/{executor_hits}e)",
+                confidence=0.92,
+                code_hits=code_hits,
+                review_hits=review_hits,
+                research_hits=research_hits,
+            )
+
         if executor_score > chat_score and executor_hits > 0:
-            target = cls._pick_subtype(code_hits, review_hits, research_hits, fallback="executor")
-            return RouteResult(
+            target = cls._pick_subtype(
+                code_hits,
+                review_hits,
+                research_hits,
+                fallback="executor",
+                normalized_query=query_lower,
+            )
+            return cls._build_result(
                 target=target,
                 matched_rule=f"keywords:{target}({executor_hits}e/{chat_hits}c)",
                 confidence=min(0.9, 0.5 + executor_hits * 0.08),
+                code_hits=code_hits,
+                review_hits=review_hits,
+                research_hits=research_hits,
+                parallel_subtasks=parallel_subtasks,
             )
 
         if chat_score > executor_score and chat_hits > 0:
-            return RouteResult(
+            return cls._build_result(
                 target="chat",
                 matched_rule=f"keywords:chat({chat_hits})",
                 confidence=min(0.9, 0.6 + chat_hits * 0.1),
+                code_hits=code_hits,
+                review_hits=review_hits,
+                research_hits=research_hits,
             )
 
-        return RouteResult(target=None, matched_rule="no_match")
+        return cls._build_result(
+            target=None,
+            matched_rule="no_match",
+            code_hits=code_hits,
+            review_hits=review_hits,
+            research_hits=research_hits,
+            parallel_subtasks=parallel_subtasks,
+        )
 
     @staticmethod
-    def _pick_subtype(code: int, review: int, research: int, fallback: str = "executor") -> str:
+    def _pick_subtype(
+        code: int,
+        review: int,
+        research: int,
+        fallback: str = "executor",
+        normalized_query: str = "",
+    ) -> str:
         """Pick the best sub-type from pre-computed hit counts (no extra scan)."""
         scores = {"code": code, "review": review, "research": research}
         sorted_scores = sorted(scores.items(), key=lambda x: x[1], reverse=True)
         best_target, best_score = sorted_scores[0]
         second_score = sorted_scores[1][1]
 
+        if best_score <= 0:
+            return fallback
+
         if best_score >= 2 and best_score >= second_score + 1:
             return best_target
         if best_score == 1 and second_score == 0:
             return best_target
+
+        if review >= research and review >= code and review > 0:
+            if any(token in normalized_query for token in ("bug", "漏洞", "安全", "审查", "review", "检查", "pytest", "失败", "异常", "错误")):
+                return "review"
+        if code >= review and code >= research and code > 0:
+            if any(token in normalized_query for token in ("写", "实现", "添加", "重构", "开发", "修改代码", "接口", "函数", "类", "错误处理")):
+                return "code"
+        if research >= review and research >= code and research > 0:
+            if any(token in normalized_query for token in ("文档", "搜索", "查", "教程", "用法", "示例", "调研", "日志", "原因")):
+                return "research"
         return fallback
 
     # ── Parallel sub-task detection (Level 3 advancement) ──────────

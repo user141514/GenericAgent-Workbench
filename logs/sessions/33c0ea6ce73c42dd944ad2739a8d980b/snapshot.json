@@ -1,0 +1,23 @@
+{
+  "session_id": "33c0ea6ce73c42dd944ad2739a8d980b",
+  "project_id": "gagent-multi",
+  "current_mode": "completed",
+  "route_target": null,
+  "execution_mode": "single_agent",
+  "pending_tool_call": null,
+  "completed_steps": [],
+  "pending_steps": [],
+  "modified_files": [],
+  "diff_refs": [],
+  "diagnostic_refs": [],
+  "review_status": "pass_with_warnings",
+  "collaboration_artifacts": {},
+  "event_log_position": 22,
+  "last_user_intent": "看看E:\\zuhui\\bioisosteric_diffusion\\results里关于v2_8的报告",
+  "snapshot_version": 1,
+  "updated_at": 1778307734.6407535,
+  "metadata": {
+    "status": "completed",
+    "last_error": ""
+  }
+}

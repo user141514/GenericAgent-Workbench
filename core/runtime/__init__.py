@@ -30,6 +30,9 @@ from .early_stop import (
     early_stop_enabled,
     should_stop_classic_executor,
 )
+from .event_log import RuntimeEventLog
+from .event_schema import RuntimeEvent
+from .host import RuntimeHost
 from .llm_cache import LLMCallCache, LLMCallRecord, is_cache_safe
 from .llm_cache_bridge import (
     CACHE_ENV_VAR,
@@ -60,7 +63,9 @@ from .read_shortcut import (
     detect_read_shortcut,
     read_shortcut_enabled,
 )
+from .session import RuntimeSessionState
 from .shared_store import Artifact, SharedArtifactStore
+from .state_machine import IllegalModeTransition, ModeStateMachine, mode_for_route
 
 __all__ = [
     "CLARIFICATION_GATE_ENV_VAR",
@@ -85,7 +90,11 @@ __all__ = [
     "READ_SHORTCUT_ENV_VAR",
     "ReadPrefetchDecision",
     "ReadShortcutDecision",
+    "RuntimeEvent",
+    "RuntimeEventLog",
+    "RuntimeHost",
     "RuntimeProfiler",
+    "RuntimeSessionState",
     "build_profile_path",
     "build_execution_policy_from_skills",
     "build_read_prefetch_context",
@@ -108,4 +117,7 @@ __all__ = [
     "try_direct_answer_from_tool_result",
     "Artifact",
     "SharedArtifactStore",
+    "IllegalModeTransition",
+    "ModeStateMachine",
+    "mode_for_route",
 ]

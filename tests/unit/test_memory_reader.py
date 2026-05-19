@@ -1,8 +1,10 @@
 """Phase 4: MemoryReader unit tests."""
 import os
 import time
+import tempfile
 import pytest
 from core.context.memory_reader import MemoryReader, MemoryBlock, MemoryBundle
+from core.context.session_store import SessionSnapshot, SessionStore
 
 
 @pytest.fixture
@@ -130,3 +132,92 @@ class TestScopedQuery:
     def test_scoped_query_respects_max_chars(self, reader):
         bundle = reader.scoped_query("test", max_chars=200)
         assert bundle.total_chars <= 200
+
+
+class TestMemoryPlanes:
+    """Memory plane contract for the current runtime design."""
+
+    def test_describe_memory_planes_has_four_layers(self, reader):
+        report = reader.describe_memory_planes()
+        names = [plane.plane for plane in report.planes]
+        assert names == [
+            "project_memory",
+            "session_memory",
+            "run_memory",
+            "collaboration_memory",
+        ]
+
+    def test_session_plane_attachment_uses_snapshot(self, project_root):
+        os.environ["GA_CONTEXT_RUNTIME_ENABLED"] = "1"
+        fd, path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            store = SessionStore(db_path=path)
+            store.save_snapshot(SessionSnapshot(
+                session_id="sess_plane_001",
+                project_id="proj_plane",
+                current_mode="code",
+                execution_mode="multi_agent",
+                collaboration_artifacts={"artifact.py": {"version": 1}},
+            ))
+            reader = MemoryReader(project_root=project_root, db_path=path)
+            report = reader.describe_memory_planes(session_id="sess_plane_001")
+            attachment = report.attachments["session_memory"]
+            assert attachment["current_mode"] == "code"
+            assert attachment["execution_mode"] == "multi_agent"
+            assert attachment["has_collaboration_artifacts"] is True
+        finally:
+            os.unlink(path)
+            os.environ.pop("GA_CONTEXT_RUNTIME_ENABLED", None)
+
+
+class TestSessionSnapshotReadSide:
+    """Snapshot-backed volatile memory blocks."""
+
+    def test_read_session_snapshot_block(self, project_root):
+        os.environ["GA_CONTEXT_RUNTIME_ENABLED"] = "1"
+        fd, path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            store = SessionStore(db_path=path)
+            store.save_snapshot(SessionSnapshot(
+                session_id="sess_block_001",
+                project_id="proj_block",
+                current_mode="recovery",
+                route_target="executor",
+                execution_mode="single_agent",
+                pending_steps=["run tests"],
+                modified_files=["core/router_rules.py"],
+                review_status="needs_fix",
+            ))
+            reader = MemoryReader(project_root=project_root, db_path=path)
+            block = reader.read_session_snapshot_block("sess_block_001")
+            assert block is not None
+            assert block.source == "session:snapshot"
+            assert block.source_priority == "volatile"
+            assert "Mode: recovery" in block.content
+            assert "Modified files: core/router_rules.py" in block.content
+        finally:
+            os.unlink(path)
+            os.environ.pop("GA_CONTEXT_RUNTIME_ENABLED", None)
+
+    def test_scoped_query_includes_snapshot_block(self, project_root):
+        os.environ["GA_CONTEXT_RUNTIME_ENABLED"] = "1"
+        fd, path = tempfile.mkstemp(suffix=".sqlite")
+        os.close(fd)
+        try:
+            store = SessionStore(db_path=path)
+            store.save_snapshot(SessionSnapshot(
+                session_id="sess_scope_001",
+                project_id="proj_scope",
+                current_mode="stopped",
+                execution_mode="multi_agent",
+                pending_steps=["resume review"],
+            ))
+            reader = MemoryReader(project_root=project_root, db_path=path)
+            bundle = reader.scoped_query("resume", session_id="sess_scope_001", max_chars=12000)
+            sources = [block.source for block in bundle.blocks]
+            assert "session:snapshot" in sources
+        finally:
+            os.unlink(path)
+            os.environ.pop("GA_CONTEXT_RUNTIME_ENABLED", None)

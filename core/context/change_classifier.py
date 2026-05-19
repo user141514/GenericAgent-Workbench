@@ -102,27 +102,57 @@ class ChangeClassifier:
         while len(self._executed) > self._max_records:
             self._executed.pop(0)
 
+    # Tool types that count as execution evidence for verification.
+    # file_read alone is insufficient — it doesn't modify anything.
+    _EXECUTION_TOOLS = frozenset({
+        "file_write", "file_patch", "code_run", "bash", "shell",
+        "run_shell", "execute_code", "write_file", "patch_file",
+    })
+
     def verify_against_ledger(self, ledger: Any) -> int:
         """Cross-reference proposals against the ToolEventLedger.
+
+        A proposal is verified only if:
+          1. At least one tool event from the same or later turn is an
+             execution-type tool (write/patch/run, not just file_read).
+          2. AND the tool event's target_path has path-level overlap with
+             file paths mentioned in the proposal summary.
+          3. AND the tool event's turn >= the proposal's turn (temporal guard).
 
         Returns the number of newly verified proposals.
         """
         if not self._enabled():
             return 0
 
+        events: list[Any] = ledger.recent_events(50)
         verified_count = 0
-        recent_tools = {e.tool_name for e in ledger.recent_events(20)}
 
         for proposal in self._proposals:
             if proposal.verified:
                 continue
-            # Simple heuristic: if a tool was called after the proposal
-            # in the same turn, the proposal is likely executed.
-            # This is a lightweight check — full verification requires
-            # semantic matching (future enhancement).
-            if recent_tools:
+
+            # Extract path-like tokens from proposal summary
+            prop_paths = _extract_path_tokens(proposal.summary)
+
+            matching_events: list[str] = []
+            for e in events:
+                # ── Temporal guard: tool must be from same or later turn ──
+                if e.turn < proposal.turn:
+                    continue
+                # ── Tool type guard: must be an execution tool ──
+                if e.tool_name not in self._EXECUTION_TOOLS:
+                    continue
+                # ── Path overlap check ──
+                if prop_paths:
+                    if not _path_overlap(prop_paths, e.target_path):
+                        continue
+                # ── If no path tokens in proposal, fall back to
+                #     verifying if ANY execution tool ran in ≥ same turn ──
+                matching_events.append(e.tool_name)
+
+            if matching_events:
                 proposal.verified = True
-                proposal.tool_evidence = list(recent_tools)[:5]
+                proposal.tool_evidence = matching_events[:5]
                 verified_count += 1
 
         return verified_count
@@ -164,3 +194,47 @@ class ChangeClassifier:
     @staticmethod
     def _enabled() -> bool:
         return os.environ.get("GA_TOOL_EVENT_LEDGER", "").strip() == "1"
+
+
+# ═══ Helpers ════════════════════════════════════════════════════════════════
+
+def _extract_path_tokens(summary: str) -> set[str]:
+    """Extract file-path-like tokens from a proposal summary.
+
+    Matches patterns like: src/auth.py, core/agentmain.py,
+    tests/test_ga.py, README.md, some_file.txt
+    """
+    import re
+
+    tokens: set[str] = set()
+    # Match common path patterns: dir/file.ext, file.ext
+    for m in re.finditer(r"[\w/.\-]+\.\w{1,6}", summary):
+        token = m.group(0)
+        # Filter out noise: must contain a dot-separated extension
+        # and look like a file path (not a URL or version string)
+        if "/" in token or "\\" in token or (
+            token.count(".") == 1 and len(token) > 4
+        ):
+            tokens.add(token.lower())
+    return tokens
+
+
+def _path_overlap(prop_paths: set[str], target_path: str | None) -> bool:
+    """Check if any proposal path token overlaps with the target_path."""
+    if not target_path:
+        return False
+
+    target_lower = target_path.lower()
+    target_stem = target_lower.rsplit(".", 1)[0] if "." in target_lower else target_lower
+
+    for pp in prop_paths:
+        pp_stem = pp.rsplit(".", 1)[0] if "." in pp else pp
+        if pp_stem in target_stem or target_stem in pp_stem:
+            return True
+        # Check individual path components
+        pp_parts = set(pp_stem.replace("\\", "/").split("/"))
+        target_parts = set(target_stem.replace("\\", "/").split("/"))
+        if pp_parts & target_parts:
+            return True
+
+    return False

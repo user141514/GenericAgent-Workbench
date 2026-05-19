@@ -50,7 +50,7 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
         try:
             for line_bytes in iter(proc.stdout.readline, b''):
                 try: line = line_bytes.decode('utf-8')
-                except UnicodeDecodeError: line = line_bytes.decode('gbk', errors='ignore')
+                except UnicodeDecodeError: line = line_bytes.decode('utf-8', errors='replace')
                 logs.append(line)
                 try: print(line, end="") 
                 except: pass
@@ -170,16 +170,76 @@ def log_memory_access(path):
     stats[fname] = {'count': stats.get(fname, {}).get('count', 0) + 1, 'last': datetime.now().strftime('%Y-%m-%d')}
     with open(stats_file, 'w', encoding='utf-8') as f: json.dump(stats, f, indent=2, ensure_ascii=False)
 
+def _is_navigation_script(script):
+    """Detect if a JS script is a page navigation (location change)."""
+    import re as _re
+    nav_pat = _re.compile(
+        r'(?:window\.)?location\s*\.\s*(?:href\s*=|assign\s*\(|replace\s*\()|'
+        r'(?:window\.)?location\s*=\s*[\'"]'
+    )
+    return bool(nav_pat.search(script))
+
+
 def web_execute_js(script, switch_tab_id=None, no_monitor=False):
-    """执行 JS 脚本来控制浏览器，并捕获结果和页面变化"""
+    """Execute JS in browser tab. Navigation scripts are handled with a
+    short-circuit path: execute → wait for tab reconnect → return new URL."""
     global driver
     try:
-        if driver is None: first_init_driver()
-        if len(driver.get_all_sessions()) == 0: return {"status": "error", "msg": "没有可用的浏览器标签页，查L3记忆分析原因。"}
-        if switch_tab_id: driver.default_session_id = switch_tab_id
+        if driver is None:
+            first_init_driver()
+        if len(driver.get_all_sessions()) == 0:
+            return {"status": "error", "msg": "没有可用的浏览器标签页，查L3记忆分析原因。"}
+        if switch_tab_id:
+            driver.default_session_id = switch_tab_id
+
+        is_nav = _is_navigation_script(script)
+
+        if is_nav:
+            # Navigation path: don't wait for JS return (page will unload)
+            before_sids = set(driver.get_session_dict().keys())
+            try:
+                driver.execute_js(script)
+            except Exception:
+                pass  # expected — connection drops during navigation
+
+            # Wait for tab to reconnect with new URL (up to 20s)
+            for _ in range(40):
+                time.sleep(0.5)
+                after = driver.get_session_dict()
+                new_sids = {k: v for k, v in after.items() if k not in before_sids}
+                if new_sids:
+                    new_tab = list(new_sids.items())[0]
+                    return {
+                        "status": "success",
+                        "navigated": True,
+                        "new_url": new_tab[1],
+                        "tab_id": new_tab[0],
+                        "suggestion": f"已导航到 {new_tab[1]}",
+                    }
+                # Check if current tab reconnected with new URL
+                sid = driver.default_session_id
+                if sid and sid in after and after[sid] != before_sids.get(sid, ""):
+                    return {
+                        "status": "success",
+                        "navigated": True,
+                        "new_url": after[sid],
+                        "tab_id": sid,
+                        "suggestion": f"已导航到 {after[sid]}",
+                    }
+
+            return {
+                "status": "timeout",
+                "suggestion": (
+                    "导航超时（>20s），可能原因：浏览器扩展未响应、网络问题、"
+                    "目标URL无效。检查浏览器是否开启，或尝试 browser_agent 工具。"
+                ),
+            }
+
+        # Non-navigation path: normal JS execution
         result = simphtml.execute_js_rich(script, driver, no_monitor=no_monitor)
         return result
-    except Exception as e: return {"status": "error", "msg": format_error(e)}
+    except Exception as e:
+        return {"status": "error", "msg": format_error(e)}
 
 def expand_file_refs(text, base_dir=None):
     """展开文本中的 {{file:路径:起始行:结束行}} 引用为实际文件内容。
@@ -273,6 +333,14 @@ class GenericAgentHandler(BaseHandler):
         self.cwd = cwd;  self.current_turn = 0
         self.history_info = last_history if last_history else []
         self.code_stop_signal = []
+
+    def status_callback(self, payload):
+        try:
+            emit = getattr(self.parent, "_emit_status_event", None)
+            if emit is not None:
+                emit(payload)
+        except Exception:
+            pass
 
     def _get_abs_path(self, path):
         if not path: return ""
@@ -563,8 +631,13 @@ class GenericAgentHandler(BaseHandler):
         result = smart_format(result, max_str_len=20000, omit_str='\n\n[omitted long content]\n\n')
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         log_memory_access(path)
-        if 'memory' in path or 'sop' in path: 
-            next_prompt += "\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取sop中的关键点（特别是靠后的）update working memory."
+        if 'memory' in path or 'sop' in path or '_sop' in path.lower():
+            next_prompt += (
+                "\n[SYSTEM TIPS] 正在读取记忆/SOP文件。"
+                '⚠️ L1索引中的括号摘要（如「禁pyautogui」）仅为4-8字提示，'
+                "不代表完整约束——必须逐条提取正文中的关键步骤/禁止项/前置条件。"
+                "执行前用 update_working_checkpoint 保存要点以防遗忘。"
+            )
         return StepOutcome(result, next_prompt=next_prompt)
     
     def _in_plan_mode(self): return self.working.get('in_plan_mode')
@@ -666,7 +739,173 @@ class GenericAgentHandler(BaseHandler):
             except: pass
         return prompt
 
-    def _safe_summary(self, response, tool_calls, turn):
+    @staticmethod
+    def _summary_lang_en():
+        return os.environ.get('GA_LANG') == 'en'
+
+    @staticmethod
+    def _summary_path(path):
+        raw = str(path or "").strip().replace("\\", "/")
+        if not raw:
+            return ""
+        try:
+            if os.path.isabs(raw):
+                rel = os.path.relpath(raw, PROJECT_ROOT).replace("\\", "/")
+                if not rel.startswith(".."):
+                    raw = rel
+        except Exception:
+            pass
+        return raw if len(raw) <= 48 else os.path.basename(raw)
+
+    @staticmethod
+    def _summary_error_hint(text):
+        content = str(text or "")
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        for line in lines:
+            lowered = line.lower()
+            if any(token in lowered for token in ("traceback", "error", "failed", "timeout", "http ", "exception", "not found")):
+                return smart_format(line, max_str_len=90)
+        return ""
+
+    def _summary_is_low_signal(self, summary, tool_calls):
+        cleaned = " ".join(str(summary or "").split()).strip()
+        if not cleaned:
+            return True
+        lowered = cleaned.lower()
+        if any(token in cleaned for token in ("<tool_use>", "</tool_use>", "{", "}", "```")):
+            return True
+        if len(cleaned) < 6:
+            return True
+        generic_markers = (
+            "继续处理", "继续分析", "继续排查", "继续执行", "继续修改",
+            "准备下一步", "准备继续", "处理中", "开始处理",
+            "continue working", "continue analysis", "next step", "keep debugging",
+        )
+        factual_anchors = (
+            "已", "发现", "定位", "读取", "修改", "运行", "测试", "报错", "错误",
+            "文件", "日志", "页面", "文档", "路径", "结果", "验证", "搜索",
+            "read", "patch", "write", "run", "test", "error", "file", "log",
+        )
+        has_anchor = any(anchor in cleaned for anchor in factual_anchors) or bool(re.search(r"[/\\._:-]|\d", cleaned))
+        if any(marker in lowered for marker in generic_markers) and not has_anchor:
+            return True
+        if tool_calls and not has_anchor and len(cleaned) < 18:
+            return True
+        return False
+
+    def _fallback_summary_from_tool(self, tool_calls, tool_results):
+        lang_en = self._summary_lang_en()
+        tool_idx = None
+        tool_call = None
+        for idx in range(len(tool_calls or []) - 1, -1, -1):
+            tc = tool_calls[idx] or {}
+            if tc.get("tool_name") and tc.get("tool_name") != "no_tool":
+                tool_idx = idx
+                tool_call = tc
+                break
+        if tool_call is None:
+            return "Answered the user directly" if lang_en else "直接回答了用户问题"
+
+        tool_name = str(tool_call.get("tool_name") or "")
+        args = tool_call.get("args") or {}
+        result_text = ""
+        if isinstance(tool_results, list) and tool_idx is not None and tool_idx < len(tool_results):
+            payload = tool_results[tool_idx]
+            if isinstance(payload, dict):
+                result_text = str(payload.get("content") or "")
+            elif payload is not None:
+                result_text = str(payload)
+        lowered_result = result_text.lower()
+        path = self._summary_path(
+            args.get("path")
+            or args.get("cwd")
+            or args.get("save_to_file")
+        )
+        keyword = str(args.get("keyword") or "").strip()
+        err_hint = self._summary_error_hint(result_text)
+
+        if tool_name == "file_read":
+            target = path or ("file" if lang_en else "文件")
+            if keyword and "not found" in lowered_result:
+                return (
+                    f"Keyword {keyword} not found in {target}; next widen search"
+                    if lang_en else
+                    f"未在{target}找到{keyword}，准备扩大搜索"
+                )
+            if err_hint:
+                return (
+                    f"Read {target} failed: {err_hint}; next inspect path/context"
+                    if lang_en else
+                    f"读取{target}失败：{err_hint}，准备检查路径和上下文"
+                )
+            if keyword:
+                return (
+                    f"Located {keyword} in {target}; next inspect details"
+                    if lang_en else
+                    f"已在{target}定位{keyword}，准备继续分析"
+                )
+            return f"Read {target}; next use the content" if lang_en else f"已读取{target}，准备基于内容继续"
+
+        if tool_name in ("file_patch", "file_write"):
+            target = path or ("file" if lang_en else "文件")
+            success = not err_hint and any(token in lowered_result for token in ('"success"', "✅", "status", "writed_bytes"))
+            if success:
+                return f"Updated {target}; next verify the change" if lang_en else f"已修改{target}，准备验证结果"
+            if err_hint:
+                return (
+                    f"Edit on {target} failed: {err_hint}; next re-read context"
+                    if lang_en else
+                    f"修改{target}失败：{err_hint}，准备重新读取上下文"
+                )
+            return f"Edited {target}; next inspect result" if lang_en else f"已改动{target}，准备检查结果"
+
+        if tool_name == "code_run":
+            script = str(args.get("script") or "").strip()
+            script_lower = script.lower()
+            if "timeout" in lowered_result:
+                return "Execution timed out; next inspect blocking point" if lang_en else "运行超时，准备排查阻塞点"
+            if err_hint:
+                return f"Execution failed: {err_hint}; next debug" if lang_en else f"运行报错：{err_hint}，准备排查原因"
+            failed = re.search(r"(\d+)\s+failed", lowered_result)
+            passed = re.search(r"(\d+)\s+passed", lowered_result)
+            if "pytest" in script_lower or "pytest" in lowered_result or "test" in script_lower:
+                if failed or passed:
+                    fail_txt = failed.group(1) if failed else "0"
+                    pass_txt = passed.group(1) if passed else "0"
+                    return (
+                        f"Ran tests: {pass_txt} passed, {fail_txt} failed; next fix failures"
+                        if lang_en else
+                        f"已运行测试：{pass_txt}通过，{fail_txt}失败，准备修复问题"
+                    )
+                return "Ran tests; next inspect failures" if lang_en else "已运行测试，准备分析结果"
+            return "Executed code and got output; next inspect result" if lang_en else "已执行代码并拿到输出，准备分析结果"
+
+        if tool_name == "web_scan":
+            return "Scanned page structure; next locate the target element" if lang_en else "已扫描页面结构，准备定位目标元素"
+
+        if tool_name == "web_execute_js":
+            if err_hint:
+                return f"JS execution failed: {err_hint}; next inspect DOM/state" if lang_en else f"页面脚本执行失败：{err_hint}，准备检查DOM和页面状态"
+            return "Executed page JS and captured result; next continue from page state" if lang_en else "已执行页面脚本并获得结果，准备继续页面操作"
+
+        if tool_name == "browser_agent":
+            if any(token in lowered_result for token in ("\"success\": true", "'success': true")):
+                return "Browser workflow completed; next consolidate findings" if lang_en else "浏览器流程已完成，准备整理结论"
+            return "Browser workflow ran; next inspect its findings" if lang_en else "浏览器流程已执行，准备分析结果"
+
+        if tool_name == "update_working_checkpoint":
+            return "Updated working checkpoint; next continue with saved constraints" if lang_en else "已更新工作记忆，准备按保存的约束继续"
+
+        if tool_name == "ask_user":
+            return "Asked the user for a decision/blocker resolution" if lang_en else "已向用户请求关键决策或补充信息"
+
+        if tool_name == "start_long_term_update":
+            return "Started long-term memory distillation" if lang_en else "已开始整理长期记忆"
+
+        target = path or tool_name
+        return f"Used {tool_name} on {target}; next inspect result" if lang_en else f"已调用{tool_name}处理{target}，准备继续分析"
+
+    def _safe_summary(self, response, tool_calls, tool_results, turn):
         """Extract and validate summary before saving to history.
 
         Returns (summary_text, is_fallback).
@@ -677,7 +916,7 @@ class GenericAgentHandler(BaseHandler):
         rsumm = re.search(r"<summary>(.*?)</summary>", _c, re.DOTALL)
 
         if rsumm:
-            summary = rsumm.group(1).strip()
+            summary = " ".join(rsumm.group(1).split()).strip()
             user_input = getattr(self, "_last_user_input", "") or ""
             user_lower = str(user_input or "").lower()
 
@@ -699,25 +938,18 @@ class GenericAgentHandler(BaseHandler):
                     _topic_mismatch = True
                     break
 
-            if turn <= 2 and (has_marker or (_topic_mismatch and has_marker)):
+            if turn <= 2 and (has_marker or _topic_mismatch):
                 # Suspicious summary on early turn — use tool-based fallback
                 pass  # fall through to fallback
-            elif summary:
+            elif summary and not self._summary_is_low_signal(summary, tool_calls):
                 return summary, False
 
-        # Fallback: derive summary from tool calls
-        tc = tool_calls[0]
-        tool_name, args = tc['tool_name'], tc['args']
-        clean_args = {k: v for k, v in args.items() if not k.startswith('_')}
-        summary = f"调用工具{tool_name}, args: {clean_args}"
-        if tool_name == 'no_tool':
-            summary = "直接回答了用户问题"
-        return summary, True
+        return self._fallback_summary_from_tool(tool_calls, tool_results), True
 
     def turn_end_callback(self, response, tool_calls, tool_results, turn, next_prompt, exit_reason):
-        summary, fallback_used = self._safe_summary(response, tool_calls, turn)
+        summary, fallback_used = self._safe_summary(response, tool_calls, tool_results, turn)
         if fallback_used:
-            next_prompt += "\n[DANGER] 上一轮遗漏了<summary>，已根据物理动作自动补全。在下次回复中记得<summary>协议。"
+            next_prompt += "\n[DANGER] 上一轮的<summary>缺失、过空或不可信，已根据真实工具动作自动补全。下次必须写事实化<summary>。"
         summary = smart_format(summary, max_str_len=100)
         self.history_info.append(f'[Agent] {summary}')
         if turn % 70 == 0 and 'plan' not in str(self.working.get('related_sop')):
@@ -735,6 +967,24 @@ class GenericAgentHandler(BaseHandler):
         if injkeyinfo: self.working['key_info'] = self.working.get('key_info', '') + f"\n[MASTER] {injkeyinfo}"
         if injprompt: next_prompt += f"\n\n[MASTER] {injprompt}\n"
         for hook in getattr(self.parent, '_turn_end_hooks', {}).values(): hook(locals())  # current readonly
+        # ── Step-level reflection (LIVE-SWE-AGENT conditional trigger) ──
+        _error_seen = False
+        for tr in (tool_results or []):
+            c = str(tr.get('content', '')).lower()
+            if any(tok in c for tok in ('error:', 'traceback', 'exception', 'traceback (most recent call last)')):
+                _error_seen = True
+                break
+        _repeat_seen = False
+        if not _error_seen and tool_calls:
+            _names = [tc.get('name', '') for tc in tool_calls]
+            _last = getattr(self, '_reflect_last_names', None)
+            if _last == _names:
+                _repeat_seen = True
+            self._reflect_last_names = _names
+        if _error_seen:
+            next_prompt += '\n[REFLECT] Tool returned an error. What capability gap caused this? Should you create a helper script via code_run or change approach?'
+        elif _repeat_seen:
+            next_prompt += '\n[REFLECT] Same tool sequence as last turn. Are you stuck? Is a reusable tool missing?'
         return next_prompt
 
 def get_global_memory():

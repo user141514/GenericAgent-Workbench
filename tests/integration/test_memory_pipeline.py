@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from core.memory.reader import (
+from core.context.memory_reader import (
     build_memory_source_report,
     read_global_memory,
     read_working_memory,

@@ -1,14 +1,14 @@
 {
   "你好，今天天气怎么样？": {
     "target": "chat",
-    "matched_rule": "keywords:chat(1)",
-    "confidence": 0.7,
+    "matched_rule": "chat_intent(1c/0e)",
+    "confidence": 0.92,
     "expected": "chat"
   },
   "什么是 Python 的 GIL？": {
     "target": "chat",
-    "matched_rule": "keywords:chat(1)",
-    "confidence": 0.7,
+    "matched_rule": "chat_intent(1c/0e)",
+    "confidence": 0.92,
     "expected": "chat"
   },
   "谢谢你的帮助": {
@@ -19,14 +19,14 @@
   },
   "你觉得 Rust 和 Go 哪个更好？": {
     "target": "chat",
-    "matched_rule": "keywords:chat(1)",
-    "confidence": 0.7,
+    "matched_rule": "chat_intent(1c/0e)",
+    "confidence": 0.92,
     "expected": "chat"
   },
   "hello, how are you?": {
     "target": "chat",
-    "matched_rule": "keywords:chat(1)",
-    "confidence": 0.7,
+    "matched_rule": "chat_intent(1c/0e)",
+    "confidence": 0.92,
     "expected": "chat"
   },
   "帮我写一个快速排序的 Python 实现": {
@@ -37,7 +37,7 @@
   },
   "修改这个文件把日志级别改成 DEBUG": {
     "target": "code",
-    "matched_rule": "keywords:code(5e/0c)",
+    "matched_rule": "keywords:code(6e/0c)",
     "confidence": 0.9,
     "expected": "executor"
   },
@@ -102,8 +102,8 @@
     "expected": "executor"
   },
   "看一下这个项目的 README 文档": {
-    "target": "executor",
-    "matched_rule": "keywords:executor(1e/0c)",
+    "target": "research",
+    "matched_rule": "keywords:research(1e/0c)",
     "confidence": 0.58,
     "expected": "executor"
   },

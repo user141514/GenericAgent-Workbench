@@ -26,26 +26,25 @@ sys.path.insert(0, str(PROJECT_ROOT))
 # ═══ Helpers ════════════════════════════════════════════════════════════════
 
 def _load_agentmain():
-    """Load core/agentmain.py directly, bypassing __init__.py chains."""
+    """Load core/agentmain.py. Uses normal import on Python >= 3.10, falls back
+    to isolated module loading on older Python versions."""
+    if sys.version_info >= (3, 10):
+        import core.agentmain as mod
+        return mod
+
+    # Legacy path for Python < 3.10: load module file directly
     mod_path = str(PROJECT_ROOT / "core" / "agentmain.py")
     spec = importlib.util.spec_from_file_location("core.agentmain", mod_path)
     mod = importlib.util.module_from_spec(spec)
 
-    # Provide minimal package stubs
-    class _FakeCore:
+    class _Fake:
         pass
-    sys.modules.setdefault("core", _FakeCore())
-    sys.modules.setdefault("core.__init__", _FakeCore())
-
-    class _FakeMemory:
-        pass
-    sys.modules.setdefault("core.memory", _FakeMemory())
-    sys.modules.setdefault("core.memory.__init__", _FakeMemory())
-
-    class _FakeContext:
-        pass
-    sys.modules.setdefault("core.context", _FakeContext())
-    sys.modules.setdefault("core.context.__init__", _FakeContext())
+    for pkg in ["core", "core.__init__", "core.memory", "core.memory.__init__",
+                "core.context", "core.context.__init__", "core.llmcore",
+                "core.llmcore.__init__", "core.runtime", "core.runtime.__init__",
+                "core.quality", "core.quality.__init__", "core.skills",
+                "core.skills.__init__", "core.tools", "core.tools.__init__"]:
+        sys.modules.setdefault(pkg, _Fake())
 
     sys.modules["core.agentmain"] = mod
     try:
@@ -125,8 +124,9 @@ def test_build_recent_context_uses_unified_format():
     ]
 
     result = mod._build_recent_context(history, "continue")
-    assert "[RECENT CONTEXT]" in result or "[RECENT CONVERSATION]" in result
-    assert "[/RECENT CONTEXT]" in result or "[/RECENT CONVERSATION]" in result
+    # Canonical format uses "[RECENT CONVERSATION — last N turns]" or legacy "[RECENT CONTEXT]"
+    assert "[RECENT CONVERSATION" in result or "[RECENT CONTEXT]" in result
+    assert "[/RECENT CONVERSATION]" in result or "[/RECENT CONTEXT]" in result
 
 
 def test_build_recent_context_empty_history_non_ambiguous():

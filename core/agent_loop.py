@@ -36,6 +36,9 @@ class BaseHandler:
     def turn_end_callback(self, response, tool_calls, tool_results, turn, next_prompt, exit_reason):
         return next_prompt
 
+    def status_callback(self, payload):
+        return None
+
     def dispatch(self, tool_name, args, response, index=0):
         # Some Anthropic-compatible relays/models may emit an internal "thinking"
         # pseudo-tool call. Treat it as a no-op instead of derailing the turn.
@@ -84,6 +87,15 @@ def _profile_span(profiler, name, kind=None, metadata=None):
     if profiler is None:
         return nullcontext()
     return profiler.span(name, kind=kind, metadata=metadata)
+
+
+def _emit_status(handler, payload):
+    try:
+        ret = handler.status_callback(payload)
+        if hasattr(ret, "__iter__") and not isinstance(ret, (str, bytes, dict, list)):
+            yield from ret
+    except Exception:
+        pass
 
 
 def _tool_name(tool):
@@ -355,7 +367,16 @@ def _maybe_apply_early_stop(client, handler, response, tool_calls, tool_results,
     return {"result": "EARLY_STOP", "data": response, "meta": event_payload}
 
 
-def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=80, verbose=True, initial_user_content=None, stop_event=None):
+def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=80, verbose=True, initial_user_content=None, stop_event=None, runtime_mapper=None, formatter=None, turn_gap=0.0):
+    # ── Formatter: backward-compat construction from verbose flag ──
+    if formatter is None:
+        if verbose:
+            from core.protocol.formatter import VerboseFormatter
+            formatter = VerboseFormatter()
+        else:
+            from core.protocol.formatter import CompactFormatter
+            formatter = CompactFormatter()
+
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": initial_user_content if initial_user_content is not None else user_input},
@@ -386,10 +407,36 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             yield "\n\n[已停止输出]\n"
             break
         turn += 1
-        md = "**" if verbose else ""
         handler.current_turn = turn
+        # ── Runtime: emit turn_start event ──
+        if runtime_mapper is not None:
+            runtime_mapper.on_turn_start(turn)
         with _profile_span(profiler, f"agent_turn_{turn}", kind="agent", metadata={"turn": turn}):
-            yield f"{md}LLM Running (Turn {turn}) ...{md}\n\n"
+            status_payload = {
+                "type": "status",
+                "event_type": "classic_turn_started",
+                "scope": "classic_executor",
+                "agent_name": "classic_executor",
+                "classic_turn": turn,
+                "max_turns": handler.max_turns,
+                "message": f"Classic executor running turn {turn}",
+            }
+            if profiler is not None:
+                try:
+                    profiler.record_event(
+                        "classic_executor_turn_started",
+                        kind="agent",
+                        metadata={
+                            "classic_turn": turn,
+                            "max_turns": handler.max_turns,
+                            "scope": "classic_executor",
+                            "agent_name": "classic_executor",
+                        },
+                    )
+                except Exception:
+                    pass
+            yield from _emit_status(handler, status_payload)
+            yield formatter.format_turn_start(turn)
             if turn % 10 == 0:
                 client.last_tools = ""
             _set_llm_audit_context(client, handler, turn, tools_schema)
@@ -403,7 +450,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     yield "\n\n[已停止输出]\n"
                     break
                 response_gen = client.chat(messages=messages, tools=tools_schema)
-                if verbose:
+                if formatter.is_verbose():
                     _resp = None
                     while True:
                         if _stopped():
@@ -421,7 +468,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     yield "\n\n"
                 else:
                     response = exhaust(response_gen)
-                    cleaned = _clean_content(response.content)
+                    cleaned = formatter.clean_content(response.content)
                     if cleaned:
                         yield cleaned + "\n"
 
@@ -448,11 +495,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     or tool_args_summary.get("path")
                 )
                 tool_args_chars = _tool_args_chars(args)
+                if runtime_mapper is not None:
+                    runtime_mapper.on_tool_requested(tool_name, args)
                 if tool_name != "no_tool":
-                    if verbose:
-                        yield f"Tool: `{tool_name}` args:\n````text\n{get_pretty_json(args)}\n````\n"
-                    else:
-                        yield f"{tool_name}({_compact_tool_args(tool_name, args)})\n\n\n"
+                    yield formatter.format_tool_call(tool_name, args)
                 with _profile_span(
                     profiler,
                     f"tool_call:{tool_name}",
@@ -476,10 +522,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                                 return None
                             return (yield from gen)
 
-                        if verbose:
+                        if formatter.is_verbose():
                             yield "`````\n"
-                        outcome = (yield from proxy()) if verbose else exhaust(proxy())
-                        if verbose:
+                        outcome = (yield from proxy()) if formatter.is_verbose() else exhaust(proxy())
+                        if formatter.is_verbose():
                             yield "`````\n"
                     except StopIteration as e:
                         outcome = e.value
@@ -500,6 +546,13 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         )
                     except Exception:
                         pass
+                # ── Runtime: emit tool_completed event ──
+                if runtime_mapper is not None:
+                    outcome_text = _outcome_result_text(outcome)
+                    runtime_mapper.on_tool_completed(
+                        tool_name,
+                        outcome_text[:200] if outcome_text else "",
+                    )
 
                 # ── M7: Tool Event Ledger recording hook ──
                 # Minimal, gated, non-blocking. Records executed facts only.
@@ -573,8 +626,12 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     break
                 next_prompts.add(handler._done_hooks.pop(0))
 
+            # ── Runtime: emit turn_end event ──
+            if runtime_mapper is not None:
+                runtime_mapper.on_turn_end(turn)
             with _profile_span(profiler, f"frontend_turn_gap_{turn}", kind="frontend", metadata={"turn": turn}):
-                time.sleep(0)
+                if turn_gap > 0:
+                    time.sleep(turn_gap)
             with _profile_span(profiler, f"turn_end_{turn}", kind="agent", metadata={"turn": turn}):
                 next_prompt = handler.turn_end_callback(
                     response,
@@ -588,34 +645,3 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
     if exit_reason:
         handler.turn_end_callback(response, tool_calls, tool_results, turn, "", exit_reason)
     return exit_reason or {"result": "MAX_TURNS_EXCEEDED"}
-
-
-def _clean_content(text):
-    if not text:
-        return ""
-
-    def _shrink_code(m):
-        lines = m.group(0).split("\n")
-        lang = lines[0].replace("```", "").strip()
-        body = [l for l in lines[1:-1] if l.strip()]
-        if len(body) <= 6:
-            return m.group(0)
-        preview = "\n".join(body[:5])
-        return f"```{lang}\n{preview}\n  ... ({len(body)} lines)\n```"
-
-    text = re.sub(r"```[\s\S]*?```", _shrink_code, text)
-    for p in [r"<file_content>[\s\S]*?</file_content>", r"<tool_(?:use|call)>[\s\S]*?</tool_(?:use|call)>", r"(\r?\n){3,}"]:
-        text = re.sub(p, "\n\n" if "\\n" in p else "", text)
-    return text.strip()
-
-
-def _compact_tool_args(name, args):
-    a = {k: v for k, v in args.items() if k != "_index"}
-    for k in ("path",):
-        if k in a:
-            a[k] = os.path.basename(a[k])
-    if name == "update_working_checkpoint":
-        s = a.get("key_info", "")
-        return (s[:60] + "...") if len(s) > 60 else s
-    s = json.dumps(a, ensure_ascii=False)
-    return (s[:120] + "...") if len(s) > 120 else s

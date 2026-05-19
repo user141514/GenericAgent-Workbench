@@ -11,6 +11,7 @@ All methods return None / empty lists when GA_CONTEXT_RUNTIME_ENABLED != '1'.
 import os
 import sqlite3
 import time
+import json
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 
@@ -50,6 +51,29 @@ CREATE TABLE IF NOT EXISTS task_states (
 CREATE INDEX IF NOT EXISTS idx_task_states_session ON task_states(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_task_states_project ON task_states(project_id);
 CREATE INDEX IF NOT EXISTS idx_task_states_status ON task_states(status);
+"""
+
+_SNAPSHOT_DDL = """
+CREATE TABLE IF NOT EXISTS session_snapshots (
+    session_id              TEXT PRIMARY KEY,
+    project_id              TEXT NOT NULL,
+    current_mode            TEXT NOT NULL DEFAULT 'idle',
+    route_target            TEXT,
+    execution_mode          TEXT NOT NULL DEFAULT 'single_agent',
+    pending_tool_call       TEXT,
+    completed_steps         TEXT NOT NULL DEFAULT '[]',
+    pending_steps           TEXT NOT NULL DEFAULT '[]',
+    modified_files          TEXT NOT NULL DEFAULT '[]',
+    diff_refs               TEXT NOT NULL DEFAULT '[]',
+    diagnostic_refs         TEXT NOT NULL DEFAULT '[]',
+    review_status           TEXT,
+    collaboration_artifacts TEXT NOT NULL DEFAULT '{}',
+    event_log_position      INTEGER,
+    last_user_intent        TEXT NOT NULL DEFAULT '',
+    snapshot_version        INTEGER NOT NULL DEFAULT 1,
+    updated_at              REAL NOT NULL,
+    metadata                TEXT NOT NULL DEFAULT '{}'
+);
 """
 
 
@@ -108,6 +132,60 @@ class SessionRecord:
             self.last_active_at = self.started_at
 
 
+@dataclass
+class SessionSnapshot:
+    """Persistent runtime snapshot for stop/restore and memory read-side use."""
+
+    session_id: str
+    project_id: str
+    current_mode: str = "idle"
+    route_target: str | None = None
+    execution_mode: str = "single_agent"
+    pending_tool_call: str | None = None
+    completed_steps: list[str] = field(default_factory=list)
+    pending_steps: list[str] = field(default_factory=list)
+    modified_files: list[str] = field(default_factory=list)
+    diff_refs: list[str] = field(default_factory=list)
+    diagnostic_refs: list[str] = field(default_factory=list)
+    review_status: str | None = None
+    collaboration_artifacts: dict = field(default_factory=dict)
+    event_log_position: int | None = None
+    last_user_intent: str = ""
+    snapshot_version: int = 1
+    updated_at: float = 0.0
+    metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        if self.updated_at == 0.0:
+            self.updated_at = time.time()
+        self.current_mode = str(self.current_mode or "idle")
+        self.execution_mode = str(self.execution_mode or "single_agent")
+        if self.snapshot_version < 1:
+            self.snapshot_version = 1
+
+    def to_dict(self) -> dict:
+        return {
+            "session_id": self.session_id,
+            "project_id": self.project_id,
+            "current_mode": self.current_mode,
+            "route_target": self.route_target,
+            "execution_mode": self.execution_mode,
+            "pending_tool_call": self.pending_tool_call,
+            "completed_steps": list(self.completed_steps),
+            "pending_steps": list(self.pending_steps),
+            "modified_files": list(self.modified_files),
+            "diff_refs": list(self.diff_refs),
+            "diagnostic_refs": list(self.diagnostic_refs),
+            "review_status": self.review_status,
+            "collaboration_artifacts": dict(self.collaboration_artifacts),
+            "event_log_position": self.event_log_position,
+            "last_user_intent": self.last_user_intent,
+            "snapshot_version": self.snapshot_version,
+            "updated_at": self.updated_at,
+            "metadata": dict(self.metadata),
+        }
+
+
 # ── Store ──
 
 class SessionStore:
@@ -145,6 +223,7 @@ class SessionStore:
         try:
             conn.executescript(_SESSION_DDL)
             conn.executescript(_TASK_DDL)
+            conn.executescript(_SNAPSHOT_DDL)
             conn.commit()
         finally:
             conn.close()
@@ -292,6 +371,72 @@ class SessionStore:
             return None
         return self._row_to_task(row)
 
+    # Snapshot CRUD
+
+    def save_snapshot(self, snapshot: SessionSnapshot) -> SessionSnapshot | None:
+        """Persist the latest runtime snapshot for a session."""
+        if not _context_enabled():
+            return None
+        snapshot.updated_at = time.time()
+        with self._conn() as conn:
+            conn.execute(
+                """INSERT OR REPLACE INTO session_snapshots
+                   (session_id, project_id, current_mode, route_target, execution_mode,
+                    pending_tool_call, completed_steps, pending_steps, modified_files,
+                    diff_refs, diagnostic_refs, review_status, collaboration_artifacts,
+                    event_log_position, last_user_intent, snapshot_version, updated_at, metadata)
+                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    snapshot.session_id,
+                    snapshot.project_id,
+                    snapshot.current_mode,
+                    snapshot.route_target,
+                    snapshot.execution_mode,
+                    snapshot.pending_tool_call,
+                    json.dumps(snapshot.completed_steps, ensure_ascii=False),
+                    json.dumps(snapshot.pending_steps, ensure_ascii=False),
+                    json.dumps(snapshot.modified_files, ensure_ascii=False),
+                    json.dumps(snapshot.diff_refs, ensure_ascii=False),
+                    json.dumps(snapshot.diagnostic_refs, ensure_ascii=False),
+                    snapshot.review_status,
+                    json.dumps(snapshot.collaboration_artifacts, ensure_ascii=False),
+                    snapshot.event_log_position,
+                    snapshot.last_user_intent,
+                    snapshot.snapshot_version,
+                    snapshot.updated_at,
+                    json.dumps(snapshot.metadata, ensure_ascii=False),
+                ),
+            )
+        return snapshot
+
+    def get_snapshot(self, session_id: str) -> SessionSnapshot | None:
+        """Read the most recent persisted runtime snapshot for a session."""
+        if not _context_enabled():
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM session_snapshots WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_snapshot(row)
+
+    def build_recovery_payload(self, session_id: str) -> dict | None:
+        """Return a recovery-oriented combined view of session, task, and snapshot state."""
+        if not _context_enabled():
+            return None
+        session = self.get_session(session_id)
+        snapshot = self.get_snapshot(session_id)
+        last_task = self.get_last_completed_task(session_id)
+        if session is None and snapshot is None and last_task is None:
+            return None
+        return {
+            "session": session.__dict__ if session is not None else None,
+            "snapshot": snapshot.to_dict() if snapshot is not None else None,
+            "last_task": last_task.__dict__ if last_task is not None else None,
+        }
+
     @staticmethod
     def _row_to_task(row: sqlite3.Row) -> TaskState:
         return TaskState(
@@ -307,4 +452,36 @@ class SessionStore:
             exit_reason=row["exit_reason"],
             turn_count=row["turn_count"],
             tool_count=row["tool_count"],
+        )
+
+    @staticmethod
+    def _loads_json(raw: str | None, fallback):
+        if not raw:
+            return fallback
+        try:
+            return json.loads(raw)
+        except Exception:
+            return fallback
+
+    @classmethod
+    def _row_to_snapshot(cls, row: sqlite3.Row) -> SessionSnapshot:
+        return SessionSnapshot(
+            session_id=row["session_id"],
+            project_id=row["project_id"],
+            current_mode=row["current_mode"],
+            route_target=row["route_target"],
+            execution_mode=row["execution_mode"],
+            pending_tool_call=row["pending_tool_call"],
+            completed_steps=cls._loads_json(row["completed_steps"], []),
+            pending_steps=cls._loads_json(row["pending_steps"], []),
+            modified_files=cls._loads_json(row["modified_files"], []),
+            diff_refs=cls._loads_json(row["diff_refs"], []),
+            diagnostic_refs=cls._loads_json(row["diagnostic_refs"], []),
+            review_status=row["review_status"],
+            collaboration_artifacts=cls._loads_json(row["collaboration_artifacts"], {}),
+            event_log_position=row["event_log_position"],
+            last_user_intent=row["last_user_intent"] or "",
+            snapshot_version=row["snapshot_version"] or 1,
+            updated_at=row["updated_at"] or 0.0,
+            metadata=cls._loads_json(row["metadata"], {}),
         )

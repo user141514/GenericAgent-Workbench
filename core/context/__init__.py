@@ -2,7 +2,8 @@
 Context Runtime — workspace, project, and runtime identity for agent context packets.
 
 All modules are gated by GA_CONTEXT_RUNTIME_ENABLED env var.
-When disabled (default), every public function returns None.
+Default disabled. Set GA_CONTEXT_RUNTIME_ENABLED=1 to enable (preview mode)
+or GA_CONTEXT_RUNTIME_MODE=inject to inject into agent context.
 """
 
 import os
@@ -11,9 +12,9 @@ import os
 def _context_enabled() -> bool:
     """Master kill-switch. Checked by every module entry point.
 
-    Default enabled (preview mode). Set GA_CONTEXT_RUNTIME_ENABLED=0 to disable.
+    Default disabled. Set GA_CONTEXT_RUNTIME_ENABLED=1 to enable.
     """
-    return os.environ.get("GA_CONTEXT_RUNTIME_ENABLED", "1") == "1"
+    return os.environ.get("GA_CONTEXT_RUNTIME_ENABLED", "0") == "1"
 
 
 def _context_mode() -> str:
@@ -24,12 +25,6 @@ def _context_mode() -> str:
 from .workspace_probe import WorkspaceProbe, WorkspaceSnapshot
 from .project_identity import ProjectIdentity, detect_project
 from .runtime_identity import RuntimeIdentity, detect_runtime
-from .session_dump import (
-    cleanup_expired_dumps,
-    dump_session,
-    list_session_dumps,
-    restore_session,
-)
 from .recent_turns import (
     build_recent_conversation_block,
     build_clarification_request,
@@ -46,10 +41,6 @@ __all__ = [
     "detect_project",
     "RuntimeIdentity",
     "detect_runtime",
-    "cleanup_expired_dumps",
-    "dump_session",
-    "list_session_dumps",
-    "restore_session",
     "build_recent_conversation_block",
     "build_clarification_request",
     "is_ambiguous_followup",

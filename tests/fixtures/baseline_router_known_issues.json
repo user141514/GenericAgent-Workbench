@@ -9,7 +9,7 @@
     "query": "修改这个文件把日志级别改成 DEBUG",
     "expected": "executor",
     "actual": "code",
-    "rule": "keywords:code(5e/0c)"
+    "rule": "keywords:code(6e/0c)"
   },
   {
     "query": "重构这段代码，提取公共方法",
@@ -70,6 +70,12 @@
     "expected": "executor",
     "actual": "research",
     "rule": "action_start:帮我->research"
+  },
+  {
+    "query": "看一下这个项目的 README 文档",
+    "expected": "executor",
+    "actual": "research",
+    "rule": "keywords:research(1e/0c)"
   },
   {
     "query": "找到所有引用了 deprecated API 的文件",
