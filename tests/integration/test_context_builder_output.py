@@ -197,13 +197,9 @@ def test_packet_respects_max_chars():
     )
 
     assert packet is not None
-    # Each source is individually capped by route budget, so total stays bounded
     assert packet.total_chars > 0
-    # The total is the sum of individually-capped sources
-    # code route: workspace=100, project=100, memory=1500, recent_turns=800, working_memory=600
-    # => max theoretical total = 3100, but each is capped so it won't exceed route budgets
-    assert packet.total_chars <= 3500, (
-        f"Total chars {packet.total_chars} exceeds expected maximum"
+    assert packet.total_chars <= 2000, (
+        f"Total chars {packet.total_chars} exceeds hard max_chars limit"
     )
 
 

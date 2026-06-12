@@ -101,6 +101,28 @@ def test_verify_with_ledger_finds_matching_files():
     assert "README.md" in ref["unmatched_files"]
 
 
+def test_verify_with_ledger_does_not_verify_unmatched_files():
+    """A tool event for a.py must not verify a candidate that claims b.py."""
+    from core.memory.distillation import build_distillation_candidate, verify_distillation_candidate
+    from core.context.tool_event_ledger import ToolEventLedger
+
+    ledger = ToolEventLedger()
+    eid = ledger.start_call("file_write", {"path": "a.py"}, target_path="a.py", turn=1)
+    ledger.complete_call(eid, result="File written", status="success")
+
+    candidate = build_distillation_candidate(
+        summary="Claims b.py was changed",
+        files_touched=["b.py"],
+    )
+
+    verified = verify_distillation_candidate(candidate, tool_event_ledger=ledger)
+    ref = verified["tool_cross_reference"]
+
+    assert ref["verified"] is False
+    assert ref["matched_files"] == []
+    assert ref["unmatched_files"] == ["b.py"]
+
+
 def test_verify_without_ledger_marks_unverified():
     """Without ledger, verification is NOT_CHECKED."""
     from core.memory.distillation import build_distillation_candidate, verify_distillation_candidate

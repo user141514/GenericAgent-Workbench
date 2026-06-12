@@ -33,6 +33,16 @@ class TestAgentOutputEventCreation:
             ev = AgentOutputEvent(kind=kind)
             assert not ev.is_terminal()
 
+    def test_frontier_state_event_not_terminal(self):
+        ev = AgentOutputEvent(
+            kind="frontier_state",
+            metadata={"frontier_state": {"enabled": True}},
+        )
+
+        assert ev.kind == "frontier_state"
+        assert not ev.is_terminal()
+        assert ev.metadata["frontier_state"]["enabled"] is True
+
     def test_metadata_stored(self):
         ev = AgentOutputEvent(kind="done", text="x",
                               metadata={"shortcut_type": "read_shortcut"})
@@ -107,6 +117,20 @@ class TestFromLegacyDict:
         assert ev.metadata["final_answer_ready"] is True
         assert ev.metadata["shortcut_type"] == "read_shortcut"
         assert ev.metadata["shortcut_confidence"] == 0.95
+
+    def test_execution_and_frontier_metadata_preserved(self):
+        ev = AgentOutputEvent.from_legacy_dict({
+            "done": "result",
+            "execution_state": {"state_delta": {"files_changed": ["a.py"]}},
+            "audit_context": {"route": "research"},
+            "research_workflow_score": {"total": 0.75},
+            "frontier_state": {"enabled": True},
+        })
+
+        assert ev.metadata["execution_state"]["state_delta"]["files_changed"] == ["a.py"]
+        assert ev.metadata["audit_context"]["route"] == "research"
+        assert ev.metadata["research_workflow_score"]["total"] == 0.75
+        assert ev.metadata["frontier_state"]["enabled"] is True
 
     def test_unknown_shape_defaults_to_chunk(self):
         ev = AgentOutputEvent.from_legacy_dict({"unknown_key": "value"})

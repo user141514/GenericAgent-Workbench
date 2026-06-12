@@ -252,3 +252,85 @@ class TestFileUploadService:
             # Can't restore streamlit modules easily, but the test proves
             # the service itself doesn't import streamlit at module level
             pass
+
+
+class TestAttachmentPromptHistoryScrub:
+    def _attachment(self, name="a.txt", body="A_ONLY_CONTEXT"):
+        return {
+            "status": "ready",
+            "distilled_text": body,
+            "name": name,
+            "kind": "text",
+            "size_label": "14 B",
+        }
+
+    def test_build_attachment_prompt_uses_scrubbable_bounds(self):
+        from frontends.file_processor import (
+            ATTACHMENT_CONTEXT_END,
+            ATTACHMENT_CONTEXT_START,
+            build_attachment_prompt,
+        )
+
+        prompt = build_attachment_prompt([self._attachment()])
+
+        assert prompt.startswith(ATTACHMENT_CONTEXT_START)
+        assert prompt.endswith(ATTACHMENT_CONTEXT_END)
+        assert "A_ONLY_CONTEXT" in prompt
+
+    def test_strip_attachment_prompt_removes_tagged_context(self):
+        from frontends.file_processor import build_attachment_prompt, strip_attachment_prompt
+
+        full_prompt = "Please answer from the current file.\n\n" + build_attachment_prompt([self._attachment()])
+
+        cleaned = strip_attachment_prompt(full_prompt)
+
+        assert cleaned == "Please answer from the current file."
+        assert "A_ONLY_CONTEXT" not in cleaned
+
+    def test_strip_attachment_prompt_removes_legacy_context(self):
+        from frontends.file_processor import strip_attachment_prompt
+
+        old_prompt = (
+            "Question before uploads\n\n"
+            "### Uploaded File Context\n"
+            "OLD_A_CONTEXT\n"
+            "=== ASSISTANT ===\n"
+        )
+
+        cleaned = strip_attachment_prompt(old_prompt)
+
+        assert "Question before uploads" in cleaned
+        assert "OLD_A_CONTEXT" not in cleaned
+        assert "=== ASSISTANT ===" in cleaned
+
+    def test_backend_history_scrub_removes_attachment_text_blocks(self):
+        from types import SimpleNamespace
+
+        from core.agentmain import _scrub_uploaded_file_context_from_backend
+        from frontends.file_processor import build_attachment_prompt
+
+        backend = SimpleNamespace(history=[
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Q\n\n" + build_attachment_prompt([self._attachment(body="A_BODY")]),
+                    },
+                    {"type": "tool_result", "content": "keep me"},
+                ],
+            },
+            {
+                "role": "user",
+                "content": "Q2\n\n### Uploaded File Context\nLEGACY_A\n=== ASSISTANT ===\n",
+            },
+        ])
+
+        _scrub_uploaded_file_context_from_backend(backend)
+        history_text = str(backend.history)
+
+        assert "A_BODY" not in history_text
+        assert "LEGACY_A" not in history_text
+        assert "Q" in history_text
+        assert "Q2" in history_text
+        assert "keep me" in history_text

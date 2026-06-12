@@ -188,6 +188,36 @@ class TestLegacyQueueProperty:
             _ = ch.legacy_queue
 
 
+class TestGeneraticAgentLegacyPutTask:
+    """Regression coverage for raw legacy queue ownership."""
+
+    def test_put_task_does_not_start_submit_bridge(self):
+        """put_task() returns a raw queue that legacy callers can consume alone."""
+        import queue
+
+        from core.agentmain import GeneraticAgent
+
+        agent = GeneraticAgent.__new__(GeneraticAgent)
+        agent.task_queue = queue.Queue()
+
+        def forbidden_submit(_task):
+            raise AssertionError("put_task() must not call submit(); it starts a bridge consumer")
+
+        agent.submit = forbidden_submit
+
+        raw_q = agent.put_task("hello", source="unit", run_id="run_1")
+        assert isinstance(raw_q, queue.Queue)
+
+        submitted = agent.task_queue.get_nowait()
+        assert submitted["query"] == "hello"
+        assert submitted["source"] == "unit"
+        assert submitted["run_id"] == "run_1"
+        assert submitted["output"] is raw_q
+
+        raw_q.put({"done": "ok", "turn": 1})
+        assert raw_q.get_nowait()["done"] == "ok"
+
+
 class TestOpenAIOrchestratedAgentNative:
     """Phase OA1: OpenAIOrchestratedAgent now implements AgentBackend natively."""
 

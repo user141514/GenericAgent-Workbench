@@ -1,6 +1,7 @@
 """Phase H1 tests for HistoryRestoreService."""
 
 import os
+import json
 import tempfile
 from dataclasses import dataclass
 
@@ -112,6 +113,78 @@ class TestExtractTitle:
         # Returns empty string for unparseable files
         assert isinstance(title, str)
 
+    def test_input_items_title_uses_first_real_user_message(self, tmp_path):
+        input_items = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "[LEGACY PROJECT MEMORY — This is persistent project memory, not a user request.]\n\nnoise",
+                    }
+                ],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "最开始的真实问题"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "ok"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "[RECENT CONVERSATION — last 2 turns]\nnoise"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "[ROUTER_HINT] Transfer to task_router immediately."}]},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "### Research and Code Priority Guard\nUse this compact precedence policy.",
+                    }
+                ],
+            },
+            {"role": "user", "content": [{"type": "input_text", "text": "最后一轮问题"}]},
+        ]
+        p = _make_history_file(
+            tmp_path,
+            "input_items.txt",
+            [
+                "=== INPUT_ITEMS ===",
+                json.dumps(input_items, ensure_ascii=False),
+            ],
+        )
+
+        title = HistoryRestoreService().extract_title(str(p), backend_kind="openai-agents")
+
+        assert title == "最开始的真实问题"
+
+    def test_native_history_title_falls_back_to_first_prompt(self, tmp_path):
+        first_prompt = {
+            "role": "user",
+            "content": [{"type": "text", "text": "### 用户当前消息\n最开始的问题"}],
+        }
+        later_prompt = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": "<history>\n[USER]: You are the execution engine inside a multi-agent workflow...\n[USER]: [RECENT CONVERSATION — last 2 turns]\n</history>",
+                }
+            ],
+        }
+        p = _make_history_file(
+            tmp_path,
+            "native_history.txt",
+            [
+                "=== Prompt ===",
+                json.dumps(first_prompt, ensure_ascii=False),
+                "=== Response ===",
+                "[{'type': 'text', 'text': 'first response'}]",
+                "=== Prompt ===",
+                json.dumps(later_prompt, ensure_ascii=False),
+                "=== Response ===",
+                "[{'type': 'text', 'text': 'later response'}]",
+            ],
+        )
+
+        title = HistoryRestoreService().extract_title(str(p), backend_kind="openai-agents")
+
+        assert title == "最开始的问题"
+
 
 class TestRestore:
     """restore() tests."""
@@ -131,6 +204,30 @@ class TestRestore:
         assert rc.count == 2
         assert rc.fmt_type == "input_items"
         assert rc.filename == "test.txt"
+
+    def test_native_history_restore_keeps_full_last_response(self, tmp_path):
+        prompt = {
+            "role": "user",
+            "content": [{"type": "text", "text": "### Current User Message\nwhy clipped?"}],
+        }
+        long_answer = "A" * 650 + "\nTAIL_VISIBLE_AFTER_500"
+        p = _make_history_file(
+            tmp_path,
+            "native_full_response.txt",
+            [
+                "=== Prompt ===",
+                json.dumps(prompt, ensure_ascii=False),
+                "=== Response ===",
+                repr([{"type": "text", "text": long_answer}]),
+            ],
+        )
+
+        restored = HistoryRestoreService().restore(str(p), backend_kind="openai-agents")
+
+        assert restored is not None
+        assert restored.fmt_type == "lines"
+        assert restored.restored[-1].startswith("[Agent] ")
+        assert "TAIL_VISIBLE_AFTER_500" in restored.restored[-1]
 
 
 class TestNoStreamlitDependency:

@@ -6,6 +6,13 @@ import os
 # Add project root for imports
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 from frontends.chatapp_common import clean_reply, TAG_PATS
+from frontends.stapp_message import (
+    build_copy_reply_button_html,
+    copyable_reply_text,
+    fold_turns as actual_fold_turns,
+    latest_turn_from_text,
+    should_show_live_turn,
+)
 
 
 def _fold_turns(text):
@@ -233,3 +240,103 @@ class TestStripInternalTags:
         text = "<thinking>A</thinking> keep <thinking>B</thinking>"
         result = clean_reply(text)
         assert result == "keep"
+
+
+class TestCopyReplyText:
+    def test_copy_text_matches_visible_reply(self):
+        text = (
+            "<thinking>hidden reasoning</thinking>\n"
+            "<summary>hidden summary</summary>\n\n"
+            "用户能看到的回复\n\n```python\nprint(1)\n```"
+        )
+
+        result = copyable_reply_text(text)
+
+        assert "hidden reasoning" not in result
+        assert "hidden summary" not in result
+        assert "用户能看到的回复" in result
+        assert "print(1)" in result
+
+    def test_copy_button_html_uses_clipboard_and_escapes_script_close(self):
+        html = build_copy_reply_button_html("visible </script> text", key="msg-1")
+
+        assert "navigator.clipboard.writeText" in html
+        assert "复制回复" in html
+        assert "<\\/script>" in html
+
+    def test_copy_text_uses_only_latest_turn(self):
+        text = (
+            "**LLM Running (Turn 1) ...**\n\n"
+            "first draft\n"
+            "**LLM Running (Turn 2) ...**\n\n"
+            "final answer"
+        )
+
+        assert copyable_reply_text(text) == "final answer"
+
+    def test_strips_shell_tool_blocks_from_streaming_ui(self):
+        text = (
+            "Visible answer.\n"
+            "<bash>pwd && ls -la</bash>\n"
+            "Next visible sentence."
+        )
+
+        result = clean_reply(text)
+
+        assert "<bash>" not in result
+        assert "pwd && ls" not in result
+        assert "Visible answer." in result
+        assert "Next visible sentence." in result
+
+    def test_strips_unclosed_shell_tool_tail_from_streaming_ui(self):
+        text = "Visible answer.\n<bash>pwd && ls -la"
+
+        result = clean_reply(text)
+
+        assert result == "Visible answer."
+
+
+class TestTurnMarkerRendering:
+    def test_single_turn_marker_is_not_rendered_as_body_text(self):
+        segments = actual_fold_turns("**LLM Running (Turn 1) ...**\n\nFinal answer")
+
+        assert segments == [{"type": "text", "content": "\n\nFinal answer"}]
+        assert "LLM Running" not in clean_reply(segments[-1]["content"])
+
+    def test_last_turn_marker_is_not_rendered_as_body_text(self):
+        segments = actual_fold_turns(
+            "**LLM Running (Turn 1) ...**\n\nFirst pass\n"
+            "**LLM Running (Turn 2) ...**\n\nFinal answer"
+        )
+
+        assert segments[0]["type"] == "fold"
+        assert segments[-1]["type"] == "text"
+        assert "LLM Running" not in segments[-1]["content"]
+        assert "Final answer" in segments[-1]["content"]
+
+    def test_latest_turn_from_text_finds_last_marker(self):
+        assert latest_turn_from_text(
+            "**LLM Running (Turn 1) ...**\n\nA\n"
+            "**LLM Running (Turn 3) ...**\n\nB"
+        ) == 3
+
+    def test_live_turn_caption_is_allowed_even_when_marker_is_in_text(self):
+        assert should_show_live_turn("**LLM Running (Turn 2) ...**", 2) is True
+
+
+class TestExecutionHonestyGateRendering:
+    def test_internal_honesty_gate_feedback_is_not_rendered(self):
+        internal = (
+            "[EXECUTION HONESTY GATE]\n"
+            "The final response was blocked because it made claims that require execution evidence.\n"
+            "- state_transition_claim_requires_trace: Response claims a system state transition without successful tool evidence.\n"
+            "  suggested_rewrite: 我理解了，但当前未写入 checkpoint。\n"
+            "Rewrite the answer so executed facts are backed by tool traces, and label assumptions/user-provided numbers explicitly."
+        )
+
+        result = clean_reply(internal)
+
+        assert "[EXECUTION HONESTY GATE]" not in result
+        assert "Rewrite the answer" not in result
+        assert "suggested_rewrite" not in result
+        assert "执行诚实检查" in result

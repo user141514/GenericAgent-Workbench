@@ -150,3 +150,14 @@ class TestAgentInstructions:
         assert "all non-chat execution tasks" in instructions
         assert "code, review, research, and mixed multi-step work" in instructions
         assert "run_genericagent_executor" in instructions
+
+    def test_runtime_agents_include_shared_behavior_kernel(self, agent_graph):
+        for key in ("chat", "executor"):
+            instructions = agent_graph[key].instructions
+            assert "Shared Behavior Kernel" in instructions
+            assert "calm, warm, plainspoken" in instructions
+            assert "avoid performative certainty" in instructions
+            assert "Evidence first" in instructions
+            assert "Execution honesty" in instructions
+            assert "Memory discipline" in instructions
+            assert "facts, assumptions" in instructions

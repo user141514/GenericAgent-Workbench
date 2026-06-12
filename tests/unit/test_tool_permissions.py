@@ -19,7 +19,7 @@ def _tool(name: str) -> dict:
 def _all_tools() -> list[dict]:
     return [
         _tool("file_read"), _tool("file_write"), _tool("file_patch"),
-        _tool("code_run"), _tool("web_scan"), _tool("web_execute_js"),
+        _tool("code_run"), _tool("web_search"), _tool("web_scan"), _tool("web_execute_js"),
         _tool("ask_user"), _tool("update_working_checkpoint"),
         _tool("start_long_term_update"), _tool("browser_agent"),
     ]
@@ -75,6 +75,7 @@ class TestToolPermissionBasics:
             "浏览网页搜索资料", _all_tools(), "classic"
         )
         names = _names(result)
+        assert "web_search" in names
         assert "web_scan" in names or "web_execute_js" in names
 
     def test_browser_workflow_query_includes_browser_agent(self):
@@ -85,6 +86,15 @@ class TestToolPermissionBasics:
         )
         names = _names(result)
         assert "browser_agent" in names
+
+    def test_research_query_includes_web_search(self):
+        """Research/docs queries should expose deterministic web_search fallback."""
+        selector = ToolSchemaSelector()
+        result = selector.select_tools_for_task(
+            "search Django documentation for cache settings", _all_tools(), "classic"
+        )
+        names = _names(result)
+        assert "web_search" in names
 
     def test_memory_query_includes_read_tools(self):
         """Memory query should include file_read and code_run."""

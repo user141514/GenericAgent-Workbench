@@ -111,6 +111,7 @@ CANONICAL_READER_WHITELIST = {
     # ── Frontend (inbox, not L1/L2) ──
     "frontends/chatapp_common.py",      # save_distilled_memory — inbox, not L1/L2
     "frontends/stapp.py",               # Memory display in sidebar
+    "frontends/stapp_memory_panel.py",  # Memory display via MemoryReader; inbox read only
     "frontends/stapp_mobile.py",        # Memory display in sidebar (mobile variant)
 
     # ── Test files (discoverable by test runner) ──
@@ -180,6 +181,16 @@ def test_no_forbidden_l1_l2_read_pattern():
         + "\n".join(violations)
         + "\n\nUse MemoryReader instead of raw file reads."
     )
+
+
+def test_frontend_memory_panel_delegates_l1_l2_reads():
+    """The extracted Streamlit panel may display L1/L2 but must read them via MemoryReader."""
+    panel_path = PROJECT_ROOT / "frontends" / "stapp_memory_panel.py"
+    source = _read_file(panel_path)
+
+    assert "MemoryReader" in source
+    assert ".read_global_memory()" in source
+    assert not re.search(r"open\s*\([^\n]*(global_mem_insight|global_mem)", source)
 
 
 # ============================================================================

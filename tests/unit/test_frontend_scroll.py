@@ -459,8 +459,9 @@ class TestStopButtonQueueDrain:
         )
         assert stop_match, "Could not find stop button section"
         stop_section = stop_match.group(0)
-        assert "stop_requested" in stop_section, (
-            "Sidebar stop should set stop_requested=True for graceful shutdown via streaming loop"
+        helper_section = content.split("def request_generation_stop", 1)[1].split("def render_generation_control_bar", 1)[0]
+        assert "request_generation_stop()" in stop_section and "stop_requested" in helper_section, (
+            "Sidebar stop should route through request_generation_stop() for graceful shutdown via streaming loop"
         )
         # After Phase 6c migration: uses drainer.collect(), not raw get_nowait
         assert ".collect(" in content or "get_nowait" in content, (
@@ -502,15 +503,28 @@ class TestPollBasedStreaming:
             "Streaming section should use non-blocking polling"
         )
 
-    def test_stop_button_in_streaming_area_stapp(self):
-        """stapp.py: stop button should be present inside the streaming area."""
+    def test_stop_button_near_input_bar_stapp(self):
+        """stapp.py: stop control should render near the input bar, not inside the assistant bubble."""
         import re
         with open("frontends/stapp.py", "r", encoding="utf-8") as f:
             content = f.read()
-        # Find streaming section
         streaming_section = content.split("# ── Streaming state:")[1] if "# ── Streaming state:" in content else ""
-        assert "stop" in streaming_section.lower() and "st.button" in streaming_section, (
-            "Stop button should be in the streaming area for user to abort"
+        assert "render_generation_control_bar" in streaming_section, (
+            "Streaming section should render the stop control beside the disabled input bar"
+        )
+        assert 'st.chat_input("正在生成回复…", disabled=True' in content, (
+            "Running state should keep a disabled chat input visible like ChatGPT"
+        )
+        control_fn = content.split("def render_generation_control_bar", 1)[1].split("from frontends.stapp_history_panel", 1)[0]
+        assert 'type="secondary"' in control_fn, (
+            "Stop control should be a quiet secondary action, not a primary button"
+        )
+        assert "use_container_width=False" in control_fn, (
+            "Stop control should keep its natural compact width"
+        )
+        assistant_stream = streaming_section.split("render_generation_control_bar", 1)[0]
+        assert "停止输出" not in assistant_stream, (
+            "Stop button should no longer be rendered inside the assistant message bubble"
         )
 
     def test_stop_requested_state_stapp(self):
@@ -544,9 +558,64 @@ class TestPollBasedStreaming:
         assert stop_match, "Could not find sidebar stop button"
         stop_section = stop_match.group(0)
         # After fix: should use stop_requested pattern
-        assert "stop_requested" in stop_section, (
-            "Sidebar stop button should set stop_requested=True for graceful shutdown"
+        helper_section = content.split("def request_generation_stop", 1)[1].split("def render_generation_control_bar", 1)[0]
+        assert "request_generation_stop()" in stop_section and "stop_requested" in helper_section, (
+            "Sidebar stop button should set stop_requested through request_generation_stop()"
         )
+
+    def test_assistant_messages_have_copy_button_stapp(self):
+        """stapp.py should render a copy action for completed assistant replies."""
+        with open("frontends/stapp.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "render_copy_reply_button" in content
+        assert 'key=f"hist_{msg_id}"' in content
+
+    def test_memory_panel_uses_project_root_stapp(self):
+        """stapp.py should read memory from the repository root, not frontends/."""
+        with open("frontends/stapp.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        assert "project_root = os.path.abspath(os.path.join(script_dir, \"..\"))" in content
+        assert "render_memory_panel(project_root)" in content
+
+    def test_copy_and_stop_controls_stapp_mobile(self):
+        """stapp_mobile.py should keep the same copy and bottom-stop controls."""
+        with open("frontends/stapp_mobile.py", "r", encoding="utf-8") as f:
+            content = f.read()
+        streaming_section = content.split("if st.session_state.agent_running:")[1]
+        assert "render_copy_reply_button" in content
+        assert "render_generation_control_bar" in streaming_section
+        assert 'st.chat_input("正在生成回复…", disabled=True' in content
+        control_fn = content.split("def render_generation_control_bar", 1)[1].split("def render_distill_preview", 1)[0]
+        assert 'type="secondary"' in control_fn
+        assert "use_container_width=False" in control_fn
+
+
+class TestSidebarUploadPlacement:
+    """Streamlit uploader belongs in the sidebar until a custom composer exists."""
+
+    def test_stapp_uses_sidebar_upload_panel_not_composer(self):
+        with open("frontends/stapp.py", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        assert "render_chat_upload_panel" not in content
+        assert "render_upload_panel(st.session_state)" in content
+        assert content.index("render_upload_panel(st.session_state)") < content.index('st.chat_input("any task?")')
+
+    def test_upload_panel_has_no_composer_variant(self):
+        with open("frontends/stapp_upload_panel.py", "r", encoding="utf-8") as f:
+            content = f.read()
+
+        assert "def render_chat_upload_panel" not in content
+        assert "composer_uploads_" not in content
+        assert "composer-attachment-chip" not in content
+
+    def test_composer_upload_css_overrides_removed(self):
+        with open("frontends/assets/stapp_theme.css", "r", encoding="utf-8") as f:
+            css = f.read()
+
+        assert ".composer-upload-anchor" not in css
+        assert ".composer-attachment-chip" not in css
+        assert 'max-width: 180px' not in css
 
 
 if __name__ == "__main__":

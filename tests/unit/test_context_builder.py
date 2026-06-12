@@ -120,6 +120,20 @@ class TestContextBuilderBudget:
         assert packet is not None
         assert packet.total_chars <= 4000
 
+    def test_max_chars_is_hard_total_limit(self, sample_workspace, sample_project, sample_memory):
+        builder = ContextBuilder(max_chars=700, policy_mode="inject")
+        packet = builder.build(
+            workspace=sample_workspace,
+            project=sample_project,
+            memory_bundle=sample_memory,
+            recent_turns_block="recent " * 500,
+            working_memory_block="working " * 500,
+            target_route="executor",
+        )
+        assert packet is not None
+        assert packet.total_chars <= 700
+        assert sum(packet.source_breakdown.values()) == packet.total_chars
+
     def test_chat_route_budget_is_zero(self, builder):
         # Chat route has empty budget in _ROUTE_BUDGET
         packet = builder.build(target_route="chat")

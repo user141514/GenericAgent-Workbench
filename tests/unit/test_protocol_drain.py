@@ -102,6 +102,39 @@ class TestFromLegacyQueueDrainer:
         assert d.is_done
         assert d.full_text == "final"
 
+    def test_legacy_status_event_updates_turn_from_classic_turn(self):
+        legacy_q = queue.Queue()
+        legacy_q.put({
+            "type": "status",
+            "event_type": "classic_turn_started",
+            "classic_turn": 7,
+            "message": "Classic executor running turn 7",
+        })
+
+        d = AgentOutputDrainer.from_legacy_queue(legacy_q)
+        time.sleep(0.2)
+
+        d.collect(max_items=10)
+        assert d.current_turn == 7
+        assert d.full_text == ""
+
+    def test_current_turn_does_not_regress_on_stale_chunk(self):
+        legacy_q = queue.Queue()
+        legacy_q.put({
+            "type": "status",
+            "event_type": "classic_turn_started",
+            "classic_turn": 7,
+            "message": "Classic executor running turn 7",
+        })
+        legacy_q.put({"next": "**LLM Running (Turn 1) ...**\n\nstill waiting", "turn": 1})
+
+        d = AgentOutputDrainer.from_legacy_queue(legacy_q)
+        time.sleep(0.2)
+
+        d.collect(max_items=10)
+        assert d.current_turn == 7
+        assert "still waiting" in d.full_text
+
 
 class TestFormatter:
     """Tests for AgentOutputFormatter classes."""

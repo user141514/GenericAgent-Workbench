@@ -60,6 +60,7 @@ def test_all_context_blocks_have_markers():
         legacy_memory="[LEGACY PROJECT MEMORY]\nL1 insight here",
         route_hint="[ROUTER HINT] Transfer to code_agent",
         answer_quality="### Answer Quality Guard\nTest quality guard",
+        research_workflow="### Research Workflow Gate\nStrategy Kernel",
         sop_context="[ACTIVE SKILLS]\nSkill: test-skill",
         prefetch_block="[PREFETCH CONTENT]\nFile content preview",
         clarification="[CONTEXT NOTE] Ambiguous follow-up",
@@ -77,6 +78,7 @@ def test_all_context_blocks_have_markers():
         "[PROJECT MEMORY]",
         "[ROUTER HINT]",
         "[ANSWER QUALITY]",
+        "[RESEARCH WORKFLOW]",
         "[ACTIVE SKILLS]",
         "[PREFETCH CONTENT]",
         "[CONTEXT NOTE]",
@@ -106,6 +108,30 @@ def test_raw_query_is_last():
 
 
 # ═══ I1b: Graceful empty handling ══════════════════════════════════════════
+
+@skip_if_py_too_old
+def test_research_workflow_block_is_between_answer_quality_and_skills():
+    """Research workflow is marked and placed before active skill SOP context."""
+    from core.context.adapters import OpenAIContextAdapter
+
+    adapter = OpenAIContextAdapter()
+    inputs = adapter.build_inputs(
+        input_items=[],
+        answer_quality="aq",
+        research_workflow="rw",
+        sop_context="skills",
+        raw_query="actual user request",
+    )
+
+    contents = [str(item.get("content", "")) for item in inputs]
+    joined = "\n".join(contents)
+    assert contents[-1] == "actual user request"
+    assert "[ANSWER QUALITY]" in joined
+    assert "[RESEARCH WORKFLOW]" in joined
+    assert "[ACTIVE SKILLS]" in joined
+    assert joined.index("[ANSWER QUALITY]") < joined.index("[RESEARCH WORKFLOW]")
+    assert joined.index("[RESEARCH WORKFLOW]") < joined.index("[ACTIVE SKILLS]")
+
 
 @skip_if_py_too_old
 def test_empty_blocks_are_omitted():

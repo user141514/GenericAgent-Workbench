@@ -123,3 +123,32 @@ class TestBackendInference:
     def test_unknown_returns_none(self):
         from core.openai_agentmain import _infer_backend_kind
         assert _infer_backend_kind("random-name", "https://random.url", "random-model") is None
+
+
+class TestStreamArtifactCleanup:
+    def test_latest_turn_marker_uses_last_marker(self):
+        from core.openai_agentmain import _latest_turn_marker
+
+        text = (
+            "**LLM Running (Turn 1) ...**\n\nA\n"
+            "**LLM Running (Turn 4) ...**\n\nB"
+        )
+
+        assert _latest_turn_marker(text) == 4
+
+    def test_preserves_delta_boundary_spaces(self):
+        from core.openai_agentmain import _strip_stream_artifacts
+
+        chunks = [
+            _strip_stream_artifacts("I'll "),
+            _strip_stream_artifacts("systematically "),
+            _strip_stream_artifacts("explore "),
+            _strip_stream_artifacts("your project."),
+        ]
+
+        assert "".join(chunks) == "I'll systematically explore your project."
+
+    def test_removes_transport_tags_without_stripping_text(self):
+        from core.openai_agentmain import _strip_stream_artifacts
+
+        assert _strip_stream_artifacts(" hello <assistant>world</assistant> ") == " hello world "
