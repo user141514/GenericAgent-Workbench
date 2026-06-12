@@ -7,20 +7,19 @@ import subprocess
 import sys
 from pathlib import Path
 
-
 MODULES = [
-    "core.runtime.demo_tool_contract",
-    "core.runtime.demo_read_shortcut",
-    "core.runtime.demo_read_prefetch",
-    "core.quality.demo_answer_quality_context",
-    "core.skills.demo_skill_selector",
-    "core.skills.demo_skill_prompt_injector",
-    "core.skills.demo_skill_activation",
-    "core.memory.demo_write_gate",
-    "core.memory.demo_memory_store",
-    "core.memory.demo_memory_indexer",
-    "core.tools.demo_schema_selector",
-    "core.tools.demo_schema_registry",
+    "examples.demos.runtime.demo_tool_contract",
+    "examples.demos.runtime.demo_read_shortcut",
+    "examples.demos.runtime.demo_read_prefetch",
+    "examples.demos.quality.demo_answer_quality_context",
+    "examples.demos.skills.demo_skill_selector",
+    "examples.demos.skills.demo_skill_prompt_injector",
+    "examples.demos.skills.demo_skill_activation",
+    "examples.demos.memory.demo_write_gate",
+    "examples.demos.memory.demo_memory_store",
+    "examples.demos.memory.demo_memory_indexer",
+    "examples.demos.tools.demo_schema_selector",
+    "examples.demos.tools.demo_schema_registry",
 ]
 
 
@@ -35,6 +34,11 @@ def _module_exists(module_name: str) -> bool:
         parts = module_name.split(".")
         parts[-1] = parts[-1] + ".py"
         return Path(_repo_root(), *parts).is_file()
+
+
+def _safe_console_text(text: str) -> str:
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    return str(text).encode(encoding, errors="replace").decode(encoding, errors="replace")
 
 
 def main() -> int:
@@ -68,9 +72,9 @@ def main() -> int:
         failed += 1
         print(f"[FAIL] {module_name}")
         if proc.stdout.strip():
-            print(proc.stdout.rstrip())
+            print(_safe_console_text(proc.stdout.rstrip()))
         if proc.stderr.strip():
-            print(proc.stderr.rstrip())
+            print(_safe_console_text(proc.stderr.rstrip()))
 
     print()
     print(f"passed: {passed}")

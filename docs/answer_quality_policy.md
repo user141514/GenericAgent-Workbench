@@ -40,12 +40,25 @@ This guard is intended for planner-path task-local context only. It is not a sys
    - they may only emit runtime metadata, evidence, or pending memory candidates
    - durable memory writes must respect `MemoryWriteGate`
 
+8. Research/code precedence is explicit:
+   - user constraints and provided files outrank all other context
+   - live tool/search results, official docs, repo files, logs, and test output outrank durable memory and model prior experience
+   - if model prior experience conflicts with fresh, authoritative, traceable evidence, follow the evidence and mention the conflict when it matters
+   - if sources disagree without a clear winner, state uncertainty instead of blending claims
+
 ## Preferred Recommendation Order
 
 1. Fix high-impact, measured bottlenecks already visible in profiler/audit.
 2. Improve integration quality of existing features already implemented.
 3. Safely connect dry-run foundations that clearly reduce current waste.
 4. Only then consider importing new frameworks or expanding agent topology.
+
+## Prompt Entropy Controls
+
+- Keep task facts, repo evidence, search evidence, and test output above generic SOP text.
+- Inject at most the smallest useful skill summary by default; do not inject whole skill markdown unless explicitly debugging the skill itself.
+- Treat `max_chars` as a hard packet limit, not a per-section hint.
+- Prefer deleting or compressing low-priority context over adding another guardrail paragraph.
 
 ## Common Anti-Patterns
 

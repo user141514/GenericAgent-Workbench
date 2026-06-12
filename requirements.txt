@@ -24,6 +24,8 @@ rapidocr-onnxruntime
 requests
 simple-websocket-server
 streamlit
+fastapi
+uvicorn
 uiautomator2
 ultralytics
 urllib3

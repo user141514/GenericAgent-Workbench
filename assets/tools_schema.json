@@ -43,6 +43,17 @@
       "text_only": {"type": "boolean", "description": "Return simplified plain text instead of HTML when structure is less important than visible content."}}}
   }},
   {"type": "function", "function": {
+    "name": "web_search",
+    "description": "Run deterministic browser-backed web search without using an LLM browser agent or paid search API. Use this when online search is needed, especially after browser_agent hits rate limits. It navigates a connected browser tab to a public search page and extracts visible result links with fixed JavaScript. If it fails, report the structured blocker instead of claiming search was performed.",
+    "parameters": {"type": "object", "properties": {
+      "query": {"type": "string", "description": "Search query. Keep it concise and source-oriented."},
+      "engine": {"type": "string", "enum": ["bing", "duckduckgo", "google", "scholar"], "description": "Public search engine to open in the connected browser tab.", "default": "bing"},
+      "max_results": {"type": "integer", "description": "Maximum extracted result links. Keep small unless broader source scouting is needed.", "default": 8},
+      "timeout": {"type": "integer", "description": "Maximum seconds to wait for search page load and extraction.", "default": 18},
+      "switch_tab_id": {"type": "string", "description": "[Optional] Switch to this tab before navigating to the search URL."}},
+      "required": ["query"]}
+  }},
+  {"type": "function", "function": {
     "name": "web_execute_js",
     "description": "Execute precise JavaScript in the current browser tab. Use when you already know what DOM element, value, selector, or page state you need to inspect or manipulate. Multi-call is fine with different switch_tab_id values. Prefer a ```javascript fenced block over escaped inline strings. Use this for single-page reads/actions; use browser_agent only when the workflow is multi-step, navigation-heavy, or requires autonomous page reasoning.",
     "parameters": {"type": "object", "properties": {

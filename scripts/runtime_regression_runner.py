@@ -22,29 +22,32 @@ from pathlib import Path
 # ── All demo modules, grouped by capability category ──────────────────────
 MODULES: list[str] = [
     # ── Runtime Optimization ───────────────────────────────────────────
-    "core.runtime.demo_profiler",
-    "core.runtime.demo_llm_cache",
-    "core.runtime.demo_early_stop",
-    "core.runtime.demo_direct_answer",
-    "core.runtime.demo_read_shortcut",
-    "core.runtime.demo_read_prefetch",
+    "examples.demos.runtime.demo_profiler",
+    "examples.demos.runtime.demo_llm_cache",
+    "examples.demos.runtime.demo_early_stop",
+    "examples.demos.runtime.demo_direct_answer",
+    "examples.demos.runtime.demo_read_shortcut",
+    "examples.demos.runtime.demo_read_prefetch",
+    "examples.demos.runtime.demo_tool_contract",
+    "examples.demos.runtime.demo_clarification_gate",
     # ── Quality Guard ───────────────────────────────────────────────────
-    "core.quality.demo_answer_quality_context",
+    "examples.demos.quality.demo_answer_quality_context",
+    "examples.demos.quality.demo_problem_framing",
     # ── Skill System ────────────────────────────────────────────────────
-    "core.skills.demo_skill_activation",
-    "core.skills.demo_skill_discovery",
-    "core.skills.demo_skill_effects",
-    "core.skills.demo_skill_manifest",
-    "core.skills.demo_skill_prompt_injector",
-    "core.skills.demo_skill_registry",
-    "core.skills.demo_skill_selector",
+    "examples.demos.skills.demo_skill_activation",
+    "examples.demos.skills.demo_skill_discovery",
+    "examples.demos.skills.demo_skill_effects",
+    "examples.demos.skills.demo_skill_manifest",
+    "examples.demos.skills.demo_skill_prompt_injector",
+    "examples.demos.skills.demo_skill_registry",
+    "examples.demos.skills.demo_skill_selector",
     # ── Memory Gate ─────────────────────────────────────────────────────
-    "core.memory.demo_memory_indexer",
-    "core.memory.demo_memory_store",
-    "core.memory.demo_write_gate",
+    "examples.demos.memory.demo_memory_indexer",
+    "examples.demos.memory.demo_memory_store",
+    "examples.demos.memory.demo_write_gate",
     # ── Tool System ─────────────────────────────────────────────────────
-    "core.tools.demo_schema_selector",
-    "core.tools.demo_schema_registry",
+    "examples.demos.tools.demo_schema_selector",
+    "examples.demos.tools.demo_schema_registry",
 ]
 
 STDERR_TAIL_CHARS: int = 1000

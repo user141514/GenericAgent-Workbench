@@ -148,6 +148,50 @@
   {
     "type": "function",
     "function": {
+      "name": "web_search",
+      "description": "使用已连接浏览器标签页执行确定性的网页搜索，不调用 LLM 浏览器代理或付费搜索 API。适合 browser_agent 遇到 429/rate limit 后作为备用搜索链路。它会打开公共搜索页并用固定 JavaScript 抽取可见结果链接；失败时必须报告结构化阻塞，不要声称已经完成搜索。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "description": "搜索查询。保持简洁，优先包含来源或官方文档关键词。"
+          },
+          "engine": {
+            "type": "string",
+            "enum": [
+              "bing",
+              "duckduckgo",
+              "google",
+              "scholar"
+            ],
+            "description": "要在浏览器中打开的公共搜索引擎。",
+            "default": "bing"
+          },
+          "max_results": {
+            "type": "integer",
+            "description": "最多抽取多少条结果链接。除非需要广泛搜集来源，否则保持较小。",
+            "default": 8
+          },
+          "timeout": {
+            "type": "integer",
+            "description": "等待搜索页加载和抽取结果的最大秒数。",
+            "default": 18
+          },
+          "switch_tab_id": {
+            "type": "string",
+            "description": "[可选] 先切换到这个标签页，再导航到搜索 URL。"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
       "name": "web_execute_js",
       "description": "在当前浏览器标签页中执行精确的 JavaScript。适用于你已经明确知道要检查或操作的 DOM 元素、值、选择器或页面状态的场景。可以多次调用，并结合不同的 switch_tab_id 操作多个标签页。优先使用 ```javascript 代码块，而不是转义后的内联字符串。单页读取或单点动作用它；只有在流程多步、导航频繁或需要页面自主推理时，才改用 browser_agent。",
       "parameters": {

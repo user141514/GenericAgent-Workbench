@@ -38,10 +38,10 @@ python scripts/runtime_regression_runner.py
 ### 输出格式
 
 ```
-[PASS] core.runtime.demo_profiler
-[FAIL] core.memory.demo_write_gate
+[PASS] examples.demos.runtime.demo_profiler
+[FAIL] examples.demos.memory.demo_write_gate
 <stderr 最后 1000 字符>
-[SKIP] core.xxx.demo_missing
+[SKIP] examples.demos.xxx.demo_missing
 
 passed:  17
 failed:  1
@@ -58,12 +58,14 @@ skipped: 1
 
 | 模块 | 验证的 Runtime 能力 | 对应开关 |
 |------|-------------------|---------|
-| `core.runtime.demo_profiler` | `RuntimeProfiler` span/event 记录与 JSON 导出 | `GENERIC_AGENT_PROFILE=1` |
-| `core.runtime.demo_llm_cache` | `LLMCallCache` 本地缓存审计、`is_cache_safe` 校验 | 缓存审计已激活，缓存复用未启用 |
-| `core.runtime.demo_early_stop` | `should_stop_classic_executor` 经典执行器提前停止规则 | `GENERIC_AGENT_EARLY_STOP=1` |
-| `core.runtime.demo_direct_answer` | `try_direct_answer_from_tool_result` 窄读取类直接回答规则 | `GENERIC_AGENT_DIRECT_ANSWER=1` |
-| `core.runtime.demo_read_shortcut` | `detect_read_shortcut` 文件读取快捷路径检测 | `GENERIC_AGENT_READ_SHORTCUT=1` |
-| `core.runtime.demo_read_prefetch` | `detect_read_prefetch` 分析型预取检测 | 始终激活 |
+| `examples.demos.runtime.demo_profiler` | `RuntimeProfiler` span/event 记录与 JSON 导出 | `GENERIC_AGENT_PROFILE=1` |
+| `examples.demos.runtime.demo_llm_cache` | `LLMCallCache` 本地缓存审计、`is_cache_safe` 校验 | 缓存审计已激活，缓存复用未启用 |
+| `examples.demos.runtime.demo_early_stop` | `should_stop_classic_executor` 经典执行器提前停止规则 | `GENERIC_AGENT_EARLY_STOP=1` |
+| `examples.demos.runtime.demo_direct_answer` | `try_direct_answer_from_tool_result` 窄读取类直接回答规则 | `GENERIC_AGENT_DIRECT_ANSWER=1` |
+| `examples.demos.runtime.demo_read_shortcut` | `detect_read_shortcut` 文件读取快捷路径检测 | `GENERIC_AGENT_READ_SHORTCUT=1` |
+| `examples.demos.runtime.demo_read_prefetch` | `detect_read_prefetch` 分析型预取检测 | 始终激活 |
+| `examples.demos.runtime.demo_tool_contract` | 工具调用结果契约与错误形态烟测 | 始终激活 |
+| `examples.demos.runtime.demo_clarification_gate` | `ask_user` 澄清门控的允许/拒绝规则 | `GENERIC_AGENT_CLARIFICATION_GATE=1` |
 
 相关能力矩阵文档:
 - `docs/runtime_capability_matrix.md` — 运行时能力矩阵
@@ -76,7 +78,8 @@ skipped: 1
 
 | 模块 | 验证的 Quality 能力 | 对应开关 |
 |------|-------------------|---------|
-| `core.quality.demo_answer_quality_context` | `build_answer_quality_context` 答案质量上下文构建 | `GENERIC_AGENT_ANSWER_QUALITY=1` |
+| `examples.demos.quality.demo_answer_quality_context` | `build_answer_quality_context` 答案质量上下文构建 | `GENERIC_AGENT_ANSWER_QUALITY=1` |
+| `examples.demos.quality.demo_problem_framing` | `build_problem_framing_context` 问题框架上下文构建 | 始终激活 |
 
 相关文档:
 - `docs/answer_quality_policy.md` — 答案质量策略
@@ -85,13 +88,13 @@ skipped: 1
 
 | 模块 | 验证的 Skill 能力 |
 |------|------------------|
-| `core.skills.demo_skill_registry` | `SkillRegistry` 注册与 `SkillSelector` 选择 |
-| `core.skills.demo_skill_selector` | `SkillSelector` 按查询类型（plan/verify/performance/test/debug）选择 |
-| `core.skills.demo_skill_prompt_injector` | `SkillPromptInjector` SOP 块与环境变量检查 |
-| `core.skills.demo_skill_manifest` | `SkillManifest` 与 `SkillSelector` 协作 |
-| `core.skills.demo_skill_discovery` | `SkillDiscovery` → `to_manifest_entry` → `SkillRegistry` → `SkillSelector` |
-| `core.skills.demo_skill_effects` | `SkillEffects` 与 `build_execution_policy_from_skills` |
-| `core.skills.demo_skill_activation` | `build_skill_activation` / `export_skill_activation` / `build_optional_sop_context` |
+| `examples.demos.skills.demo_skill_registry` | `SkillRegistry` 注册与 `SkillSelector` 选择 |
+| `examples.demos.skills.demo_skill_selector` | `SkillSelector` 按查询类型（plan/verify/performance/test/debug）选择 |
+| `examples.demos.skills.demo_skill_prompt_injector` | `SkillPromptInjector` SOP 块与环境变量检查 |
+| `examples.demos.skills.demo_skill_manifest` | `SkillManifest` 与 `SkillSelector` 协作 |
+| `examples.demos.skills.demo_skill_discovery` | `SkillDiscovery` → `to_manifest_entry` → `SkillRegistry` → `SkillSelector` |
+| `examples.demos.skills.demo_skill_effects` | `SkillEffects` 与 `build_execution_policy_from_skills` |
+| `examples.demos.skills.demo_skill_activation` | `build_skill_activation` / `export_skill_activation` / `build_optional_sop_context` |
 
 当前状态（来自 `docs/runtime_capability_matrix.md`）:
 - `SkillRegistry` + `SkillSelector` — **活跃在主流程中**
@@ -103,9 +106,9 @@ skipped: 1
 
 | 模块 | 验证的 Memory 能力 |
 |------|------------------|
-| `core.memory.demo_memory_indexer` | `MemoryIndexer` + `MemoryStore` 历史记忆索引 |
-| `core.memory.demo_memory_store` | `MemoryStore` 结构化记忆存储 (SQLite) |
-| `core.memory.demo_write_gate` | `MemoryStore` 写入门控（source-gated 过滤） |
+| `examples.demos.memory.demo_memory_indexer` | `MemoryIndexer` + `MemoryStore` 历史记忆索引 |
+| `examples.demos.memory.demo_memory_store` | `MemoryStore` 结构化记忆存储 (SQLite) |
+| `examples.demos.memory.demo_write_gate` | `MemoryStore` 写入门控（source-gated 过滤） |
 
 当前状态:
 - `MemoryStore` + `MemoryIndexer` — **infra 就绪，不驱动 prompt 检索**
@@ -115,7 +118,8 @@ skipped: 1
 
 | 模块 | 验证的 Tool 能力 |
 |------|-----------------|
-| `core.tools.demo_schema_selector` | `ToolSchemaSelector` 基于规则的工具 schema 瘦身 |
+| `examples.demos.tools.demo_schema_selector` | `ToolSchemaSelector` 基于规则的工具 schema 瘦身 |
+| `examples.demos.tools.demo_schema_registry` | 中英文工具 schema 注册与结构一致性 |
 
 当前状态: `GENERIC_AGENT_SLIM_TOOLS=1` 开关控制
 
@@ -141,7 +145,7 @@ echo $?   # 必须为 0
 
 1. **确认运行环境正确**: 工作目录是仓库根目录，Python 环境有项目依赖
 2. **查看 stderr 输出**: runner 会显示最后 1000 字符
-3. **单独运行失败的 demo**: `python -m core.xxx.demo_yyy` 获取完整错误
+3. **单独运行失败的 demo**: `python -m examples.demos.xxx.demo_yyy` 获取完整错误
 4. **检查最近的改动**: 是否修改了该 demo 依赖的模块
 5. **禁止在失败时提交**: 修复回归或更新 demo 后再提交
 
@@ -149,8 +153,8 @@ echo $?   # 必须为 0
 
 | 文件 | 覆盖模块数 | 用途 |
 |------|----------|------|
-| `scripts/run_runtime_regression.py` | 9 | 原有的轻量回归（仅在 4 个类别中选择核心 demo） |
-| `scripts/runtime_regression_runner.py` | 18 | **全量回归** — 覆盖 5 个类别的全部 demo，是本文件的推荐替代 |
+| `scripts/run_runtime_regression.py` | 12 | 原有的轻量回归（仅在 4 个类别中选择核心 demo） |
+| `scripts/runtime_regression_runner.py` | 22 | **全量回归** — 覆盖 5 个类别的全部 demo，是本文件的推荐替代 |
 
 建议: 日常开发用 `runtime_regression_runner.py` 做完整检查；CI 中也使用完整版。
 
@@ -158,6 +162,6 @@ echo $?   # 必须为 0
 
 ## 五、预期结果
 
-当前（2026-05-02）在 `chore/phase1-security` 分支上，预期全部 18 个模块返回 `[PASS]`。
+当前（2026-05-02）在 `chore/phase1-security` 分支上，预期全部 22 个模块返回 `[PASS]`。
 
 如果任一模块返回 `[FAIL]`，该领域可能在最近的改动中被意外破坏，需要立即排查。
