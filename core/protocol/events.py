@@ -9,9 +9,11 @@ from typing import Any
 EVENT_KINDS = frozenset({
     "chunk",        # incremental streaming text (was {"next": ...})
     "done",         # final response (was {"done": ...})
+    "status",       # non-text backend status/progress event
     "turn_start",   # new LLM turn began
     "turn_end",     # LLM turn completed
     "turn_delta",   # delta within a turn (paired with chunk)
+    "frontier_state",  # expandable research/audit state snapshot
     "stopped",      # user aborted
     "error",        # backend exception
 })
@@ -31,6 +33,17 @@ _LEGACY_EVENT_MAP: dict[str, str] = {
     "stopped": "stopped",
     "error": "error",
 }
+
+
+def _coerce_int(*values: Any) -> int:
+    for value in values:
+        try:
+            if value is None or value == "":
+                continue
+            return int(value)
+        except (TypeError, ValueError):
+            continue
+    return 0
 
 
 @dataclass
@@ -64,7 +77,11 @@ class AgentOutputEvent:
 
         # Check event key first
         event_label = item.get("event", "")
-        if event_label in _LEGACY_EVENT_MAP:
+        item_type = item.get("type", "")
+        if item_type == "status":
+            kind = "turn_start" if item.get("event_type") == "classic_turn_started" else "status"
+            text = str(item.get("message", ""))
+        elif event_label in _LEGACY_EVENT_MAP:
             kind = _LEGACY_EVENT_MAP[event_label]
             if kind == "stopped":
                 text = item.get("next", "")
@@ -73,6 +90,8 @@ class AgentOutputEvent:
             elif kind == "error":
                 error = item.get("error", "")
                 text = item.get("done", item.get("next", ""))
+            elif kind == "turn_delta":
+                text = item.get("next", "")
         elif "done" in item:
             kind = "done"
             text = item.get("done", "")
@@ -86,7 +105,9 @@ class AgentOutputEvent:
         # Populate metadata from extra keys
         for key in ("final_answer_ready", "final_answer_text", "shortcut_type",
                      "skip_planner_followup", "shortcut_reason", "shortcut_confidence",
-                     "tool_error", "scope", "agent_name", "message"):
+                     "tool_error", "scope", "agent_name", "message", "type",
+                     "event_type", "classic_turn", "max_turns", "execution_state",
+                     "audit_context", "research_workflow_score", "frontier_state"):
             if key in item:
                 metadata[key] = item[key]
 
@@ -94,7 +115,12 @@ class AgentOutputEvent:
             kind=kind,
             text=str(text),
             source=str(item.get("source", "user")),
-            turn=int(item.get("turn", 0)),
+            turn=_coerce_int(
+                item.get("turn"),
+                item.get("classic_turn"),
+                item.get("current_turn"),
+                item.get("llm_turn"),
+            ),
             task_id=str(item.get("task_id", "")),
             error=str(error),
             metadata=metadata,
@@ -125,5 +151,7 @@ class AgentOutputEvent:
             item["event"] = self.kind
             if self.text:
                 item["next"] = self.text
+        elif self.kind == "frontier_state":
+            item["event"] = "frontier_state"
         item.update(self.metadata)
         return item

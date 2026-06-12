@@ -31,6 +31,56 @@ _ROUTE_BUDGET: dict[str | None, dict[str, int]] = {
 
 # Preview output directory (relative to project root)
 _PREVIEW_DIR = "temp/context_audit"
+_TRUNCATION_MARKER = "\n[truncated]"
+_TEXT_BLOCK_ORDER = (
+    "workspace",
+    "project",
+    "state",
+    "memory",
+    "recent_turns",
+    "working_memory",
+)
+_TOTAL_TRIM_ORDER = (
+    "working_memory",
+    "recent_turns",
+    "memory",
+    "state",
+    "project",
+    "workspace",
+)
+
+
+def _truncate_text(text: str, max_chars: int) -> str:
+    limit = max(int(max_chars or 0), 0)
+    if limit <= 0:
+        return ""
+    if len(text) <= limit:
+        return text
+    if limit <= len(_TRUNCATION_MARKER):
+        return text[:limit]
+    return text[: limit - len(_TRUNCATION_MARKER)].rstrip() + _TRUNCATION_MARKER
+
+
+def _fit_text_blocks_to_total_budget(blocks: dict[str, str], max_chars: int) -> dict[str, str]:
+    """Trim low-signal blocks until the packet honors the total budget."""
+    limit = max(int(max_chars or 0), 0)
+    fitted = {key: str(blocks.get(key) or "") for key in _TEXT_BLOCK_ORDER}
+    total = sum(len(value) for value in fitted.values())
+    if total <= limit:
+        return fitted
+
+    for key in _TOTAL_TRIM_ORDER:
+        if total <= limit:
+            break
+        current = fitted.get(key, "")
+        if not current:
+            continue
+        overflow = total - limit
+        target_len = max(len(current) - overflow, 0)
+        trimmed = _truncate_text(current, target_len)
+        fitted[key] = trimmed
+        total -= len(current) - len(trimmed)
+    return fitted
 
 
 @dataclass
@@ -46,6 +96,10 @@ class ContextPacket:
     memory_bundle: "MemoryBundle | None" = None
     recent_turns_block: str = ""          # M4: from build_recent_conversation_block()
     working_memory_block: str = ""        # M4: from _working_memory_message()
+    workspace_block: str = ""
+    project_block: str = ""
+    state_block: str = ""
+    memory_block: str = ""
     generated_at: float = 0.0
     total_chars: int = 0
     source_breakdown: dict[str, int] = field(default_factory=dict)
@@ -159,35 +213,39 @@ class ContextBuilder:
         recent_turns_chars = budget.get("recent_turns", 0)
         working_memory_chars = budget.get("working_memory", 0)
 
-        breakdown: dict[str, int] = {}
-
         # ── Workspace block (never truncated, small) ──
         ws_text = self._format_workspace(workspace) if workspace and workspace_chars > 0 else ""
         ws_text = ws_text[:workspace_chars] if workspace_chars > 0 else ""
-        breakdown["workspace"] = len(ws_text)
 
         # ── Project block ──
         pr_text = self._format_project(project) if project and project_chars > 0 else ""
         pr_text = pr_text[:project_chars] if project_chars > 0 else ""
-        breakdown["project"] = len(pr_text)
 
         # ── State block ──
         st_text = self._format_state(session, last_task, active_tasks) if state_chars > 0 else ""
         st_text = st_text[:state_chars] if state_chars > 0 else ""
-        breakdown["state"] = len(st_text)
 
         # ── Memory block ──
         mem_text = self._format_memory(memory_bundle, memory_chars) if memory_bundle and memory_chars > 0 else ""
-        breakdown["memory"] = len(mem_text)
 
         # ── Recent turns block (M4) ──
         rt_text = recent_turns_block[:recent_turns_chars] if recent_turns_block and recent_turns_chars > 0 else ""
-        breakdown["recent_turns"] = len(rt_text)
 
         # ── Working memory block (M4) ──
         wm_text = working_memory_block[:working_memory_chars] if working_memory_block and working_memory_chars > 0 else ""
-        breakdown["working_memory"] = len(wm_text)
 
+        text_blocks = _fit_text_blocks_to_total_budget(
+            {
+                "workspace": ws_text,
+                "project": pr_text,
+                "state": st_text,
+                "memory": mem_text,
+                "recent_turns": rt_text,
+                "working_memory": wm_text,
+            },
+            self._max_chars,
+        )
+        breakdown = {key: len(text_blocks[key]) for key in _TEXT_BLOCK_ORDER}
         total = sum(breakdown.values())
 
         return ContextPacket(
@@ -198,8 +256,12 @@ class ContextBuilder:
             last_active_task=last_task,
             active_tasks=active_tasks or [],
             memory_bundle=memory_bundle,
-            recent_turns_block=rt_text,
-            working_memory_block=wm_text,
+            recent_turns_block=text_blocks["recent_turns"],
+            working_memory_block=text_blocks["working_memory"],
+            workspace_block=text_blocks["workspace"],
+            project_block=text_blocks["project"],
+            state_block=text_blocks["state"],
+            memory_block=text_blocks["memory"],
             generated_at=time.time(),
             total_chars=total,
             source_breakdown=breakdown,
@@ -245,32 +307,17 @@ class ContextBuilder:
 
         parts: list[str] = []
         parts.append(
-            f"[CONTEXT PACKET — {packet.policy_mode} mode, "
+            f"[CONTEXT PACKET - {packet.policy_mode} mode, "
             f"{packet.total_chars} chars, route={packet.target_route}]"
         )
 
-        ws = packet.workspace
-        if ws:
+        if packet.workspace_block:
             parts.append("\n## Workspace")
-            parts.append(f"cwd: {ws.cwd}")
-            if ws.git_root:
-                parts.append(f"git_root: {ws.git_root}")
-            if ws.git_branch:
-                parts.append(f"branch: {ws.git_branch}")
-            parts.append(f"dirty: {ws.has_uncommitted_changes}")
-            if ws.dirty_files:
-                parts.append(f"changed: {', '.join(ws.dirty_files[:10])}")
+            parts.append(packet.workspace_block)
 
-        pr = packet.project
-        if pr:
+        if packet.project_block:
             parts.append("\n## Project")
-            parts.append(f"project_id: {pr.project_id}")
-            parts.append(f"name: {pr.project_name}")
-            parts.append(f"root: {pr.project_root}")
-            if pr.key_files:
-                parts.append(f"key_files: {', '.join(pr.key_files[:10])}")
-            if pr.languages:
-                parts.append(f"languages: {', '.join(pr.languages)}")
+            parts.append(packet.project_block)
 
         rt = packet.runtime
         if rt:
@@ -278,31 +325,13 @@ class ContextBuilder:
             parts.append(f"session_id: {rt.session_id}")
             parts.append(f"backend: {rt.agent_backend}")
 
-        if packet.current_session:
-            s = packet.current_session
+        if packet.state_block:
             parts.append("\n## Session")
-            parts.append(f"tasks: {s.task_count}")
-            if s.last_completed_task_id:
-                parts.append(f"last_completed: {s.last_completed_task_id}")
+            parts.append(packet.state_block)
 
-        if packet.last_active_task:
-            t = packet.last_active_task
-            parts.append("\n## Last Task")
-            parts.append(f"summary: {t.summary} [{t.status}]")
-            if t.exit_reason:
-                parts.append(f"exit: {t.exit_reason}")
-
-        if packet.active_tasks:
-            parts.append("\n## Active Tasks")
-            for t in packet.active_tasks[:5]:
-                parts.append(f"- {t.summary} [{t.status}]")
-
-        if packet.memory_bundle and packet.memory_bundle.blocks:
+        if packet.memory_block:
             parts.append("\n## Relevant Memory")
-            for b in packet.memory_bundle.blocks:
-                src = f"[{b.source} | priority={b.source_priority} | score={b.relevance_score:.2f}]"
-                parts.append(f"\n{src}")
-                parts.append(b.content)
+            parts.append(packet.memory_block)
 
         # M4: Recent turns block
         if packet.recent_turns_block:
@@ -372,11 +401,14 @@ class ContextBuilder:
             if budget <= 0:
                 break
             header = f"[{b.source} | priority={b.source_priority} | score={b.relevance_score:.2f}]"
+            if len(header) + 1 >= budget:
+                parts.append(_truncate_text(header, budget))
+                break
             parts.append(header)
             budget -= len(header) + 1
             content = b.content
             if len(content) > budget:
-                content = content[:budget] + "…"
+                content = _truncate_text(content, budget)
             parts.append(content)
             budget -= len(content) + 1
         return "\n".join(parts)

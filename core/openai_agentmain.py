@@ -25,12 +25,25 @@ from urllib.parse import urlparse
 
 from .router_rules import RouterRules, RouteResult
 from .quality import (
+    ExecutionAction,
+    ExecutionState,
+    ResponseClaim,
+    StateDelta,
     answer_quality_enabled,
     build_answer_quality_context,
     build_problem_framing_context,
+    build_research_code_priority_context,
+    build_research_workflow_context,
+    evaluate_execution_honesty,
+    execution_honesty_enabled,
+    format_honesty_user_notice,
     problem_framing_enabled,
+    research_code_priority_enabled,
+    research_workflow_enabled,
     should_inject_answer_quality_context,
     should_inject_problem_framing,
+    should_inject_research_code_priority,
+    should_inject_research_workflow,
 )
 from .runtime import (
     RuntimeProfiler,
@@ -49,6 +62,7 @@ from .runtime.tool_contract import (
     synthetic_handoff_tool_name,
     validate_visible_tools,
 )
+from .prompts import build_agent_behavior_kernel
 from .skills import (
     build_optional_sop_context,
     build_skill_activation,
@@ -142,6 +156,10 @@ def smart_format(data: Any, max_str_len: int = 100, omit_str: str = " ... ") -> 
 
 def _summary_protocol() -> str:
     return SUMMARY_PROTOCOL_EN if os.environ.get("GA_LANG") == "en" else SUMMARY_PROTOCOL_ZH
+
+
+def _behavior_kernel() -> str:
+    return build_agent_behavior_kernel(max_chars=1500)
 
 
 def _extract_summary_line(text: str) -> str:
@@ -1001,6 +1019,16 @@ def _inject_turn_markers(text: str, start_turn: int = 1) -> str:
     return f"**LLM Running (Turn {start_turn}) ...**\n\n{text}"
 
 
+def _latest_turn_marker(text: str) -> int:
+    matches = re.findall(r"LLM Running \(Turn (\d+)\)", str(text or ""))
+    if not matches:
+        return 0
+    try:
+        return int(matches[-1])
+    except (TypeError, ValueError):
+        return 0
+
+
 def _extract_classic_executor_report(text: str) -> str:
     if not text:
         return ""
@@ -1734,9 +1762,10 @@ def _strip_stream_artifacts(text: str) -> str:
     # Bare XML processing instructions
     text = re.sub(r"<\?xml[^>]*\?>", "", text)
 
-    # Clean up: collapse triple+ newlines, strip leading/trailing whitespace
+    # Clean up only repeated newlines. Do not strip per-delta whitespace: stream
+    # chunks often carry leading/trailing spaces that are semantically required
+    # when the frontend concatenates them.
     text = re.sub(r"\n{3,}", "\n\n", text)
-    text = text.strip()
 
     return text
 
@@ -2045,12 +2074,20 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     current = str(item.get("next") or "")
                     if current and on_progress is not None:
                         try:
-                            on_progress(current, first_progress)
+                            on_progress(
+                                {
+                                    "type": "classic_progress",
+                                    "text": current,
+                                    "turn": item.get("turn", 0),
+                                },
+                                first_progress,
+                            )
                         except Exception:
                             pass
                         first_progress = False
                 if "done" in item:
                     final_output = str(item.get("done") or "").strip()
+                    execution_state = item.get("execution_state")
                     self._store_executor_result_state(
                         {
                             "final_answer_ready": bool(item.get("final_answer_ready")),
@@ -2060,6 +2097,7 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             "shortcut_reason": str(item.get("shortcut_reason") or "").strip(),
                             "shortcut_confidence": item.get("shortcut_confidence"),
                             "tool_error": bool(item.get("tool_error")),
+                            "execution_state": execution_state if isinstance(execution_state, dict) else {},
                         }
                     )
                     break
@@ -2347,7 +2385,8 @@ class OpenAIOrchestratedAgent(AgentBackend):
             name="chat_specialist",
             handoff_description="Handle simple conversation or explanation-only requests.",
             instructions=(
-                f"{CAPABILITY_BRIEF} "
+                f"{CAPABILITY_BRIEF}"
+                f"{_behavior_kernel()}"
                 "You handle simple conversational requests that do not require tool use. "
                 "If asked about tools or skills, explain that this app can delegate execution to "
                 "the classic GenericAgent executor through the workflow coordinator. "
@@ -2768,7 +2807,8 @@ class OpenAIOrchestratedAgent(AgentBackend):
             name="chat_specialist",
             handoff_description="Handle simple conversation or explanation-only requests.",
             instructions=(
-                f"{CAPABILITY_BRIEF} "
+                f"{CAPABILITY_BRIEF}"
+                f"{_behavior_kernel()}"
                 "You handle simple conversational requests that do not require tool use. "
                 "If asked about tools or skills, explain that this app can delegate execution to "
                 "the classic GenericAgent executor through the workflow coordinator. "
@@ -2794,7 +2834,8 @@ class OpenAIOrchestratedAgent(AgentBackend):
             name="planner_executor",
             handoff_description="General-purpose planner and executor for all non-chat tasks.",
             instructions=(
-                f"{CAPABILITY_BRIEF} "
+                f"{CAPABILITY_BRIEF}"
+                f"{_behavior_kernel()}"
                 "You handle all non-chat execution tasks in this runtime, including code, review, "
                 "research, and mixed multi-step work.\n"
                 "1. FIRST create a short, actionable plan (2-5 steps)\n"
@@ -2966,6 +3007,8 @@ class OpenAIOrchestratedAgent(AgentBackend):
             selected_agent_name = "root"
             active_tool_span = None
             active_tool_name = ""
+            execution_actions: list[ExecutionAction] = []
+            _executor_execution_state: dict[str, Any] = {}
             active_llm_turn_span = None
             planning_span = None
             execution_span = None
@@ -2979,22 +3022,36 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 if not full_text:
                     return
                 if force or len(full_text) - last_sent_len >= 12:
-                    display_queue.put({"next": full_text, "source": source, "turn": max(seen_turn, 0)})
+                    display_queue.put(
+                        {
+                            "next": full_text,
+                            "source": source,
+                            "turn": max(seen_turn, classic_progress_turn, _latest_turn_marker(full_text), 0),
+                        }
+                    )
                     last_sent_len = len(full_text)
 
             classic_progress_snapshot = ""
+            classic_progress_turn = 0
 
             def executor_progress(snapshot: Any, reset: bool = False) -> None:
-                nonlocal full_text, classic_progress_snapshot
+                nonlocal full_text, classic_progress_snapshot, classic_progress_turn
                 if isinstance(snapshot, dict) and snapshot.get("type") == "status":
                     status_item = dict(snapshot)
                     status_item.setdefault("source", source)
                     status_item.setdefault("task_id", self._profile_run_id)
                     display_queue.put(status_item)
                     return
+                if isinstance(snapshot, dict) and snapshot.get("type") == "classic_progress":
+                    try:
+                        classic_progress_turn = max(classic_progress_turn, int(snapshot.get("turn") or 0))
+                    except (TypeError, ValueError):
+                        pass
+                    snapshot = snapshot.get("text", "")
                 snapshot = str(snapshot or "")
                 if not snapshot:
                     return
+                classic_progress_turn = max(classic_progress_turn, _latest_turn_marker(snapshot))
                 if reset or not classic_progress_snapshot:
                     classic_progress_snapshot = snapshot
                     if full_text and not full_text.endswith("\n\n"):
@@ -3064,6 +3121,100 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 except Exception:
                     pass
 
+            def build_openai_execution_state() -> ExecutionState:
+                executor_actions: list[ExecutionAction] = []
+                executor_state_delta = {}
+                if isinstance(_executor_execution_state, dict):
+                    for action in _executor_execution_state.get("actual_actions") or []:
+                        if not isinstance(action, dict):
+                            continue
+                        executor_actions.append(
+                            ExecutionAction(
+                                tool=str(action.get("tool") or ""),
+                                input_summary=str(action.get("input_summary") or ""),
+                                output_summary=str(action.get("output_summary") or ""),
+                                status=str(action.get("status") or ""),
+                                timestamp=str(action.get("timestamp") or ""),
+                            )
+                        )
+                    raw_delta = _executor_execution_state.get("state_delta")
+                    if isinstance(raw_delta, dict):
+                        executor_state_delta = raw_delta
+                all_actions = list(execution_actions) + executor_actions
+                successful_tools = {
+                    action.tool
+                    for action in all_actions
+                    if str(action.status or "").strip().lower() in {"success", "ok", "completed", "done"}
+                }
+                files_changed = tuple(
+                    str(path)
+                    for path in (executor_state_delta.get("files_changed") or ())
+                    if str(path or "").strip()
+                )
+                checkpoints_updated = bool(executor_state_delta.get("checkpoints_updated"))
+                metrics_verified = bool(executor_state_delta.get("metrics_verified")) or (
+                    "run_genericagent_executor" in successful_tools
+                )
+                response_claims: list[ResponseClaim] = []
+                if successful_tools:
+                    response_claims.append(
+                        ResponseClaim(
+                            claim="OpenAI orchestration observed successful tool output.",
+                            claim_type="causality",
+                            evidence_status="indirect",
+                            source="openai_stream_events",
+                            evidence_type="indirect",
+                            confidence=0.5,
+                        )
+                    )
+                if "run_genericagent_executor" in successful_tools:
+                    response_claims.append(
+                        ResponseClaim(
+                            claim="GenericAgent executor returned a successful tool output.",
+                            claim_type="quant",
+                            evidence_status="tool_verified",
+                            source="openai_stream_events",
+                            evidence_type="direct",
+                            confidence=0.7,
+                            verified=True,
+                        )
+                    )
+                return ExecutionState(
+                    actual_actions=all_actions,
+                    state_delta=StateDelta(
+                        files_changed=files_changed,
+                        checkpoints_updated=checkpoints_updated,
+                        metrics_verified=metrics_verified,
+                    ),
+                    response_claims=response_claims,
+                )
+
+            def apply_execution_honesty_gate(final_text: str) -> tuple[str, bool]:
+                if not execution_honesty_enabled():
+                    return final_text, False
+                result = evaluate_execution_honesty(final_text, build_openai_execution_state())
+                if profiler is not None:
+                    try:
+                        profiler.record_event(
+                            "execution_honesty_gate",
+                            kind="quality",
+                            metadata={
+                                "allowed": result.allowed,
+                                "findings": [finding.rule for finding in result.findings],
+                                "successful_tool_count": sum(
+                                    1
+                                    for action in execution_actions
+                                    if str(action.status or "").strip().lower()
+                                    in {"success", "ok", "completed", "done"}
+                                ),
+                            },
+                        )
+                    except Exception:
+                        pass
+                if result.allowed:
+                    return final_text, False
+                return format_honesty_user_notice(result), True
+
             try:
                 # Create a shared artifact store for this run (Level 4 blackboard).
                 from core.runtime.shared_store import SharedArtifactStore
@@ -3118,10 +3269,25 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 answer_quality_query_match = should_inject_answer_quality_context(raw_query, route_target=None)
                 problem_framing_flag = bool(problem_framing_enabled())
                 problem_framing_query_match = should_inject_problem_framing(raw_query)
+                research_code_priority_flag = bool(research_code_priority_enabled())
+                research_code_priority_query_match = should_inject_research_code_priority(
+                    raw_query,
+                    route_target=route_target,
+                )
+                research_workflow_flag = bool(research_workflow_enabled())
+                research_workflow_query_match = should_inject_research_workflow(
+                    raw_query,
+                    route_target=route_target,
+                )
                 answer_quality_route_override = (
                     answer_quality_flag
                     and answer_quality_query_match
                     and route_target != "executor"
+                )
+                research_workflow_route_override = (
+                    research_workflow_flag
+                    and research_workflow_query_match
+                    and route_target != "code"
                 )
                 route_hint = None
                 if route_result.target == "chat":
@@ -3140,6 +3306,10 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     route_target = "executor"
                     execution_mode = "single_agent"
                     route_hint = "[ROUTER_HINT] This is a roadmap / architecture / capability-planning request. Transfer to planner_executor in single-agent mode immediately."
+                if research_workflow_route_override:
+                    route_target = "executor"
+                    execution_mode = "single_agent"
+                    route_hint = "[ROUTER_HINT] This is an open-ended research strategy workflow request. Transfer to planner_executor in single-agent mode immediately."
                 if runtime_host is not None:
                     try:
                         runtime_host.apply_route(
@@ -3274,6 +3444,86 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             "frame": None,
                             "reason": "problem framing disabled",
                         }
+                research_code_priority_context = {
+                    "block": "",
+                    "chars": 0,
+                    "matched": False,
+                    "reason": "disabled",
+                }
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS:
+                    if research_code_priority_flag:
+                        if research_code_priority_query_match:
+                            research_code_priority_context = build_research_code_priority_context(
+                                raw_query,
+                                route_target=route_target,
+                                max_chars=1200,
+                            )
+                        else:
+                            research_code_priority_context = {
+                                "block": "",
+                                "chars": 0,
+                                "matched": False,
+                                "reason": "query did not match research/code priority triggers",
+                            }
+                    else:
+                        research_code_priority_context = {
+                            "block": "",
+                            "chars": 0,
+                            "matched": False,
+                            "reason": "research/code priority guard disabled",
+                        }
+                research_workflow_context = {
+                    "block": "",
+                    "chars": 0,
+                    "matched": False,
+                    "reason": "disabled",
+                    "required_sections": [],
+                    "required_audit_gates": [],
+                }
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS:
+                    if research_workflow_flag:
+                        if research_workflow_query_match:
+                            research_workflow_context = build_research_workflow_context(
+                                raw_query,
+                                route_target=route_target,
+                            )
+                        else:
+                            research_workflow_context = {
+                                "block": "",
+                                "chars": 0,
+                                "matched": False,
+                                "reason": "query did not match open research workflow triggers",
+                                "required_sections": [],
+                                "required_audit_gates": [],
+                            }
+                    else:
+                        research_workflow_context = {
+                            "block": "",
+                            "chars": 0,
+                            "matched": False,
+                            "reason": "research workflow gate disabled",
+                            "required_sections": [],
+                            "required_audit_gates": [],
+                        }
+                if profiler is not None:
+                    profiler.record_event(
+                        "research_workflow_gate",
+                        kind="agent",
+                        metadata={
+                            "enabled": research_workflow_flag,
+                            "query_match": research_workflow_query_match,
+                            "route_override": research_workflow_route_override,
+                            "injected": bool(research_workflow_context.get("block")),
+                            "chars": int(research_workflow_context.get("chars") or 0),
+                            "required_sections": list(
+                                research_workflow_context.get("required_sections") or []
+                            ),
+                            "required_audit_gates": list(
+                                research_workflow_context.get("required_audit_gates") or []
+                            ),
+                            "reason": str(research_workflow_context.get("reason") or ""),
+                        },
+                    )
                 read_prefetch_should_prefetch = False
                 read_prefetch_target_file: str | None = None
                 read_prefetch_reason = "not_checked"
@@ -3312,9 +3562,9 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 if selected_agent_name == "planner_executor" and skill_sop_flag:
                     skill_sop_context = build_optional_sop_context(
                         user_input=raw_query,
-                        max_skills=2,
-                        max_chars_per_skill=1800,
-                        max_total_chars=3500,
+                        max_skills=1,
+                        max_chars_per_skill=700,
+                        max_total_chars=1400,
                         phase="planner",
                     )
                 skill_activation = None
@@ -3420,6 +3670,20 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     problem_framing_context_chars=int(problem_framing_context.get("chars") or 0),
                     problem_framing_frame=str(problem_framing_context.get("frame") or ""),
                     problem_framing_reason=str(problem_framing_context.get("reason") or ""),
+                    research_code_priority_enabled=research_code_priority_flag,
+                    research_code_priority_context_injected=bool(research_code_priority_context.get("block")),
+                    research_code_priority_context_chars=int(research_code_priority_context.get("chars") or 0),
+                    research_code_priority_reason=str(research_code_priority_context.get("reason") or ""),
+                    research_workflow_enabled=research_workflow_flag,
+                    research_workflow_context_injected=bool(research_workflow_context.get("block")),
+                    research_workflow_context_chars=int(research_workflow_context.get("chars") or 0),
+                    research_workflow_reason=str(research_workflow_context.get("reason") or ""),
+                    research_workflow_required_sections=list(
+                        research_workflow_context.get("required_sections") or []
+                    ),
+                    research_workflow_required_audit_gates=list(
+                        research_workflow_context.get("required_audit_gates") or []
+                    ),
                     read_prefetch_should_prefetch=read_prefetch_should_prefetch,
                     read_prefetch_target_file=read_prefetch_target_file,
                     read_prefetch_reason=read_prefetch_reason,
@@ -3448,8 +3712,19 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 answer_quality_block = _sanitize_runtime_injected_text(
                     str(answer_quality_context.get("block") or "").strip()
                 )
+                research_code_priority_block = _sanitize_runtime_injected_text(
+                    str(research_code_priority_context.get("block") or "").strip()
+                )
+                answer_quality_block = "\n\n".join(
+                    block for block in (answer_quality_block, research_code_priority_block) if block
+                )
                 if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS and answer_quality_block:
                     inputs.append({"role": "user", "content": answer_quality_block})
+                research_workflow_block = _sanitize_runtime_injected_text(
+                    str(research_workflow_context.get("block") or "").strip()
+                )
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS and research_workflow_block:
+                    inputs.append({"role": "user", "content": research_workflow_block})
                 problem_framing_block = _sanitize_runtime_injected_text(
                     str(problem_framing_context.get("block") or "").strip()
                 )
@@ -3548,6 +3823,7 @@ class OpenAIOrchestratedAgent(AgentBackend):
                         legacy_memory=legacy_memory_block,
                         route_hint=route_hint if (route_hint and selected_agent is agents["root"]) else "",
                         answer_quality=answer_quality_block,
+                        research_workflow=research_workflow_block,
                         sop_context=optional_sop_block,
                         prefetch_block=prefetch_block if prefetch_injected else "",
                         clarification=_clarify_text,
@@ -3587,6 +3863,20 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             "answer_quality_context_injected": bool(answer_quality_context.get("block")),
                             "answer_quality_context_chars": int(answer_quality_context.get("chars") or 0),
                             "answer_quality_reason": str(answer_quality_context.get("reason") or ""),
+                            "research_code_priority_enabled": research_code_priority_flag,
+                            "research_code_priority_context_injected": bool(research_code_priority_context.get("block")),
+                            "research_code_priority_context_chars": int(research_code_priority_context.get("chars") or 0),
+                            "research_code_priority_reason": str(research_code_priority_context.get("reason") or ""),
+                            "research_workflow_enabled": research_workflow_flag,
+                            "research_workflow_context_injected": bool(research_workflow_context.get("block")),
+                            "research_workflow_context_chars": int(research_workflow_context.get("chars") or 0),
+                            "research_workflow_reason": str(research_workflow_context.get("reason") or ""),
+                            "research_workflow_required_sections": list(
+                                research_workflow_context.get("required_sections") or []
+                            ),
+                            "research_workflow_required_audit_gates": list(
+                                research_workflow_context.get("required_audit_gates") or []
+                            ),
                             "read_prefetch_should_prefetch": read_prefetch_should_prefetch,
                             "read_prefetch_target_file": read_prefetch_target_file,
                             "read_prefetch_reason": read_prefetch_reason,
@@ -3700,8 +3990,23 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             _stop_manual_span(active_tool_span)
                             active_tool_span = None
                             tool_output_summary = self._compact_event_text(getattr(event.item, "output", None), max_len=200)
+                            if active_tool_name:
+                                execution_actions.append(
+                                    ExecutionAction(
+                                        tool=active_tool_name,
+                                        input_summary=active_tool_name,
+                                        output_summary=tool_output_summary,
+                                        status="success",
+                                        timestamp=datetime.now().isoformat(timespec="seconds"),
+                                    )
+                                )
+                                execution_actions[:] = execution_actions[-50:]
                             if active_tool_name == "run_genericagent_executor":
                                 executor_state = self._consume_executor_result_state()
+                                if isinstance(executor_state, dict):
+                                    raw_execution_state = executor_state.get("execution_state")
+                                    if isinstance(raw_execution_state, dict):
+                                        _executor_execution_state = raw_execution_state
                                 if self._should_skip_planner_followup(executor_state):
                                     planner_followup_override = executor_state
                                     if profiler is not None:
@@ -3770,7 +4075,11 @@ class OpenAIOrchestratedAgent(AgentBackend):
 
                 if planner_followup_override is not None:
                     final_text = str(planner_followup_override.get("final_answer_text") or "").strip()
-                    if not full_text.strip():
+                    final_text, honesty_blocked = apply_execution_honesty_gate(final_text)
+                    if honesty_blocked:
+                        full_text = _inject_turn_markers(final_text)
+                        seen_turn = max(1, full_text.count("LLM Running (Turn"))
+                    elif not full_text.strip():
                         full_text = _inject_turn_markers(final_text or "[Empty response]")
                         seen_turn = max(1, full_text.count("LLM Running (Turn"))
                     elif final_text and final_text not in full_text:
@@ -3821,7 +4130,13 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             pass
                     runtime_complete_active_turn()
                     runtime_finalize_success(agent_line)
-                    display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 1)})
+                    display_queue.put(
+                        {
+                            "done": full_text,
+                            "source": source,
+                            "turn": max(seen_turn, classic_progress_turn, _latest_turn_marker(full_text), 1),
+                        }
+                    )
                     return
 
                 if result.run_loop_exception:
@@ -3839,9 +4154,23 @@ class OpenAIOrchestratedAgent(AgentBackend):
                         _classic_executor_plan(f"Unusable orchestration output: {final_text or '[empty]'}"),
                     )
                     _stop_manual_span(fallback_span)
+                    execution_actions.append(
+                        ExecutionAction(
+                            tool="classic_executor_fallback",
+                            input_summary="classic_executor_fallback",
+                            output_summary=self._compact_event_text(final_text, max_len=200),
+                            status="error" if str(final_text).startswith("[Executor Error]") else "success",
+                            timestamp=datetime.now().isoformat(timespec="seconds"),
+                        )
+                    )
+                    execution_actions[:] = execution_actions[-50:]
                     full_text = _inject_turn_markers(final_text)
                     seen_turn = max(1, full_text.count("LLM Running (Turn"))
-                if not full_text.strip():
+                final_text, honesty_blocked = apply_execution_honesty_gate(final_text)
+                if honesty_blocked:
+                    full_text = _inject_turn_markers(final_text)
+                    seen_turn = max(1, full_text.count("LLM Running (Turn"))
+                elif not full_text.strip():
                     full_text = _inject_turn_markers(final_text or "[Empty response]")
                 elif final_text and final_text not in full_text:
                     if seen_turn == 0:
@@ -3885,7 +4214,13 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 # 发送done信号通知前端流结束
                 runtime_complete_active_turn()
                 runtime_finalize_success(agent_line)
-                display_queue.put({"done": full_text, "source": source, "turn": max(seen_turn, 0)})
+                display_queue.put(
+                    {
+                        "done": full_text,
+                        "source": source,
+                        "turn": max(seen_turn, classic_progress_turn, _latest_turn_marker(full_text), 0),
+                    }
+                )
                 return  # 成功完成，退出重试循环
 
             except (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError) as e:

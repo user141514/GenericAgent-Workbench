@@ -21,12 +21,12 @@ class ToolSchemaSelector:
     BASE_READ_ONLY = {"file_read", "code_run", "ask_user"}
     FILE_DISCOVERY = {"file_read", "code_run", "ask_user"}
     WRITE_TOOLS = {"file_patch", "file_write"}
-    WEB_TOOLS = {"web_scan", "web_execute_js", "browser_agent"}
+    WEB_TOOLS = {"web_search", "web_scan", "web_execute_js", "browser_agent"}
     MEMORY_HELPERS = {"update_working_checkpoint", "start_long_term_update"}
     MEMORY_QUERY_TOOLS = {"file_read", "code_run", "ask_user"}
     REVIEW_BASE = {"file_read", "code_run", "ask_user", "update_working_checkpoint"}
     CODE_BASE = {"file_read", "code_run", "file_patch", "file_write", "ask_user", "update_working_checkpoint"}
-    RESEARCH_BASE = {"file_read", "code_run", "ask_user"}
+    RESEARCH_BASE = {"file_read", "code_run", "ask_user", "web_search"}
 
     READ_PATTERNS = (
         r"readme",

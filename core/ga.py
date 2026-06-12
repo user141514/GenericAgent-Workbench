@@ -1,13 +1,25 @@
 import sys, os, re, json, time, threading, importlib
 from datetime import datetime
 from pathlib import Path
-import tempfile, traceback, subprocess, itertools, collections, difflib
+import tempfile, traceback, subprocess, itertools, collections, difflib, hashlib, shutil
+from urllib.parse import quote_plus
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 sys.path.append(PROJECT_ROOT)
 
 from .agent_loop import BaseHandler, StepOutcome, json_default
+from .quality.execution_honesty import (
+    ExecutionAction,
+    ExecutionState,
+    ResponseClaim,
+    StateDelta,
+    evaluate_execution_honesty,
+    execution_honesty_enabled,
+    execution_honesty_repair_enabled,
+    format_honesty_gate_feedback,
+    format_honesty_user_notice,
+)
 from .runtime.clarification_gate import (
     clarification_gate_enabled,
     should_allow_clarification,
@@ -15,6 +27,9 @@ from .runtime.clarification_gate import (
     emit_clarification_allowed,
     emit_clarification_denied,
 )
+from .runtime.code_preflight import evaluate_code_run_preflight
+from .runtime.path_safety import ToolPathResult, resolve_tool_path
+from .runtime.web_tool_errors import enrich_web_tool_result, web_tool_failure_prompt
 
 def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop_signal=[]):
     """代码执行器
@@ -104,18 +119,247 @@ def ask_user(question, candidates=None):
 
 from . import simphtml
 driver = None
+_tmwd_browser_proc = None
+
+
+def _env_enabled(name, default="1"):
+    return os.environ.get(name, default).strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _find_tmwd_browser_exe():
+    override = os.environ.get("GA_BROWSER_EXE", "").strip()
+    candidates = [
+        override,
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+    return ""
+
+
+def _build_tmwd_browser_cmd(browser_exe, profile_dir, extension_dir, start_url):
+    return [
+        browser_exe,
+        f"--user-data-dir={profile_dir}",
+        f"--load-extension={extension_dir}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        start_url,
+    ]
+
+
+def _launch_tmwd_browser():
+    global _tmwd_browser_proc
+    if not _env_enabled("GENERIC_AGENT_WEB_AUTOLAUNCH", "1"):
+        return False
+    if _tmwd_browser_proc is not None and _tmwd_browser_proc.poll() is None:
+        return True
+    browser_exe = _find_tmwd_browser_exe()
+    extension_dir = os.path.join(PROJECT_ROOT, "assets", "tmwd_cdp_bridge")
+    if not browser_exe or not os.path.isdir(extension_dir):
+        return False
+    profile_dir = os.environ.get("GENERIC_AGENT_TMWD_PROFILE_DIR") or os.path.join(
+        PROJECT_ROOT, "temp", "tmwd_edge_profile"
+    )
+    start_url = os.environ.get("GENERIC_AGENT_WEB_AUTOLAUNCH_URL", "https://example.com")
+    os.makedirs(profile_dir, exist_ok=True)
+    cmd = _build_tmwd_browser_cmd(browser_exe, profile_dir, extension_dir, start_url)
+    creationflags = 0
+    if os.name == "nt" and _env_enabled("GENERIC_AGENT_WEB_AUTOLAUNCH_HIDE", "0"):
+        creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        _tmwd_browser_proc = subprocess.Popen(
+            cmd,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            creationflags=creationflags,
+        )
+        print(f"[TMWebDriver] launched browser with extension: {browser_exe}")
+        return True
+    except Exception as e:
+        print(f"[TMWebDriver] browser autolaunch failed: {e}")
+        return False
+
+
+def _wait_for_tmwd_sessions(driver_obj, timeout=20):
+    sessions = []
+    deadline = time.time() + max(0, timeout)
+    while time.time() < deadline:
+        time.sleep(1)
+        sessions = driver_obj.get_all_sessions()
+        if sessions:
+            break
+    return sessions
+
+
 def first_init_driver():
     global driver
     from .TMWebDriver import TMWebDriver
     driver = TMWebDriver()
-    for i in range(20):
-        time.sleep(1)
-        sess = driver.get_all_sessions()
-        if len(sess) > 0: break
+    sess = _wait_for_tmwd_sessions(driver, timeout=20)
+    if len(sess) == 0 and _launch_tmwd_browser():
+        sess = _wait_for_tmwd_sessions(driver, timeout=20)
     if len(sess) == 0: return 
     if len(sess) == 1: 
         #driver.newtab()
         time.sleep(3)
+
+
+_SEARCH_ENGINES = {
+    "bing": "https://www.bing.com/search?q={query}",
+    "duckduckgo": "https://duckduckgo.com/?q={query}",
+    "google": "https://www.google.com/search?q={query}",
+    "scholar": "https://scholar.google.com/scholar?q={query}",
+}
+
+
+def _web_search_url(query, engine="bing"):
+    engine_key = str(engine or "bing").strip().lower()
+    template = _SEARCH_ENGINES.get(engine_key, _SEARCH_ENGINES["bing"])
+    return template.format(query=quote_plus(str(query or "").strip()))
+
+
+def _web_search_extract_script(max_results=8):
+    return f"""
+return (() => {{
+  const maxResults = {int(max(1, min(max_results, 20)))};
+  const badHosts = new Set([
+    "www.bing.com", "bing.com", "www.google.com", "google.com",
+    "duckduckgo.com", "www.duckduckgo.com", "scholar.google.com"
+  ]);
+  function normalizeText(text) {{
+    return String(text || "").replace(/\\s+/g, " ").trim();
+  }}
+  function absoluteHref(a) {{
+    try {{ return new URL(a.getAttribute("href") || a.href || "", location.href).href; }}
+    catch (_) {{ return ""; }}
+  }}
+  function unwrapUrl(url) {{
+    try {{
+      const u = new URL(url);
+      const q = u.searchParams.get("q") || u.searchParams.get("url");
+      if (q && /^https?:\\/\\//i.test(q)) return q;
+      const enc = u.searchParams.get("u");
+      if (enc && enc.startsWith("a1")) {{
+        try {{
+          const b64 = enc.slice(2).replace(/-/g, "+").replace(/_/g, "/");
+          const decoded = atob(b64);
+          if (/^https?:\\/\\//i.test(decoded)) return decoded;
+        }} catch (_) {{}}
+      }}
+    }} catch (_) {{}}
+    return url;
+  }}
+  function isUsable(url, title) {{
+    if (!/^https?:\\/\\//i.test(url)) return false;
+    if (!title || title.length < 3) return false;
+    try {{
+      const host = new URL(url).hostname.replace(/^www\\./, "");
+      if (badHosts.has(host) && /\\/(search|preferences|images|videos|maps)?/i.test(new URL(url).pathname)) return false;
+    }} catch (_) {{}}
+    return true;
+  }}
+  const seen = new Set();
+  const results = [];
+  for (const a of Array.from(document.querySelectorAll("a[href]"))) {{
+    let url = unwrapUrl(absoluteHref(a));
+    const title = normalizeText(a.innerText || a.textContent || a.getAttribute("aria-label"));
+    if (!isUsable(url, title)) continue;
+    const key = url.split("#")[0];
+    if (seen.has(key)) continue;
+    seen.add(key);
+    let container = a.closest("li, article, .result, .b_algo, .g, div") || a.parentElement;
+    let snippet = normalizeText(container ? container.innerText : "");
+    if (snippet.startsWith(title)) snippet = normalizeText(snippet.slice(title.length));
+    if (snippet.length > 320) snippet = snippet.slice(0, 320) + "...";
+    results.push({{ rank: results.length + 1, title, url, snippet }});
+    if (results.length >= maxResults) break;
+  }}
+  return {{
+    title: document.title,
+    url: location.href,
+    result_count: results.length,
+    results
+  }};
+}})();
+"""
+
+
+def web_search(query, engine="bing", max_results=8, timeout=18, switch_tab_id=None):
+    """Deterministic browser-backed web search.
+
+    This does not call an LLM or paid search API. It navigates a connected
+    browser tab to a public search URL and extracts visible result links.
+    """
+    global driver
+    query = str(query or "").strip()
+    if not query:
+        return {"status": "error", "msg": "query is empty"}
+    try:
+        if driver is None:
+            first_init_driver()
+        if driver is None or len(driver.get_all_sessions()) == 0:
+            return {
+                "status": "error",
+                "msg": "No available browser tabs; browser extension is not connected",
+            }
+        if switch_tab_id:
+            driver.default_session_id = switch_tab_id
+        elif not driver.default_session_id:
+            sessions = driver.get_all_sessions()
+            if sessions:
+                driver.default_session_id = sessions[0].get("id")
+
+        engine_key = str(engine or "bing").strip().lower()
+        if engine_key not in _SEARCH_ENGINES:
+            engine_key = "bing"
+        search_url = _web_search_url(query, engine_key)
+
+        try:
+            driver.execute_js(f"window.location.href = {json.dumps(search_url)}; return location.href;", timeout=3)
+        except Exception:
+            pass
+
+        deadline = time.time() + max(3, min(int(timeout or 18), 60))
+        last_error = ""
+        payload = None
+        while time.time() < deadline:
+            time.sleep(1.0)
+            try:
+                raw = driver.execute_js(_web_search_extract_script(max_results), timeout=6)
+                payload = raw.get("data", raw) if isinstance(raw, dict) else raw
+                if isinstance(payload, dict) and payload.get("result_count", 0):
+                    break
+            except Exception as e:
+                last_error = str(e)
+                continue
+
+        if isinstance(payload, dict) and payload.get("result_count", 0):
+            return {
+                "status": "success",
+                "query": query,
+                "engine": engine_key,
+                "search_url": search_url,
+                "page_url": payload.get("url", ""),
+                "page_title": payload.get("title", ""),
+                "result_count": int(payload.get("result_count") or 0),
+                "results": list(payload.get("results") or [])[: int(max_results)],
+            }
+        return {
+            "status": "error",
+            "query": query,
+            "engine": engine_key,
+            "search_url": search_url,
+            "msg": "No search results extracted before timeout.",
+            "last_error": last_error,
+        }
+    except Exception as e:
+        return {"status": "error", "query": query, "msg": format_error(e)}
+
 
 def web_scan(tabs_only=False, switch_tab_id=None, text_only=False):
     """
@@ -333,6 +577,10 @@ class GenericAgentHandler(BaseHandler):
         self.cwd = cwd;  self.current_turn = 0
         self.history_info = last_history if last_history else []
         self.code_stop_signal = []
+        self._execution_actions = []
+        self._execution_files_changed = []
+        self._execution_checkpoints_updated = False
+        self._execution_metrics_verified = False
 
     def status_callback(self, payload):
         try:
@@ -345,6 +593,141 @@ class GenericAgentHandler(BaseHandler):
     def _get_abs_path(self, path):
         if not path: return ""
         return os.path.abspath(os.path.join(self.cwd, path))   
+
+    def _resolve_tool_path(self, path, mode="read") -> ToolPathResult:
+        return resolve_tool_path(
+            path,
+            base_dir=self.cwd,
+            project_root=PROJECT_ROOT,
+            mode=mode,
+        )
+
+    def _path_blocked_outcome(self, path_result: ToolPathResult):
+        return StepOutcome(path_result.to_error_dict(), next_prompt="\n")
+
+    def _web_failure_prompt(self, tool_name, result):
+        if isinstance(result, dict) and result.get("error_category"):
+            return "\n" + web_tool_failure_prompt(tool_name, result)
+        return "\n"
+
+    def _sha256_file(self, path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+    def _backup_before_overwrite(self, path):
+        backup_dir = os.path.join(PROJECT_ROOT, "temp", "file_backups")
+        os.makedirs(backup_dir, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        backup_name = f"{stamp}_{os.path.basename(path)}"
+        backup_path = os.path.join(backup_dir, backup_name)
+        shutil.copy2(path, backup_path)
+        return backup_path
+
+    def _outcome_text(self, outcome):
+        data = getattr(outcome, "data", outcome)
+        if isinstance(data, (dict, list)):
+            try:
+                return json.dumps(data, ensure_ascii=False, default=json_default)
+            except Exception:
+                return str(data)
+        return str(data or "")
+
+    def _outcome_status(self, outcome):
+        data = getattr(outcome, "data", outcome)
+        if isinstance(data, dict):
+            raw = str(data.get("status") or data.get("result") or "").strip().lower()
+            if raw in {"success", "ok", "completed", "done"}:
+                return "success"
+            if raw in {"error", "failed", "blocked", "timeout"}:
+                return "error"
+        text = self._outcome_text(outcome).lower()
+        if any(token in text for token in ("traceback", "error:", '"status": "error"', "blocked", "timeout")):
+            return "error"
+        return "success"
+
+    def tool_after_callback(self, tool_name, args, response, ret):
+        if tool_name == "no_tool":
+            return None
+        status = self._outcome_status(ret)
+        input_summary = self._summary_path(
+            args.get("path")
+            or args.get("cwd")
+            or args.get("save_to_file")
+            or args.get("target_path")
+            or tool_name
+        )
+        output_summary = smart_format(self._outcome_text(ret), max_str_len=240)
+        self._execution_actions.append(
+            ExecutionAction(
+                tool=tool_name,
+                input_summary=input_summary,
+                output_summary=output_summary,
+                status=status,
+                timestamp=datetime.now().isoformat(timespec="seconds"),
+            )
+        )
+        if status == "success":
+            if tool_name in {"file_patch", "file_write"}:
+                changed = self._summary_path(args.get("path") or args.get("target_path"))
+                if changed:
+                    self._execution_files_changed.append(changed)
+            elif tool_name == "web_execute_js" and args.get("save_to_file"):
+                changed = self._summary_path(args.get("save_to_file"))
+                if changed:
+                    self._execution_files_changed.append(changed)
+            elif tool_name == "update_working_checkpoint":
+                self._execution_checkpoints_updated = True
+            elif tool_name == "code_run":
+                self._execution_metrics_verified = True
+        self._execution_actions = self._execution_actions[-50:]
+        self._execution_files_changed = self._execution_files_changed[-50:]
+        return None
+
+    def _build_execution_state(self, response_text=""):
+        successful_tools = {
+            action.tool
+            for action in self._execution_actions
+            if str(action.status or "").lower() in {"success", "ok", "completed", "done"}
+        }
+        response_claims = []
+        if "code_run" in successful_tools or self._execution_metrics_verified:
+            response_claims.append(
+                ResponseClaim(
+                    claim="numeric claims may be backed by successful code_run output",
+                    claim_type="quant",
+                    evidence_status="tool_verified",
+                    source="execution_actions",
+                    evidence_type="direct",
+                    confidence=0.8,
+                    verified=True,
+                )
+            )
+        if successful_tools & {"file_read", "code_run", "web_search", "web_scan", "web_execute_js"}:
+            response_claims.append(
+                ResponseClaim(
+                    claim="causal claims have at least indirect tool evidence",
+                    claim_type="causality",
+                    evidence_status="indirect",
+                    source="execution_actions",
+                    evidence_type="indirect",
+                    confidence=0.5,
+                )
+            )
+        return ExecutionState(
+            actual_actions=list(self._execution_actions),
+            state_delta=StateDelta(
+                files_changed=tuple(dict.fromkeys(self._execution_files_changed)),
+                checkpoints_updated=self._execution_checkpoints_updated,
+                metrics_verified=self._execution_metrics_verified,
+            ),
+            response_claims=response_claims,
+        )
+
+    def _export_execution_state(self):
+        return self._build_execution_state().to_dict()
 
     def _extract_code_block(self, response, code_type=None):
         content = getattr(response, 'content', '') or ''
@@ -402,8 +785,37 @@ class GenericAgentHandler(BaseHandler):
                     except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
-        else: result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
+        else:
+            preflight = evaluate_code_run_preflight(code, code_type, cwd, args)
+            profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
+            if profiler is not None:
+                try:
+                    profiler.record_event(
+                        "code_preflight_gate",
+                        kind="tool",
+                        metadata={
+                            "allowed": preflight.allowed,
+                            "checks": preflight.checks,
+                            "blocked_reasons": preflight.blocked_reasons,
+                            "warnings": preflight.warnings,
+                            "code_type": code_type,
+                            "cwd": cwd,
+                        },
+                    )
+                except Exception:
+                    pass
+            if preflight.allowed:
+                result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
+            else:
+                yield "[Code Preflight] blocked before execution.\n"
+                result = preflight.to_tool_message()
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        if 'preflight' in locals() and not preflight.allowed:
+            next_prompt += (
+                "\n[CODE PREFLIGHT]\n"
+                "The previous code_run was blocked before execution. Do not claim the code ran. "
+                "Fix the listed syntax, input file, CSV schema, or smoke-check issue first; then rerun a minimal check before any full experiment."
+            )
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_ask_user(self, args, response):
@@ -471,10 +883,41 @@ class GenericAgentHandler(BaseHandler):
         switch_tab_id = args.get("switch_tab_id", None)
         text_only = args.get("text_only", False)
         result = web_scan(tabs_only=tabs_only, switch_tab_id=switch_tab_id, text_only=text_only)
+        result = enrich_web_tool_result("web_scan", result)
         content = result.pop("content", None)
         yield f'[Info] {str(result)}\n'
         if content: result = json.dumps(result, ensure_ascii=False, default=json_default) + f"\n```html\n{content}\n```"
-        next_prompt = "\n"
+        next_prompt = self._web_failure_prompt("web_scan", result)
+        return StepOutcome(result, next_prompt=next_prompt)
+
+    def do_web_search(self, args, response):
+        """Run a deterministic browser-backed search without LLM/search API calls."""
+        query = str(args.get("query") or "").strip()
+        if not query:
+            return StepOutcome({"status": "error", "msg": "query parameter cannot be empty"}, next_prompt="\n")
+        engine = args.get("engine", "bing")
+        try:
+            max_results = int(args.get("max_results", 8) or 8)
+        except (TypeError, ValueError):
+            max_results = 8
+        try:
+            timeout = int(args.get("timeout", 18) or 18)
+        except (TypeError, ValueError):
+            timeout = 18
+        switch_tab_id = args.get("switch_tab_id") or args.get("tab_id")
+        result = web_search(
+            query=query,
+            engine=engine,
+            max_results=max_results,
+            timeout=timeout,
+            switch_tab_id=switch_tab_id,
+        )
+        result = enrich_web_tool_result("web_search", result)
+        show = smart_format(json.dumps(result, ensure_ascii=False, indent=2, default=json_default), max_str_len=800)
+        yield f"[WebSearch] {show}\n"
+        next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        if isinstance(result, dict) and result.get("error_category"):
+            next_prompt += self._web_failure_prompt("web_search", result)
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_web_execute_js(self, args, response):
@@ -490,6 +933,7 @@ class GenericAgentHandler(BaseHandler):
         switch_tab_id = args.get("switch_tab_id") or args.get("tab_id")
         no_monitor = args.get("no_monitor", False)
         result = web_execute_js(script, switch_tab_id=switch_tab_id, no_monitor=no_monitor)
+        result = enrich_web_tool_result("web_execute_js", result)
         if save_to_file and "js_return" in result:
             content = str(result["js_return"] or '')
             abs_path = self._get_abs_path(save_to_file)
@@ -504,6 +948,8 @@ class GenericAgentHandler(BaseHandler):
         except: pass
         yield f"JS 执行结果:\n{show}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
+        if isinstance(result, dict) and result.get("error_category"):
+            next_prompt += self._web_failure_prompt("web_execute_js", result)
         result = json.dumps(result, ensure_ascii=False, default=json_default)
         return StepOutcome(smart_format(result, max_str_len=8000), next_prompt=next_prompt)
 
@@ -546,11 +992,15 @@ class GenericAgentHandler(BaseHandler):
             headless=headless,
             progress_cb=_progress,
         )
+        result = enrich_web_tool_result("browser_agent", result)
 
         status = "OK" if result.get("success") else "FAILED"
         steps = result.get("steps_taken", "?")
         yield f"[BrowserAgent] {status}, executed {steps} steps\n"
-        return StepOutcome(result, next_prompt=self._get_anchor_prompt())
+        next_prompt = self._get_anchor_prompt()
+        if isinstance(result, dict) and result.get("error_category"):
+            next_prompt += self._web_failure_prompt("browser_agent", result)
+        return StepOutcome(result, next_prompt=next_prompt)
 
     def _get_browser_llm_config(self) -> dict:
         """Extract LLM info from the current session for browser-use.
@@ -570,7 +1020,11 @@ class GenericAgentHandler(BaseHandler):
             return {"provider": "openai"}  # let browser-use read OPENAI_API_KEY
 
     def do_file_patch(self, args, response):
-        path = self._get_abs_path(args.get("path", ""))
+        path_result = self._resolve_tool_path(args.get("path", ""), mode="write")
+        if not path_result.allowed:
+            yield f"[Path Guard] {path_result.message}\n"
+            return self._path_blocked_outcome(path_result)
+        path = path_result.path
         yield f"[Action] Patching file: {path}\n"
         old_content = args.get("old_content", "")
         new_content = args.get("new_content", "")
@@ -578,7 +1032,33 @@ class GenericAgentHandler(BaseHandler):
         except ValueError as e:
             yield f"[Status] ❌ 引用展开失败: {e}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
+        expected_sha256 = str(args.get("expected_sha256") or "").strip().lower()
+        backup_path = ""
+        current_sha256 = ""
+        if os.path.exists(path):
+            current_sha256 = self._sha256_file(path)
+            if expected_sha256 and expected_sha256 != current_sha256:
+                msg = (
+                    "expected_sha256 mismatch; refusing file_patch. "
+                    f"expected={expected_sha256} actual={current_sha256}"
+                )
+                yield f"[Status] ERROR: {msg}\n"
+                return StepOutcome(
+                    {
+                        "status": "error",
+                        "msg": msg,
+                        "expected_sha256": expected_sha256,
+                        "actual_sha256": current_sha256,
+                    },
+                    next_prompt="\n",
+                )
+            backup_path = self._backup_before_overwrite(path)
         result = file_patch(path, old_content, new_content)
+        if isinstance(result, dict) and result.get("status") == "success":
+            if backup_path:
+                result["backup_path"] = backup_path
+            if current_sha256:
+                result["previous_sha256"] = current_sha256
         yield f"\n{str(result)}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         return StepOutcome(result, next_prompt=next_prompt)
@@ -586,7 +1066,11 @@ class GenericAgentHandler(BaseHandler):
     def do_file_write(self, args, response):
         '''用于对整个文件的大量处理，精细修改要用file_patch。
         需要将要写入的内容放在<file_content>标签内，或者放在代码块中'''
-        path = self._get_abs_path(args.get("path", ""))
+        path_result = self._resolve_tool_path(args.get("path", ""), mode="write")
+        if not path_result.allowed:
+            yield f"[Path Guard] {path_result.message}\n"
+            return self._path_blocked_outcome(path_result)
+        path = path_result.path
         mode = args.get("mode", "overwrite")  # overwrite/append/prepend
         action_str = {"prepend": "Prepending to", "append": "Appending to"}.get(mode, "Overwriting")
         yield f"[Action] {action_str} file: {os.path.basename(path)}\n"
@@ -604,6 +1088,26 @@ class GenericAgentHandler(BaseHandler):
             return StepOutcome({"status": "error", "msg": "No content found. Put content inside <file_content>...</file_content> tags in your reply body before call file_write."}, next_prompt="\n")
         try:
             new_content = expand_file_refs(blocks, base_dir=self.cwd)
+            expected_sha256 = str(args.get("expected_sha256") or "").strip().lower()
+            backup_path = ""
+            if mode in {"overwrite", "prepend"} and os.path.exists(path):
+                current_sha256 = self._sha256_file(path)
+                if expected_sha256 and expected_sha256 != current_sha256:
+                    msg = (
+                        "expected_sha256 mismatch; refusing file_write overwrite. "
+                        f"expected={expected_sha256} actual={current_sha256}"
+                    )
+                    yield f"[Status] ERROR: {msg}\n"
+                    return StepOutcome(
+                        {
+                            "status": "error",
+                            "msg": msg,
+                            "expected_sha256": expected_sha256,
+                            "actual_sha256": current_sha256,
+                        },
+                        next_prompt="\n",
+                    )
+                backup_path = self._backup_before_overwrite(path)
             if mode == "prepend":
                 old = open(path, 'r', encoding="utf-8").read() if os.path.exists(path) else ""
                 open(path, 'w', encoding="utf-8").write(new_content + old)
@@ -611,14 +1115,21 @@ class GenericAgentHandler(BaseHandler):
                 with open(path, 'a' if mode == "append" else 'w', encoding="utf-8") as f: f.write(new_content)
             yield f"[Status] ✅ {mode.capitalize()} 成功 ({len(new_content)} bytes)\n"
             next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
-            return StepOutcome({"status": "success", 'writed_bytes': len(new_content)}, next_prompt=next_prompt)
+            result = {"status": "success", 'writed_bytes': len(new_content)}
+            if backup_path:
+                result["backup_path"] = backup_path
+            return StepOutcome(result, next_prompt=next_prompt)
         except Exception as e:
             yield f"[Status] ❌ 写入异常: {str(e)}\n"
             return StepOutcome({"status": "error", "msg": str(e)}, next_prompt="\n")
         
     def do_file_read(self, args, response):
         '''读取文件内容。从第start行开始读取。如有keyword则返回第一个keyword(忽略大小写)周边内容'''
-        path = self._get_abs_path(args.get("path", ""))
+        path_result = self._resolve_tool_path(args.get("path", ""), mode="read")
+        if not path_result.allowed:
+            yield f"[Path Guard] {path_result.message}\n"
+            return self._path_blocked_outcome(path_result)
+        path = path_result.path
         yield f"\n[Action] Reading file: {path}\n"
         start = args.get("start", 1)
         count = args.get("count", 200)
@@ -646,7 +1157,8 @@ class GenericAgentHandler(BaseHandler):
         self.working['in_plan_mode'] = plan_path; self.max_turns = 80
         print(f"[Info] Entered plan mode with plan file: {plan_path}"); return plan_path
     def _check_plan_completion(self):
-        if not os.path.isfile(p:=self._in_plan_mode() or ''): return None
+        p = self._in_plan_mode() or ""
+        if not os.path.isfile(p): return None
         try: return len(re.findall(r'\[ \]', open(p, encoding='utf-8', errors='replace').read()))
         except: return None
     
@@ -708,6 +1220,20 @@ class GenericAgentHandler(BaseHandler):
             if remaining == 0:
                 self._exit_plan_mode(); yield "[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\n"
         
+        if execution_honesty_enabled():
+            honesty = evaluate_execution_honesty(content, self._build_execution_state(content))
+            if not honesty.allowed:
+                yield "[Execution Honesty Gate] Final response blocked before user delivery.\n"
+                if execution_honesty_repair_enabled():
+                    return StepOutcome({}, next_prompt=format_honesty_gate_feedback(honesty))
+                notice = format_honesty_user_notice(honesty)
+                yield notice + "\n"
+                return StepOutcome(
+                    {"result": "EXECUTION_HONESTY_BLOCKED", "data": notice},
+                    next_prompt=None,
+                    should_exit=True,
+                )
+
         yield "[Info] Final response to user.\n"
         return StepOutcome(response, next_prompt=None)
     
@@ -883,6 +1409,11 @@ class GenericAgentHandler(BaseHandler):
         if tool_name == "web_scan":
             return "Scanned page structure; next locate the target element" if lang_en else "已扫描页面结构，准备定位目标元素"
 
+        if tool_name == "web_search":
+            if err_hint:
+                return f"Web search failed: {err_hint}; next switch path or report blocker" if lang_en else f"网页搜索失败：{err_hint}，准备切换路径或报告阻塞"
+            return "Ran browser-backed web search; next inspect sources" if lang_en else "已执行浏览器搜索，准备检查来源"
+
         if tool_name == "web_execute_js":
             if err_hint:
                 return f"JS execution failed: {err_hint}; next inspect DOM/state" if lang_en else f"页面脚本执行失败：{err_hint}，准备检查DOM和页面状态"
@@ -958,7 +1489,8 @@ class GenericAgentHandler(BaseHandler):
             next_prompt += f"\n\n[DANGER] 已连续执行第 {turn} 轮。禁止无效重试。若无有效进展，必须切换策略：1. 探测物理边界 2. 请求用户协助。如有需要，可调用 update_working_checkpoint 保存关键上下文。"
         elif turn % 10 == 0: next_prompt += get_global_memory()
 
-        if (_plan := self._in_plan_mode()) and turn >= 10 and turn % 5 == 0:
+        _plan = self._in_plan_mode()
+        if _plan and turn >= 10 and turn % 5 == 0:
             next_prompt = f"[Plan Hint] 你正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\n\n" + next_prompt
         if _plan and turn >= 70: next_prompt += f"\n\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。"
 

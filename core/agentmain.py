@@ -30,8 +30,10 @@ from .runtime import (
     try_direct_answer_from_tool_result,
 )
 from .tools import ToolSchemaSelector, load_runtime_tool_schema, slim_tools_enabled
+from .prompts import build_agent_behavior_kernel
 from core.protocol.agent import AgentBackend
 from core.protocol.input import AgentInput
+from frontends.file_processor import strip_attachment_prompt
 
 
 script_dir = PROJECT_ROOT
@@ -93,6 +95,7 @@ def get_system_prompt():
     with open(os.path.join(script_dir, f'assets/sys_prompt{lang_suffix}.txt'), 'r', encoding='utf-8') as f:
         prompt = f.read()
     prompt += f"\nToday: {time.strftime('%Y-%m-%d %a')}\n"
+    prompt += build_agent_behavior_kernel()
     prompt += get_global_memory()
     _sys_prompt_cache = prompt
     _sys_prompt_cache_time = now
@@ -244,6 +247,35 @@ def _history_to_input_items(history: list[str], max_lines: int = 12) -> list[dic
     return items
 
 
+def _strip_attachment_context_from_content(content):
+    if isinstance(content, str):
+        return strip_attachment_prompt(content)
+    if isinstance(content, list):
+        cleaned = []
+        for block in content:
+            if isinstance(block, dict):
+                block = dict(block)
+                if isinstance(block.get("text"), str):
+                    block["text"] = strip_attachment_prompt(block["text"])
+                if isinstance(block.get("content"), str):
+                    block["content"] = strip_attachment_prompt(block["content"])
+            cleaned.append(block)
+        return cleaned
+    return content
+
+
+def _scrub_uploaded_file_context_from_backend(backend) -> None:
+    """Remove uploaded attachment bodies from provider history after a run."""
+    history = getattr(backend, "history", None)
+    if not isinstance(history, list):
+        return
+    for idx, item in enumerate(list(history)):
+        if isinstance(item, dict):
+            item["content"] = _strip_attachment_context_from_content(item.get("content"))
+        elif isinstance(item, str):
+            history[idx] = strip_attachment_prompt(item)
+
+
 class GeneraticAgent(AgentBackend):
     def __init__(self):
         script_dir = PROJECT_ROOT
@@ -380,7 +412,8 @@ class GeneraticAgent(AgentBackend):
             count = 50
         elif extraction.startswith("explicit_file_view"):
             count = 80
-            if _count_match := re.search(r":(\d+)$", extraction):
+            _count_match = re.search(r":(\d+)$", extraction)
+            if _count_match:
                 try:
                     count = max(1, min(int(_count_match.group(1)), 200))
                 except (TypeError, ValueError):
@@ -471,7 +504,7 @@ class GeneraticAgent(AgentBackend):
         """Submit a task via the AgentBackend protocol.
 
         Returns an AgentOutputChannel for consuming streaming output.
-        This is the canonical submission path. ``put_task()`` delegates here.
+        This path wraps the raw output queue with a bridge for typed consumers.
         """
         from core.protocol.channel import QueueOutputChannel
 
@@ -485,15 +518,18 @@ class GeneraticAgent(AgentBackend):
         return QueueOutputChannel.from_legacy_queue(display_queue)
 
     def put_task(self, query, source="user", images=None, run_id=None):
-        """Submit a task (legacy API). Delegates to ``submit()`` internally.
+        """Submit a task (legacy API).
 
         Returns a raw ``queue.Queue`` for backward compatibility.
         Prefer ``submit(AgentInput(...))`` for new code.
         """
-        task = AgentInput(query=query, source=source, images=images, run_id=run_id)
-        channel = self.submit(task)
-        # Return the raw legacy queue so existing callers can get_nowait() dicts
-        return channel.legacy_queue
+        display_queue = queue.Queue()
+        self.task_queue.put({
+            "query": query, "source": source,
+            "images": images or [], "output": display_queue,
+            "run_id": run_id, "stop_event": None,
+        })
+        return display_queue
 
     def abort(self):
         if not self._running:
@@ -521,7 +557,8 @@ class GeneraticAgent(AgentBackend):
     def _handle_slash_cmd(self, raw_query, display_queue):
         if not raw_query.startswith('/'):
             return raw_query
-        if _sm := re.match(r'/session\.(\w+)=(.*)', raw_query.strip()):
+        _sm = re.match(r'/session\.(\w+)=(.*)', raw_query.strip())
+        if _sm:
             k, v = _sm.group(1), _sm.group(2)
             vfile = os.path.join(script_dir, 'temp', v)
             if os.path.isfile(vfile):
@@ -568,7 +605,8 @@ class GeneraticAgent(AgentBackend):
                     metadata={'backend': 'classic', 'source': source},
                 )
 
-            rquery = smart_format(raw_query.replace('\n', ' '), max_str_len=200)
+            history_query = strip_attachment_prompt(raw_query)
+            rquery = smart_format(history_query.replace('\n', ' '), max_str_len=200)
             self.history.append(f"[USER]: {rquery}")
 
             handler = None
@@ -632,18 +670,35 @@ class GeneraticAgent(AgentBackend):
                     )
                     handler = GenericAgentHandler(self, self.history, os.path.join(script_dir, 'temp'))
                     if self.handler and 'key_info' in self.handler.working:
-                        ki = re.sub(r'\n\[SYSTEM\] 姝や负.*?宸ヤ綔璁板繂[銆俓n]*', '', self.handler.working['key_info'])
+                        ki = re.sub(r'\n\[SYSTEM\] 这是第.*?工作记忆[。\n]*', '', self.handler.working['key_info'])
                         handler.working['key_info'] = ki
                         handler.working['passed_sessions'] = ps = self.handler.working.get('passed_sessions', 0) + 1
                         if ps > 0:
                             handler.working['key_info'] += f'\n[SYSTEM] 姝や负 {ps} 涓璇濆墠璁剧疆鐨刱ey_info锛岃嫢宸插湪鏂颁换鍔★紝鍏堟洿鏂版垨娓呴櫎宸ヤ綔璁板繂銆俓n'
+                            handler.working['key_info'] = ki + f'\n[SYSTEM] 这是第 {ps} 个对话前设置的 key_info；如果已经进入新任务，先更新或清除工作记忆。\n'
                     self.handler = handler
                     user_input = raw_query
                     # ── Inject recent conversation history for ALL sources ──
                     if os.environ.get("GENERIC_AGENT_RECENT_TURNS", "1") == "1":
-                        recent = _build_recent_context(self.history, raw_query)
+                        recent = _build_recent_context(self.history, history_query)
                         if recent:
                             user_input = recent + "\n\n" + user_input
+                    try:
+                        from core.quality import (
+                            build_research_code_priority_context,
+                            research_code_priority_enabled,
+                        )
+                        if research_code_priority_enabled():
+                            priority_context = build_research_code_priority_context(
+                                history_query,
+                                route_target=None,
+                                max_chars=1000,
+                            )
+                            priority_block = str(priority_context.get("block") or "").strip()
+                            if priority_block:
+                                user_input = priority_block + "\n\n" + user_input
+                    except Exception:
+                        pass
                     if source == 'feishu' and len(self.history) > 1:
                         user_input = handler._get_anchor_prompt() + f"\n\n### 鐢ㄦ埛褰撳墠娑堟伅\n{raw_query}"
                     initial_user_content = None
@@ -709,8 +764,15 @@ class GeneraticAgent(AgentBackend):
                     full_resp = full_resp.replace('</summary>', '</summary>\n\n')
                 if '</file_content>' in full_resp:
                     full_resp = re.sub(r'<file_content>\s*(.*?)\s*</file_content>', r'\n````\n<file_content>\n\1\n</file_content>\n````', full_resp, flags=re.DOTALL)
-                display_queue.put({'event': 'final', 'done': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id})
-                display_queue.put({'done': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id})
+                execution_state = {}
+                export_execution_state = getattr(handler, '_export_execution_state', None)
+                if callable(export_execution_state):
+                    try:
+                        execution_state = export_execution_state()
+                    except Exception:
+                        execution_state = {}
+                display_queue.put({'event': 'final', 'done': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id, 'execution_state': execution_state})
+                display_queue.put({'done': full_resp, 'source': source, 'turn': turn_value, 'task_id': run_id, 'execution_state': execution_state})
                 self.history = handler.history_info
             except Exception as e:
                 print(f"Backend Error: {format_error(e)}")
@@ -751,6 +813,10 @@ class GeneraticAgent(AgentBackend):
                     finally:
                         self.active_profiler = None
                         self._profile_run_id = None
+                try:
+                    _scrub_uploaded_file_context_from_backend(getattr(self.llmclient, 'backend', None))
+                except Exception:
+                    pass
                 self._current_user_input = ""
                 self._last_read_shortcut = None
                 self._last_direct_answer = None
@@ -817,16 +883,19 @@ if __name__ == '__main__':
             raw = f.read()
         while True:
             dq = agent.put_task(raw, source='task')
-            while 'done' not in (item := dq.get(timeout=120)):
+            item = dq.get(timeout=120)
+            while 'done' not in item:
                 if 'next' in item and random.random() < 0.95:
                     with open(f'{d}/output{nround}.txt', 'w', encoding='utf-8') as f:
                         f.write(item.get('next', ''))
+                item = dq.get(timeout=120)
             with open(f'{d}/output{nround}.txt', 'w', encoding='utf-8') as f:
                 f.write(item['done'] + '\n\n[ROUND END]\n')
             consume_file(d, '_stop')
             for _ in range(300):
                 time.sleep(2)
-                if (raw := consume_file(d, 'reply.txt')):
+                raw = consume_file(d, 'reply.txt')
+                if raw:
                     break
             else:
                 break
@@ -858,7 +927,9 @@ if __name__ == '__main__':
             print(f'[Reflect] triggered: {task[:80]}')
             dq = agent.put_task(task, source='reflect')
             try:
-                while 'done' not in (item := dq.get(timeout=120)):
+                item = dq.get(timeout=120)
+                while 'done' not in item:
+                    item = dq.get(timeout=120)
                     pass
                 result = item['done']
                 print(result)
@@ -871,7 +942,8 @@ if __name__ == '__main__':
             os.makedirs(log_dir, exist_ok=True)
             script_name = os.path.splitext(os.path.basename(args.reflect))[0]
             open(os.path.join(log_dir, f'{script_name}_{datetime.now():%Y-%m-%d}.log'), 'a', encoding='utf-8').write(f'[{datetime.now():%m-%d %H:%M}]\n{result}\n\n')
-            if (on_done := getattr(mod, 'on_done', None)):
+            on_done = getattr(mod, 'on_done', None)
+            if on_done:
                 try:
                     on_done(result)
                 except Exception as e:

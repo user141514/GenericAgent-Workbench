@@ -213,10 +213,13 @@ def verify_distillation_candidate(
                 ref["matched_files"] = sorted(matched)
                 ref["unmatched_files"] = sorted(unmatched)
 
-                # Candidate is verified if at least one file matches or
-                # there are tool events in the same time window
-                if matched or len(events) > 0:
+                # If a candidate names files, only matching file-level tool
+                # evidence can verify it. Unrelated recent tool events are not
+                # proof that the claimed file was changed.
+                if matched:
                     ref["verified"] = True
+            elif events:
+                ref["verified"] = True
         except Exception:
             pass
 

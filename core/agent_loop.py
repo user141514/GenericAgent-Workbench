@@ -499,6 +499,19 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     runtime_mapper.on_tool_requested(tool_name, args)
                 if tool_name != "no_tool":
                     yield formatter.format_tool_call(tool_name, args)
+                _ledger = getattr(handler, "_tool_event_ledger", None)
+                _ledger_event_id = ""
+                if _ledger is not None and tool_name != "no_tool":
+                    try:
+                        _ledger_event_id = _ledger.start_call(
+                            tool_name=tool_name,
+                            args=args,
+                            target_path=tool_target_path,
+                            turn=turn,
+                            index=ii,
+                        )
+                    except Exception:
+                        _ledger_event_id = ""
                 with _profile_span(
                     profiler,
                     f"tool_call:{tool_name}",
@@ -529,6 +542,19 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                             yield "`````\n"
                     except StopIteration as e:
                         outcome = e.value
+                    except BaseException as e:
+                        if _ledger is not None and _ledger_event_id:
+                            try:
+                                _ledger.complete_call(
+                                    event_id=_ledger_event_id,
+                                    result=f"{type(e).__name__}: {e}",
+                                    status="error",
+                                    result_chars=len(str(e)),
+                                    error_like=True,
+                                )
+                            except Exception:
+                                pass
+                        raise
 
                 if profiler is not None:
                     try:
@@ -556,25 +582,16 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
 
                 # ── M7: Tool Event Ledger recording hook ──
                 # Minimal, gated, non-blocking. Records executed facts only.
-                _ledger = getattr(handler, "_tool_event_ledger", None)
-                if _ledger is not None and tool_name != "no_tool":
+                if _ledger is not None and _ledger_event_id:
                     try:
-                        _event_id = _ledger.start_call(
-                            tool_name=tool_name,
-                            args=args,
-                            target_path=tool_target_path,
-                            turn=turn,
-                            index=ii,
+                        _result_text = _outcome_result_text(outcome)
+                        _ledger.complete_call(
+                            event_id=_ledger_event_id,
+                            result=_result_text,
+                            status="error" if _is_error_like_outcome(outcome) else "success",
+                            result_chars=len(_result_text),
+                            error_like=_is_error_like_outcome(outcome),
                         )
-                        if _event_id:
-                            _result_text = _outcome_result_text(outcome)
-                            _ledger.complete_call(
-                                event_id=_event_id,
-                                result=_result_text,
-                                status="error" if _is_error_like_outcome(outcome) else "success",
-                                result_chars=len(_result_text),
-                                error_like=_is_error_like_outcome(outcome),
-                            )
                     except Exception:
                         pass  # ledger failure must never block agent loop
 

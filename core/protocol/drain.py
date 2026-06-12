@@ -211,7 +211,7 @@ class AgentOutputDrainer:
             if event.text:
                 self._full_text = event.text
         if event.turn > 0:
-            self._current_turn = event.turn
+            self._current_turn = max(self._current_turn, event.turn)
 
     # ── legacy adapter ───────────────────────────────────────────────────
 
