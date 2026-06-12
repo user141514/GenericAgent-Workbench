@@ -81,4 +81,11 @@ start_streamlit_public.py
 
 # Claude Code local state
 .claude/
+.claude-flow/
 .worktrees/
+
+# Session/scratch artifacts
+logs/
+examples/
+man_audit_v3_final.md
+manuscript_audit_v2_corrected.md
