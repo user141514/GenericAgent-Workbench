@@ -2,7 +2,36 @@ import ast, asyncio, glob, json, os, queue as Q, re, socket, sys, time
 
 HELP_TEXT = "📖 命令列表:\n/help - 显示帮助\n/status - 查看状态\n/stop - 停止当前任务\n/new - 清空当前上下文\n/restore - 恢复上次对话历史\n/llm [n] - 查看或切换模型"
 FILE_HINT = "If you need to show files to user, use [FILE:filepath] in your response."
-TAG_PATS = [r"<" + t + r">.*?</" + t + r">" for t in ("thinking", "summary", "tool_use", "file_content")]
+INTERNAL_TAGS = (
+    "thinking",
+    "summary",
+    "tool_use",
+    "file_content",
+    "bash",
+    "shell",
+    "powershell",
+    "tool_call",
+)
+TAG_PATS = [
+    r"<\s*" + t + r"\b[^>]*>.*?<\s*/\s*" + t + r"\s*>"
+    for t in INTERNAL_TAGS
+]
+OPEN_INTERNAL_TAG_RE = re.compile(
+    r"<\s*(?:" + "|".join(re.escape(t) for t in INTERNAL_TAGS) + r")\b[^>]*>.*\Z",
+    re.DOTALL | re.IGNORECASE,
+)
+EXECUTION_HONESTY_GATE_RE = re.compile(
+    r"\[EXECUTION HONESTY GATE\][\s\S]*?(?:explicitly\.|\Z)",
+    re.IGNORECASE,
+)
+EXECUTION_HONESTY_USER_NOTICE = (
+    "\u6267\u884c\u8bda\u5b9e\u68c0\u67e5\u62e6\u622a\u4e86"
+    "\u4e00\u6bb5\u7f3a\u5c11\u5de5\u5177\u8bc1\u636e\u7684"
+    "\u72b6\u6001\u58f0\u660e\u3002\u672c\u8f6e\u4e0d\u80fd"
+    "\u58f0\u79f0\u5df2\u4fdd\u5b58\u3001\u5df2\u66f4\u65b0"
+    "\u6216\u5df2\u9a8c\u8bc1\uff1b\u9700\u8981\u5148\u6267\u884c"
+    "\u5bf9\u5e94\u5de5\u5177\u5e76\u62ff\u5230\u6210\u529f\u7ed3\u679c\u3002"
+)
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MEMORY_INBOX_PATH = os.path.join(PROJECT_ROOT, "memory", "history_memory_inbox.md")
 RESTORE_GLOBS_DEFAULT = (
@@ -21,8 +50,13 @@ SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
 
 
 def clean_reply(text):
+    text = EXECUTION_HONESTY_GATE_RE.sub(
+        EXECUTION_HONESTY_USER_NOTICE,
+        text or "",
+    )
     for pat in TAG_PATS:
-        text = re.sub(pat, "", text or "", flags=re.DOTALL)
+        text = re.sub(pat, "", text or "", flags=re.DOTALL | re.IGNORECASE)
+    text = OPEN_INTERNAL_TAG_RE.sub("", text or "")
     return re.sub(r"\n{3,}", "\n\n", text).strip() or "..."
 
 
@@ -209,7 +243,7 @@ def _native_first_user_line(prompt_text):
     return text
 
 
-def _native_response_summary(response_body):
+def _native_response_summary(response_body, max_chars=None):
     raw = (response_body or "").strip()
     if not raw:
         return ""
@@ -217,7 +251,8 @@ def _native_response_summary(response_body):
         blocks = ast.literal_eval(raw)
     except Exception:
         match = SUMMARY_RE.search(raw)
-        return (match.group(1).strip() if match else "")[:500]
+        text = match.group(1).strip() if match else ""
+        return text[:max_chars] if max_chars else text
     if not isinstance(blocks, list):
         return ""
     text_parts = []
@@ -231,8 +266,10 @@ def _native_response_summary(response_body):
         return ""
     match = SUMMARY_RE.search(joined)
     if match:
-        return match.group(1).strip()[:500]
-    return clean_reply(joined)[:500]
+        text = match.group(1).strip()
+    else:
+        text = clean_reply(joined)
+    return text[:max_chars] if max_chars else text
 
 
 def _append_restored_line(restored, line):

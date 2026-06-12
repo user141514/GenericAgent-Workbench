@@ -46,6 +46,17 @@ def clear_uploaded_files(state) -> None:
 
 # ── pure UI ─────────────────────────────────────────────────────────────
 
+DEFAULT_SUPPORTED_SUFFIXES = [
+    "txt", "md", "py", "json", "csv", "yaml", "yml", "toml",
+    "ini", "log", "sql", "js", "ts", "html", "css", "xml",
+    "pdf", "docx",
+]
+
+
+def _supported_suffixes(supported_suffixes: list[str] | None = None) -> list[str]:
+    return list(supported_suffixes or DEFAULT_SUPPORTED_SUFFIXES)
+
+
 def render_attachment_items(files, *, show_preview: bool = True) -> None:
     """Render the list of already-processed uploaded files.
 
@@ -58,7 +69,7 @@ def render_attachment_items(files, *, show_preview: bool = True) -> None:
         return
 
     for meta in files:
-        prefix = "📄" if meta.get("status") == "ready" else "⚠️"
+        prefix = "📎" if meta.get("status") == "ready" else "⚠️"
         st.markdown(f"{prefix} **{meta['name']}**")
         st.caption(f"{meta['kind']} · {meta['size_label']}")
         if meta.get("warning"):
@@ -87,11 +98,7 @@ def render_upload_panel(
         supported_suffixes: file suffixes to accept (defaults to text/pdf/docx).
     """
     if supported_suffixes is None:
-        supported_suffixes = [
-            "txt", "md", "py", "json", "csv", "yaml", "yml", "toml",
-            "ini", "log", "sql", "js", "ts", "html", "css", "xml",
-            "pdf", "docx",
-        ]
+        supported_suffixes = _supported_suffixes()
 
     st.subheader("📎 附件")
     widget_key = f"sidebar_uploads_{state['upload_widget_nonce']}"

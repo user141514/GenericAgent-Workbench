@@ -69,6 +69,7 @@ try:
         build_upload_id,
         process_uploaded_file,
     )
+    from frontends.stapp_message import render_copy_reply_button
 except ImportError:
     from chatapp_common import (
         clean_reply,
@@ -89,6 +90,7 @@ except ImportError:
         build_upload_id,
         process_uploaded_file,
     )
+    from stapp_message import render_copy_reply_button
 
 
 st.set_page_config(page_title="Cowork", layout="wide")
@@ -910,6 +912,31 @@ def read_history_preview(filepath, max_lines=30):
         return f"预览失败: {e}"
 
 
+def request_generation_stop():
+    agent.abort()
+    st.session_state.stop_requested = True
+    st.session_state.stop_requested_at = time.time()
+
+
+def render_generation_control_bar(key_prefix="mobile"):
+    stopping = bool(st.session_state.get("stop_requested", False))
+    c1, c2 = st.columns([3.8, 1])
+    with c1:
+        st.caption("正在停止，已收到的内容会保留。" if stopping else "正在生成回复，可以随时停止。")
+    with c2:
+        if st.button(
+            "停止",
+            key=f"{key_prefix}_stop_generation_btn",
+            disabled=stopping,
+            type="secondary",
+            use_container_width=False,
+            help="停止当前生成，并保留已经收到的部分回复。",
+        ):
+            request_generation_stop()
+            st.rerun()
+    st.chat_input("正在生成回复…", disabled=True, key=f"{key_prefix}_running_chat_input")
+
+
 def render_distill_preview(summary, filepath, fname):
     title = summary.get("title", fname)[:30]
     with st.expander(f"📝 提炼预览: {title}", expanded=True):
@@ -1222,8 +1249,7 @@ def render_sidebar():
         st.caption(f"空闲时间：{int(time.time()) - last_reply_time}秒")
 
     if st.button("强行停止任务", use_container_width=True):
-        agent.abort()
-        st.session_state.stop_requested = True
+        request_generation_stop()
         st.toast("已发送停止信号")
         st.rerun()
     if st.button("重新注入工具", use_container_width=True):
@@ -1304,19 +1330,33 @@ with st.sidebar:
     render_sidebar()
 
 
+TURN_MARKER_RE = re.compile(r"(\**LLM Running \(Turn (\d+)\) \.\.\.\*\**)")
+
+
+def latest_turn_from_text(text):
+    text = message_content_to_text(text)
+    matches = TURN_MARKER_RE.findall(text)
+    if not matches:
+        return 0
+    try:
+        return int(matches[-1][1])
+    except (TypeError, ValueError):
+        return 0
+
+
 def fold_turns(text):
     """Return list of segments: [{'type':'text','content':...}, {'type':'fold','title':...,'content':...}]"""
     text = message_content_to_text(text)
-    parts = re.split(r"(\**LLM Running \(Turn \d+\) \.\.\.\*\**)", text)
+    parts = TURN_MARKER_RE.split(text)
     if len(parts) < 4:
         return [{"type": "text", "content": text}]
     segments = []
     if parts[0].strip():
         segments.append({"type": "text", "content": parts[0]})
     turns = []
-    for i in range(1, len(parts), 2):
+    for i in range(1, len(parts), 3):
         marker = parts[i]
-        content = parts[i + 1] if i + 1 < len(parts) else ""
+        content = parts[i + 2] if i + 2 < len(parts) else ""
         turns.append((marker, content))
     for idx, (marker, content) in enumerate(turns):
         if idx < len(turns) - 1:
@@ -1330,7 +1370,7 @@ def fold_turns(text):
                 title = marker.strip("*")
             segments.append({"type": "fold", "title": title, "content": content})
         else:
-            segments.append({"type": "text", "content": marker + content})
+            segments.append({"type": "text", "content": content})
     return segments
 
 
@@ -1350,10 +1390,8 @@ def render_segments(segments, suffix="", key_prefix="", fold_expanded=False):
 
 
 def should_show_live_turn(text, turn):
-    if not turn:
-        return False
-    text = message_content_to_text(text)
-    return f"Turn {turn}" not in text
+    del text
+    return bool(turn)
 
 
 
@@ -1377,6 +1415,7 @@ for msg_idx, msg in enumerate(st.session_state.messages):
                     key_prefix=f"hist_{msg_id}",
                     fold_expanded=not st.session_state.compact_assistant_history,
                 )
+                render_copy_reply_button(msg["content"], key=f"hist_{msg_id}")
             else:
                 st.markdown(message_content_to_text(msg["content"]))
 # Persistent scroll anchor — placed once after all messages so JS can scroll to bottom
@@ -1490,7 +1529,7 @@ def poll_agent_output():
     d.task_id = st.session_state.task_id
     d.collect(max_items=20)
     st.session_state.partial_response = d.full_text
-    st.session_state.current_turn = d.current_turn
+    st.session_state.current_turn = max(d.current_turn, latest_turn_from_text(d.full_text))
     if d.full_text and not st.session_state.stream_started:
         st.session_state.stream_started = True
     if d.is_terminal:
@@ -1503,23 +1542,9 @@ if st.session_state.agent_running:
     # ── Streaming UI ──
     state = get_agent_state()
     with st.chat_message("assistant"):
-        # Stop button — enabled when running (thinking/tool-exec) or streaming
-        can_stop = state in ("running", "streaming")
-        stop_label = {"running": "⏹ 停止", "streaming": "⏹ 停止输出", "stopping": "⏹ 正在停止…"}.get(state, "⏹ 停止输出")
-        if st.button(
-            stop_label,
-            key="stop_generation_btn",
-            disabled=not can_stop,
-            type="primary" if can_stop else "secondary",
-        ):
-            agent.abort()
-            st.session_state.stop_requested = True
-            st.session_state.stop_requested_at = time.time()
-            st.rerun()
-
         live = st.container()
         response = st.session_state.partial_response
-        current_turn = st.session_state.current_turn
+        current_turn = max(st.session_state.current_turn, latest_turn_from_text(response))
         cursor = "" if state in ("stopping", "running") else " ▌"
 
         with live:
@@ -1574,6 +1599,8 @@ if st.session_state.agent_running:
                     f'<div id="stream-marker" data-stream-active="1" data-scroll-event="{st.session_state.scroll_event}"></div>',
                     unsafe_allow_html=True,
                 )
+
+    render_generation_control_bar(key_prefix="mobile")
 
     # Drain queue
     done = poll_agent_output()

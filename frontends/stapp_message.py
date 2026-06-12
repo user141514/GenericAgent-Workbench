@@ -6,11 +6,14 @@ the others are pure text-processing helpers.
 
 from __future__ import annotations
 
+import json
 import re
 
 import streamlit as st
 
 from frontends.chatapp_common import clean_reply
+
+TURN_MARKER_RE = re.compile(r"(\**LLM Running \(Turn (\d+)\) \.\.\.\*\**)")
 
 
 def message_content_to_text(content):
@@ -64,19 +67,30 @@ def sanitize_streaming_tail(text):
     return text
 
 
+def latest_turn_from_text(text) -> int:
+    text = message_content_to_text(text)
+    matches = TURN_MARKER_RE.findall(text)
+    if not matches:
+        return 0
+    try:
+        return int(matches[-1][1])
+    except (TypeError, ValueError):
+        return 0
+
+
 def fold_turns(text):
     """Split multi-turn response into segments: text / fold."""
     text = message_content_to_text(text)
-    parts = re.split(r"(\**LLM Running \(Turn \d+\) \.\.\.\*\**)", text)
+    parts = TURN_MARKER_RE.split(text)
     if len(parts) < 4:
         return [{"type": "text", "content": text}]
     segments = []
     if parts[0].strip():
         segments.append({"type": "text", "content": parts[0]})
     turns = []
-    for i in range(1, len(parts), 2):
+    for i in range(1, len(parts), 3):
         marker = parts[i]
-        content = parts[i + 1] if i + 1 < len(parts) else ""
+        content = parts[i + 2] if i + 2 < len(parts) else ""
         turns.append((marker, content))
     for idx, (marker, content) in enumerate(turns):
         if idx < len(turns) - 1:
@@ -94,7 +108,7 @@ def fold_turns(text):
                 title = marker.strip("*")
             segments.append({"type": "fold", "title": title, "content": content})
         else:
-            segments.append({"type": "text", "content": marker + content})
+            segments.append({"type": "text", "content": content})
     return segments
 
 
@@ -107,8 +121,113 @@ def render_segments(segments, suffix="", fold_expanded=False):
             st.markdown(clean_reply(seg["content"]) + suffix)
 
 
+def copyable_reply_text(content) -> str:
+    """Return the user-visible assistant text used by the copy button."""
+    text = message_content_to_text(content)
+    segments = fold_turns(text)
+    if len(segments) > 1:
+        for seg in reversed(segments):
+            if seg.get("type") == "text" and seg.get("content", "").strip():
+                text = seg["content"]
+                break
+    return clean_reply(text).strip()
+
+
+def _copy_button_id(key: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]+", "_", str(key or "reply"))
+    return f"copy_reply_{safe[:80]}"
+
+
+def build_copy_reply_button_html(content, key: str) -> str:
+    text = copyable_reply_text(content)
+    payload = json.dumps(text, ensure_ascii=False).replace("</", "<\\/")
+    button_id = _copy_button_id(key)
+    return f"""
+<style>
+body {{ margin: 0; background: transparent; }}
+.copy-reply-btn {{
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(60, 54, 45, 0.18);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.72);
+  color: #6f665a;
+  font: 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  cursor: pointer;
+}}
+.copy-reply-btn:hover {{ background: #fff; color: #4d453b; }}
+.copy-reply-btn.copied {{ border-color: rgba(74, 120, 82, 0.38); color: #4a7852; }}
+.copy-reply-btn svg {{ width: 14px; height: 14px; flex: 0 0 auto; }}
+</style>
+<button id="{button_id}" class="copy-reply-btn" type="button" aria-label="复制回复" title="复制回复">
+  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
+       stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    <rect width="14" height="14" x="8" y="8" rx="2" ry="2"></rect>
+    <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"></path>
+  </svg>
+  <span>复制</span>
+</button>
+<script>
+(function() {{
+  const btn = document.getElementById({json.dumps(button_id)});
+  const payload = {payload};
+  const label = btn && btn.querySelector("span");
+  function mark(text) {{
+    if (!label) return;
+    label.textContent = text;
+    btn.classList.add("copied");
+    setTimeout(() => {{
+      label.textContent = "复制";
+      btn.classList.remove("copied");
+    }}, 1200);
+  }}
+  async function fallbackCopy() {{
+    const ta = document.createElement("textarea");
+    ta.value = payload;
+    ta.setAttribute("readonly", "");
+    ta.style.position = "fixed";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    ta.remove();
+  }}
+  if (btn) {{
+    btn.addEventListener("click", async () => {{
+      try {{
+        if (navigator.clipboard && window.isSecureContext) {{
+          await navigator.clipboard.writeText(payload);
+        }} else {{
+          await fallbackCopy();
+        }}
+        mark("已复制");
+      }} catch (err) {{
+        try {{
+          await fallbackCopy();
+          mark("已复制");
+        }} catch (_) {{
+          mark("复制失败");
+        }}
+      }}
+    }});
+  }}
+}})();
+</script>
+"""
+
+
+def render_copy_reply_button(content, key: str) -> None:
+    text = copyable_reply_text(content)
+    if not text or text == "...":
+        return
+    from streamlit.components.v1 import html as _html
+
+    _html(build_copy_reply_button_html(content, key), height=34, scrolling=False)
+
+
 def should_show_live_turn(text, turn):
-    if not turn:
-        return False
-    text = message_content_to_text(text)
-    return f"Turn {turn}" not in text
+    del text
+    return bool(turn)

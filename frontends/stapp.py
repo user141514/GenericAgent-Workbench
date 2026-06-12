@@ -24,6 +24,7 @@ except Exception:
     pass
 
 script_dir = os.path.dirname(__file__)
+project_root = os.path.abspath(os.path.join(script_dir, ".."))
 sys.path.append(os.path.abspath(os.path.join(script_dir, "..")))
 
 import streamlit as st
@@ -230,7 +231,7 @@ def format_user_message(prompt):
     return f"{prompt}\n\n已附带文件:\n{file_lines}"
 
 
-from frontends.stapp_message import message_content_to_text
+from frontends.stapp_message import message_content_to_text, render_copy_reply_button
 
 
 def extract_last_user_question(filepath):
@@ -242,6 +243,31 @@ def extract_last_user_question(filepath):
 def read_history_preview(filepath, max_lines=30):
     from frontends.services.history_restore_service import HistoryRestoreService
     return HistoryRestoreService.preview(filepath, max_lines=max_lines)
+
+
+def request_generation_stop():
+    agent.abort()
+    st.session_state.stop_requested = True
+    st.session_state.stop_requested_at = time.time()
+
+
+def render_generation_control_bar(key_prefix="main"):
+    stopping = bool(st.session_state.get("stop_requested", False))
+    c1, c2 = st.columns([4.4, 0.9])
+    with c1:
+        st.caption("正在停止，已收到的内容会保留。" if stopping else "正在生成回复，可以随时停止。")
+    with c2:
+        if st.button(
+            "停止",
+            key=f"{key_prefix}_stop_stream_btn",
+            disabled=stopping,
+            type="secondary",
+            use_container_width=False,
+            help="停止当前生成，并保留已经收到的部分回复。",
+        ):
+            request_generation_stop()
+            st.rerun()
+    st.chat_input("正在生成回复…", disabled=True, key=f"{key_prefix}_running_chat_input")
 
 
 from frontends.stapp_history_panel import render_distill_preview
@@ -427,7 +453,7 @@ def render_sidebar():
         render_history_panel()
         st.divider()
     if st.session_state.show_memory:
-        render_memory_panel(script_dir)
+        render_memory_panel(project_root)
         st.divider()
     if st.session_state.show_watchtower and _WATCHTOWER_AVAILABLE:
         _render_watchtower_panel()
@@ -511,9 +537,7 @@ def render_sidebar():
         st.caption(f"空闲时间：{int(time.time()) - last_reply_time}秒")
 
     if st.button("强行停止任务", use_container_width=True):
-        agent.abort()
-        st.session_state.stop_requested = True
-        st.session_state.stop_requested_at = time.time()
+        request_generation_stop()
         st.toast("已发送停止信号")
         st.rerun()
     if st.button("重新注入工具", use_container_width=True):
@@ -591,6 +615,7 @@ with st.sidebar:
 
 from frontends.stapp_message import (
     fold_turns,
+    latest_turn_from_text,
     render_segments,
     sanitize_streaming_tail,
     should_show_live_turn,
@@ -613,6 +638,7 @@ for msg_idx, msg in enumerate(st.session_state.messages):
                     fold_turns(msg["content"]),
                     fold_expanded=not st.session_state.compact_assistant_history,
                 )
+                render_copy_reply_button(msg["content"], key=f"hist_{msg_id}")
             else:
                 st.markdown(message_content_to_text(msg["content"]))
 # Persistent scroll anchor — placed once after all messages so JS can scroll to bottom
@@ -711,7 +737,7 @@ def poll_agent_output():
     d.stop_requested = st.session_state.stop_requested
     d.collect(max_items=20)
     st.session_state.partial_response = d.full_text
-    st.session_state.current_turn = d.current_turn
+    st.session_state.current_turn = max(d.current_turn, latest_turn_from_text(d.full_text))
     if d.full_text and not st.session_state.stream_started:
         st.session_state.stream_started = True
     return d.is_terminal
@@ -751,7 +777,8 @@ if not st.session_state.get("agent_running", False):
                 st.caption("Planner 会先规划再执行，适合复杂任务。直接执行跳过规划步骤，更快但缺少验证闭环。")
         st.stop()
 
-    if prompt := st.chat_input("any task?"):
+    prompt = st.chat_input("any task?")
+    if prompt:
         task_prompt = build_prompt_with_attachments(prompt)
         visible_prompt = format_user_message(prompt)
         st.session_state.last_submitted_input = prompt
@@ -804,15 +831,8 @@ if not st.session_state.get("agent_running", False):
 # ── Streaming state: poll-based rendering (non-blocking, stop button works) ──
 if st.session_state.get("agent_running", False):
     with st.chat_message("assistant"):
-        # Stop button — placed inside the streaming message so user can abort
-        if st.button("⏹ 停止输出", key="stop_stream_btn", type="primary"):
-            agent.abort()
-            st.session_state.stop_requested = True
-            st.session_state.stop_requested_at = time.time()
-            st.rerun()
-
         response = st.session_state.partial_response
-        current_turn = st.session_state.current_turn
+        current_turn = max(st.session_state.current_turn, latest_turn_from_text(response))
         cursor = "" if st.session_state.stop_requested else " ▌"
 
         if response:
@@ -831,6 +851,8 @@ if st.session_state.get("agent_running", False):
         else:
             # Pre-streaming: agent is thinking
             st.caption("正在分析任务…")
+
+    render_generation_control_bar(key_prefix="main")
 
     # Drain queue
     done = poll_agent_output()

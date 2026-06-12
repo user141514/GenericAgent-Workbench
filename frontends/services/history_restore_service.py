@@ -49,12 +49,28 @@ class HistoryRestoreService:
     All heavy parsing delegates to ``chatapp_common`` helpers.
     """
 
+    _SYNTHETIC_TITLE_PREFIXES = (
+        "[LEGACY PROJECT MEMORY",
+        "[RECENT CONVERSATION",
+        "[ROUTER_HINT]",
+        "### [WORKING MEMORY]",
+        "### Answer Quality",
+        "### Problem Framing",
+        "### Research and Code Priority Guard",
+        "[RESEARCH WORKFLOW]",
+        "You are the execution engine",
+    )
+
     # ── file discovery ──────────────────────────────────────────────────
 
-    @staticmethod
-    def _history_dir(backend_kind: str = "") -> str:
-        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    def __init__(self, project_root: str | None = None) -> None:
+        self.project_root = os.path.abspath(project_root) if project_root else ""
+
+    def _history_dir(self, backend_kind: str = "") -> str:
         subdir = "model_responses_openai" if backend_kind == "openai-agents" else "model_responses"
+        if self.project_root:
+            return os.path.join(self.project_root, "temp", subdir)
+        script_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         return os.path.join(script_dir, "..", "temp", subdir)
 
     def list_files(self, backend_kind: str = "") -> list[HistoryFileInfo]:
@@ -93,7 +109,7 @@ class HistoryRestoreService:
     # ── title extraction ────────────────────────────────────────────────
 
     def extract_title(self, filepath: str, backend_kind: str = "") -> str:
-        """Extract the last user question from a history file for display."""
+        """Extract the first real user question from a history file for display."""
         from frontends.chatapp_common import format_restore, _content_to_text, unpack_restore_result
 
         result, err = format_restore(filepath, backend_kind=backend_kind)
@@ -106,17 +122,89 @@ class HistoryRestoreService:
                 if not isinstance(item, dict) or item.get("role") != "user":
                     continue
                 text = _content_to_text(item.get("content", ""))
-                text = text.strip()
-                if text:
-                    questions.append(text)
+                title = self._title_from_user_text(text)
+                if title:
+                    return self._truncate_title(title)
         else:
             questions = [
                 line[8:] for line in restored
                 if isinstance(line, str) and line.startswith("[USER]: ")
             ]
-        if questions:
-            title = questions[-1].replace("\n", " ").strip()
-            return title[:42] + ("..." if len(title) > 42 else "")
+        first_q = self._extract_first_user_question(filepath)
+        if first_q:
+            return self._truncate_title(first_q)
+        for question in questions:
+            title = self._title_from_user_text(question)
+            if title:
+                return self._truncate_title(title)
+        return ""
+
+    @classmethod
+    def _looks_like_synthetic_user_text(cls, text: str) -> bool:
+        stripped = (text or "").lstrip()
+        if "<history>" in stripped:
+            return True
+        return any(stripped.startswith(prefix) for prefix in cls._SYNTHETIC_TITLE_PREFIXES)
+
+    @staticmethod
+    def _first_nonempty_line(text: str) -> str:
+        for line in (text or "").splitlines():
+            line = line.strip()
+            if line:
+                return line
+        return ""
+
+    @classmethod
+    def _title_from_user_text(cls, text: str) -> str:
+        from frontends.chatapp_common import FILE_HINT
+
+        stripped = (text or "").strip()
+        if stripped.startswith(FILE_HINT):
+            stripped = stripped[len(FILE_HINT):].lstrip()
+        for marker in ("### 用户当前消息", "### Current User Message", "Original user request:"):
+            if marker in stripped:
+                candidate = stripped.split(marker, 1)[-1].strip()
+                return cls._first_nonempty_line(candidate).replace("\n", " ").strip()
+        if cls._looks_like_synthetic_user_text(stripped):
+            return ""
+        return stripped.replace("\n", " ").strip()
+
+    @staticmethod
+    def _truncate_title(title: str) -> str:
+        title = (title or "").replace("\n", " ").strip()
+        return title[:42] + ("..." if len(title) > 42 else "")
+
+    @staticmethod
+    def _extract_first_user_question(filepath: str) -> str:
+        """Read the first Prompt block and extract the original user question,
+        bypassing system-injected context like multi-agent handoff prompts."""
+        from frontends.chatapp_common import (
+            RESTORE_BLOCK_RE,
+            _native_prompt_obj,
+            _native_prompt_text,
+        )
+        try:
+            with open(filepath, "r", encoding="utf-8", errors="ignore") as f:
+                content = f.read()
+        except Exception:
+            return ""
+        for label, body in RESTORE_BLOCK_RE.findall(content):
+            if label != "Prompt":
+                continue
+            prompt = _native_prompt_obj(body)
+            if prompt is None:
+                continue
+            text = _native_prompt_text(prompt)
+            # 标准标记：### 用户当前消息 / ### Current User Message
+            user = HistoryRestoreService._title_from_user_text(text)
+            if user:
+                return user.replace("\n", " ").strip()
+            # 多智能体标记：Original user request:
+            if "Original user request:" in text:
+                after = text.split("Original user request:", 1)[-1]
+                first_line = after.strip().split("\n")[0].strip()
+                if first_line and not first_line.startswith("Execution plan"):
+                    return first_line.replace("\n", " ").strip()
         return ""
 
     # ── restore ─────────────────────────────────────────────────────────

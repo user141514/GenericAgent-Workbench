@@ -28,6 +28,8 @@ TEXT_SUFFIXES = {
 }
 SUPPORTED_UPLOAD_SUFFIXES = sorted(TEXT_SUFFIXES | {".pdf", ".docx"})
 PROMPT_WARN_CHAR_THRESHOLD = 50_000
+ATTACHMENT_CONTEXT_START = "<uploaded_file_context>"
+ATTACHMENT_CONTEXT_END = "</uploaded_file_context>"
 
 _SENSITIVE_PATTERNS = [
     re.compile(r"(^|[\\/])\.(env|envrc)(\.|$)", re.IGNORECASE),
@@ -306,9 +308,35 @@ def build_attachment_prompt(attachments, max_total_chars=18000):
     if len(joined) > max_total_chars:
         joined = joined[:max_total_chars].rstrip()
 
-    return (
+    body = (
         "### Uploaded File Context\n"
         "The user uploaded the following files. Treat them as reference material for the current task. "
-        "Prefer citing filenames when you rely on them.\n\n"
+        "Prefer citing filenames when you rely on them. This block is valid only for the current request; "
+        "later uploaded file context overrides earlier uploaded file context.\n\n"
         f"{joined}"
     ).strip()
+    return f"{ATTACHMENT_CONTEXT_START}\n{body}\n{ATTACHMENT_CONTEXT_END}"
+
+
+def strip_attachment_prompt(text):
+    """Remove uploaded-file context blocks from text persisted in chat history."""
+    if not isinstance(text, str) or not text:
+        return text
+
+    tagged = re.compile(
+        rf"\n*{re.escape(ATTACHMENT_CONTEXT_START)}\s*.*?\s*{re.escape(ATTACHMENT_CONTEXT_END)}",
+        re.DOTALL,
+    )
+    cleaned = tagged.sub("", text)
+
+    # Backward compatibility for histories created before explicit tags existed.
+    legacy_marker = "### Uploaded File Context"
+    while legacy_marker in cleaned:
+        start = cleaned.find(legacy_marker)
+        suffix_start = cleaned.find("\n=== ASSISTANT ===", start)
+        if suffix_start >= 0:
+            cleaned = cleaned[:start].rstrip() + "\n" + cleaned[suffix_start:].lstrip()
+        else:
+            cleaned = cleaned[:start].rstrip()
+
+    return cleaned.strip()

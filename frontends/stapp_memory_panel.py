@@ -10,24 +10,29 @@ import os
 
 import streamlit as st
 
+from core.context.memory_reader import MemoryReader
+
 
 def get_memory_content(project_root: str) -> dict[str, str]:
-    """Read the three memory files from ``memory/``.
+    """Read displayable memory content.
 
     Args:
         project_root: The project root directory (e.g. ``script_dir/..``).
     """
     mem_dir = os.path.join(project_root, "memory")
     result: dict[str, str] = {}
-    for name in (
-        "global_mem_insight.txt",
-        "global_mem.txt",
-        "history_memory_inbox.md",
-    ):
-        path = os.path.join(mem_dir, name)
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                result[name] = f.read()
+
+    global_memory = MemoryReader(project_root=project_root).read_global_memory()
+    if global_memory.get("l1"):
+        result["global_mem_insight.txt"] = global_memory["l1"]
+    if global_memory.get("l2"):
+        result["global_mem.txt"] = global_memory["l2"]
+
+    inbox_name = "history_memory_inbox.md"
+    inbox_path = os.path.join(mem_dir, inbox_name)
+    if os.path.exists(inbox_path):
+        with open(inbox_path, "r", encoding="utf-8", errors="ignore") as f:
+            result[inbox_name] = f.read()
     return result
 
 
