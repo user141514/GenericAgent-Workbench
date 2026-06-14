@@ -46,8 +46,20 @@ def test_open_research_strategy_query_triggers_workflow():
 def test_research_workflow_excludes_simple_chat_and_plain_code():
     assert should_inject_research_workflow("hello, what can you do?", route_target="chat") is False
     assert should_inject_research_workflow("fix this pytest failure in foo.py", route_target="code") is False
+    assert should_inject_research_workflow("write a sorting algorithm in Python", route_target="code") is False
+    assert should_inject_research_workflow("write a benchmark script for this parser", route_target="code") is False
     assert should_inject_research_workflow("read README first line", route_target="executor") is False
     assert should_inject_research_workflow("review this PR for security issues", route_target="review") is False
+
+
+def test_research_workflow_triggers_for_failed_benchmark_against_strong_baseline():
+    assert (
+        should_inject_research_workflow(
+            "The experiment failed against a strong baseline; design the next research strategy.",
+            route_target="code",
+        )
+        is True
+    )
 
 
 def test_research_workflow_can_rescue_misrouted_chat():

@@ -30,9 +30,7 @@ def test_classic_final_response_runs_execution_honesty_gate():
 def test_openai_final_response_runs_execution_honesty_gate():
     source = Path("core/openai_agentmain.py").read_text(encoding="utf-8")
     assert "def apply_execution_honesty_gate" in source
-    assert "build_openai_execution_state" in source
-    assert "format_honesty_user_notice" in source
-    assert "return format_honesty_user_notice(result), True" in source
+    assert "apply_openai_execution_honesty_gate" in source
     assert "final_text, honesty_blocked = apply_execution_honesty_gate(final_text)" in source
     assert source.count("apply_execution_honesty_gate(final_text)") >= 2
 
@@ -80,8 +78,10 @@ def test_classic_done_queue_includes_execution_state():
 
 def test_openai_final_gate_consumes_executor_execution_state():
     source = Path("core/openai_agentmain.py").read_text(encoding="utf-8")
+    bridge = Path("core/openai_runtime/honesty_bridge.py").read_text(encoding="utf-8")
 
     assert "_executor_execution_state" in source
     assert "execution_state = item.get(\"execution_state\")" in source
-    assert "StateDelta(" in source
-    assert "files_changed = tuple(" in source
+    assert "build_openai_execution_state" in bridge
+    assert "StateDelta(" in bridge
+    assert "files_changed = tuple(" in bridge

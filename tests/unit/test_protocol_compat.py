@@ -41,6 +41,7 @@ class TestModelDetection:
     def test_deepseek_models_detected(self, model):
         profile = detect_model_profile(model)
         assert profile.model_family == "deepseek"
+        assert profile.protocol == "openai"
         assert profile.supports_thinking is True
         assert profile.supports_tools is True
 
@@ -127,7 +128,7 @@ class TestBackendInference:
 
 class TestStreamArtifactCleanup:
     def test_latest_turn_marker_uses_last_marker(self):
-        from core.openai_agentmain import _latest_turn_marker
+        from core.openai_runtime.message_conversion import _latest_turn_marker
 
         text = (
             "**LLM Running (Turn 1) ...**\n\nA\n"

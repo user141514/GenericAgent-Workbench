@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import base64
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,15 @@ class FakeAgentBackend(AgentBackend):
 
     def restore_history(self, restored, is_input_items=False):
         self.history = list(restored)
+
+
+class FakeHttpResponse:
+    def __init__(self, status_code: int, payload: dict | None = None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self):
+        return self._payload
 
 
 def _runtime(tmp_path: Path, agent: AgentBackend | None = None):
@@ -207,10 +217,218 @@ def test_create_app_registers_react_api_routes(tmpdir):
     assert "/api/history" in paths
     assert "/api/memory" in paths
     assert "/api/settings" in paths
+    assert "/api/llm-config" in paths
+    assert "/api/llm-config/check" in paths
     assert "/api/actions/new-chat" in paths
     assert "/api/actions/switch-key" in paths
     assert "/api/actions/reinject-tools" in paths
     assert "/api/autonomous/trigger" in paths
+
+
+def test_llm_config_patch_masks_key_sets_env_and_reloads_agent(tmpdir, monkeypatch):
+    from core.api import app as api_app
+    from core.api.app import LlmConfigPatch
+
+    tmp_path = Path(str(tmpdir))
+    monkeypatch.setenv("GAGENT_DESKTOP_STATE_DIR", str(tmp_path / "state"))
+    loaded_backends = []
+
+    def fake_load_agent(backend):
+        loaded_backends.append(backend)
+        return FakeAgentBackend()
+
+    monkeypatch.setattr(api_app, "load_agent", fake_load_agent)
+    runtime = _runtime(tmp_path, agent=FakeAgentBackend())
+
+    body = runtime.update_llm_config(
+        LlmConfigPatch(
+            provider="deepseek",
+            api_key="sk-test-123456",
+            base_url="https://api.deepseek.com/v1",
+            model="deepseek-v4-pro",
+        )
+    )
+
+    assert body["configured"] is True
+    assert body["api_key_masked"] == "sk-t...3456"
+    assert "sk-test-123456" not in json.dumps(body)
+    assert body["base_url"] == "https://api.deepseek.com/v1"
+    assert body["model"] == "deepseek-v4-pro"
+    assert body["backend"] == "fake-llm"
+    assert loaded_backends == ["classic"]
+    assert os.environ["GA_API_KEY"] == "sk-test-123456"
+    assert os.environ["GA_API_BASE_URL"] == "https://api.deepseek.com/v1"
+
+
+def test_llm_config_blank_key_preserves_existing_local_key(tmpdir, monkeypatch):
+    from core.api import app as api_app
+    from core.api.app import LlmConfigPatch
+
+    tmp_path = Path(str(tmpdir))
+    monkeypatch.setenv("GAGENT_DESKTOP_STATE_DIR", str(tmp_path / "state"))
+    monkeypatch.setattr(api_app, "load_agent", lambda _backend: FakeAgentBackend())
+    runtime = _runtime(tmp_path, agent=FakeAgentBackend())
+
+    runtime.update_llm_config(
+        LlmConfigPatch(api_key="sk-existing-abcdef", base_url="https://api.deepseek.com", model="deepseek-v4-pro")
+    )
+    body = runtime.update_llm_config(
+        LlmConfigPatch(api_key="", base_url="http://127.0.0.1:8000", model="deepseek-v4-flash")
+    )
+
+    assert body["configured"] is True
+    assert body["api_key_masked"] == "sk-e...cdef"
+    assert os.environ["GA_API_KEY"] == "sk-existing-abcdef"
+    assert os.environ["GA_API_BASE_URL"] == "http://127.0.0.1:8000"
+    assert os.environ["GA_MODEL"] == "deepseek-v4-flash"
+
+
+def test_llm_config_update_rejects_active_run(tmpdir, monkeypatch):
+    from fastapi import HTTPException
+    from core.api.app import LlmConfigPatch, RunCreateRequest
+
+    class BlockingFake(FakeAgentBackend):
+        def submit(self, task: AgentInput) -> AgentOutputChannel:
+            self.submitted.append(task)
+            self._running = True
+            return QueueOutputChannel()
+
+    tmp_path = Path(str(tmpdir))
+    monkeypatch.setenv("GAGENT_DESKTOP_STATE_DIR", str(tmp_path / "state"))
+    runtime = _runtime(tmp_path, agent=BlockingFake())
+    runtime.create_run(RunCreateRequest(query="running"))
+
+    with pytest.raises(HTTPException) as exc:
+        runtime.update_llm_config(LlmConfigPatch(api_key="sk-new"))
+
+    assert exc.value.status_code == 409
+
+
+def test_llm_config_check_reads_models_and_probes_chat(tmpdir, monkeypatch):
+    from core.api import llm_config
+    from core.api.app import LlmConfigCheckRequest
+
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append(("GET", url, kwargs))
+        return FakeHttpResponse(
+            200,
+            {
+                "data": [
+                    {"id": "deepseek-v4-pro"},
+                    {"id": "deepseek-v4-flash"},
+                ]
+            },
+        )
+
+    def fake_post(url, **kwargs):
+        calls.append(("POST", url, kwargs))
+        return FakeHttpResponse(200, {"choices": [{"message": {"content": "p"}}]})
+
+    monkeypatch.setattr(llm_config.requests, "get", fake_get)
+    monkeypatch.setattr(llm_config.requests, "post", fake_post)
+    runtime = _runtime(Path(str(tmpdir)))
+
+    body = runtime.check_llm_config(
+        LlmConfigCheckRequest(
+            api_key="sk-test",
+            base_url="https://api.deepseek.com",
+            model="deepseek-v4-pro",
+        )
+    )
+
+    assert body["ok"] is True
+    assert body["base_url_normalized"] == "https://api.deepseek.com/v1"
+    assert body["models"] == ["deepseek-v4-flash", "deepseek-v4-pro"]
+    assert body["selected_model_valid"] is True
+    assert body["chat_probe_ok"] is True
+    assert calls[0][1] == "https://api.deepseek.com/v1/models"
+    assert calls[1][1] == "https://api.deepseek.com/v1/chat/completions"
+    assert calls[1][2]["json"]["model"] == "deepseek-v4-pro"
+
+
+def test_llm_config_check_falls_back_to_chat_probe_when_models_endpoint_missing(tmpdir, monkeypatch):
+    from core.api import llm_config
+    from core.api.app import LlmConfigCheckRequest
+
+    monkeypatch.setattr(llm_config.requests, "get", lambda *_args, **_kwargs: FakeHttpResponse(404, {}))
+    monkeypatch.setattr(llm_config.requests, "post", lambda *_args, **_kwargs: FakeHttpResponse(200, {}))
+    runtime = _runtime(Path(str(tmpdir)))
+
+    body = runtime.check_llm_config(
+        LlmConfigCheckRequest(
+            api_key="sk-test",
+            base_url="http://127.0.0.1:8000/v1",
+            model="deepseek-v4-pro",
+        )
+    )
+
+    assert body["ok"] is True
+    assert body["models"] == ["deepseek-v4-pro", "deepseek-v4-flash"]
+    assert body["selected_model_valid"] is True
+    assert body["models_status_code"] == 404
+
+
+def test_llm_config_check_reports_auth_failure(tmpdir, monkeypatch):
+    from core.api import llm_config
+    from core.api.app import LlmConfigCheckRequest
+
+    monkeypatch.setattr(llm_config.requests, "get", lambda *_args, **_kwargs: FakeHttpResponse(401, {}))
+    runtime = _runtime(Path(str(tmpdir)))
+
+    body = runtime.check_llm_config(LlmConfigCheckRequest(api_key="bad-key"))
+
+    assert body["ok"] is False
+    assert body["stage"] == "auth"
+    assert "rejected" in body["message"]
+
+
+def test_llm_config_check_requires_key(tmpdir, monkeypatch):
+    from core.api.app import LlmConfigCheckRequest
+
+    monkeypatch.delenv("GA_API_KEY", raising=False)
+    monkeypatch.setenv("GAGENT_DESKTOP_STATE_DIR", str(Path(str(tmpdir)) / "state"))
+    runtime = _runtime(Path(str(tmpdir)))
+
+    body = runtime.check_llm_config(LlmConfigCheckRequest(base_url="https://api.deepseek.com"))
+
+    assert body["ok"] is False
+    assert body["stage"] == "input"
+    assert "API key" in body["message"]
+
+
+def test_create_app_boots_unconfigured_when_keys_are_missing(tmpdir, monkeypatch):
+    from core.api import app as api_app
+    from core.api.app import RunCreateRequest, create_app
+
+    def fail_load_agent(*_args, **_kwargs):
+        raise RuntimeError("No API key configuration found")
+
+    monkeypatch.setattr(api_app, "load_agent", fail_load_agent)
+
+    app = create_app(project_root=str(tmpdir))
+    runtime = app.state.runtime
+
+    assert runtime.status()["backend"] == "unconfigured"
+    created = runtime.create_run(RunCreateRequest(query="hello"))
+    event = runtime.active_run.channel.get_nowait()
+    assert event.kind == "error"
+    assert event.metadata["configuration_required"] is True
+    assert event.task_id == created.run_id
+
+
+def test_create_app_does_not_hide_non_configuration_startup_errors(tmpdir, monkeypatch):
+    from core.api import app as api_app
+    from core.api.app import create_app
+
+    def fail_load_agent(*_args, **_kwargs):
+        raise RuntimeError("unexpected import failure")
+
+    monkeypatch.setattr(api_app, "load_agent", fail_load_agent)
+
+    with pytest.raises(RuntimeError, match="unexpected import failure"):
+        create_app(project_root=str(tmpdir))
 
 
 def test_settings_patch_updates_runtime_state(tmpdir):
