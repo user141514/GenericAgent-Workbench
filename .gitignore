@@ -97,3 +97,9 @@ logs/
 examples/
 man_audit_v3_final.md
 manuscript_audit_v2_corrected.md
+
+# Re-exclude backup/scratch files overridden by !core/** etc.
+*.backup[0-9]
+*.bak
+*.bak_*
+*.tgz
