@@ -33,8 +33,12 @@ memory/catalog.sqlite
 
 # Local backups
 *.backup_*
+*.backup[0-9]
+*.bak
+*.bak_*
 *.before-*.py
 *.before-*.pyw
+*.tgz
 
 # Local databases / caches
 *.db
