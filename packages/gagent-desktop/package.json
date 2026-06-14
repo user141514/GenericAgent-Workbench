@@ -13,6 +13,9 @@
     "!backend/**/__pycache__/**",
     "!backend/**/*.pyc",
     "!backend/**/*.pyo",
+    "!backend/**/*.backup*",
+    "!backend/**/*.bak*",
+    "!backend/**/*.tgz",
     "bin/**/*",
     "electron/**/*",
     "scripts/**/*",
@@ -27,8 +30,11 @@
   "scripts": {
     "dry-run": "node bin/gagent-desktop.js --dry-run --json",
     "pack:dry": "npm pack --dry-run",
+    "pack:npm": "npm pack",
     "publish:dry": "npm publish --dry-run",
+    "publish:npm": "npm publish",
     "runtime:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\tools\\prepare_gagent_desktop_windows_runtime.ps1",
+    "publish:win": "npm run runtime:win && npm publish",
     "dist:dir": "node scripts/run-electron-builder.cjs --dir --win --x64",
     "dist:win": "node scripts/run-electron-builder.cjs --win portable --x64"
   },
