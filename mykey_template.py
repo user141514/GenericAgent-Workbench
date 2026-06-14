@@ -1,66 +1,62 @@
 """
-GenericAgent configuration template — triple-model + SMTP for mobile auth.
+GenericAgent local key configuration template.
 
-Copy this file to mykey.py and replace ALL placeholder values before use.
-DO NOT commit mykey.py to version control — it is already in .gitignore.
+Usage:
+  1. Copy this file to mykey.py.
+  2. Fill in your own API keys and optional SMTP settings.
+  3. Keep mykey.py local. It is gitignored and must not be committed.
 
-Each key represents an independent model configuration.
-The frontend sidebar will show all models for one-click switching.
-
-Pattern:
-  key1_<backend_type>_config  → Primary model
-  key2_<backend_type>_config  → Secondary model
-  key3_<backend_type>_config  → Tertiary model
-
-Backend types:
-  native_claude → Anthropic Messages API (Claude, GLM, DeepSeek in Claude mode)
-  native_oai    → OpenAI Chat Completions API (GPT, DeepSeek, other OAI-compatible)
-  claude        → Legacy text-protocol Claude
-  oai           → Legacy text-protocol OpenAI
+Notes:
+  - Leave unused key slots blank or delete them from your local mykey.py.
+  - The React/Electron frontend reads the active backend state; model keys are
+    configured here, not through a browser form.
 """
 
-# ── SMTP email config (for mobile email verification login) ──
-# QQ email: Login QQ email → Settings → Account → Enable SMTP → Get auth code
-# Fill in below (password is the SMTP auth code, NOT your QQ password)
-smtp_email = "REPLACE_WITH_YOUR_EMAIL@qq.com"
-smtp_password = "REPLACE_WITH_YOUR_SMTP_AUTH_CODE"
+# Optional SMTP email config for the legacy mobile/email login flow.
+# For QQ mail, smtp_password should be the SMTP authorization code, not the
+# normal account password.
+smtp_email = ""
+smtp_password = ""
 smtp_server = "smtp.qq.com"
 smtp_port = 465
-allowed_email = "REPLACE_WITH_YOUR_EMAIL@qq.com"    # Only allow this email to login
-streamlit_password = "你的密码"                        # Streamlit remote access password
+allowed_email = ""
+streamlit_password = ""
 
-# ── Key1: Primary model (example: Claude via OpenAI-compatible API) ──
+
+# Key1: primary DeepSeek OpenAI-compatible model.
 key1_native_oai_config = {
-    'name': 'your-primary-model',
-    'apikey': 'REPLACE_WITH_YOUR_KEY1_TOKEN',
-    'apibase': 'https://your-api-endpoint.com',
-    'model': 'your-model-name',
-    'stream': False,
-    'max_retries': 1,
-    'connect_timeout': 10,
-    'read_timeout': 300,
+    "name": "deepseek-v4-pro",
+    "apikey": "",
+    "apibase": "https://api.deepseek.com",
+    "model": "deepseek-v4-pro",
+    "stream": True,
+    "max_retries": 1,
+    "connect_timeout": 10,
+    "read_timeout": 300,
 }
 
-# ── Key2: Secondary model (example: stream mode for real-time output) ──
+
+# Key2: optional secondary DeepSeek model.
 key2_native_oai_config = {
-    'name': 'your-secondary-model',
-    'apikey': 'REPLACE_WITH_YOUR_KEY2_TOKEN',
-    'apibase': 'https://your-api-endpoint.com',
-    'model': 'your-model-name',
-    'stream': True,
-    'max_retries': 1,
-    'connect_timeout': 10,
-    'read_timeout': 300,
+    "name": "deepseek-v4-flash",
+    "apikey": "",
+    "apibase": "https://api.deepseek.com",
+    "model": "deepseek-v4-flash",
+    "stream": True,
+    "max_retries": 1,
+    "connect_timeout": 10,
+    "read_timeout": 300,
 }
 
-# ── Key3: Tertiary model (example: powerful model for complex tasks) ──
+
+# Key3: optional custom OpenAI-compatible endpoint.
 key3_native_oai_config = {
-    'name': 'your-tertiary-model',
-    'apikey': 'REPLACE_WITH_YOUR_KEY3_TOKEN',
-    'apibase': 'https://your-api-endpoint.com',
-    'model': 'your-model-name',
-    'stream': False,
-    'max_retries': 1,
-    'connect_timeout': 10,
-    'read_timeout': 300,
+    "name": "custom-openai-compatible",
+    "apikey": "",
+    "apibase": "",
+    "model": "",
+    "stream": True,
+    "max_retries": 1,
+    "connect_timeout": 10,
+    "read_timeout": 300,
 }

@@ -68,6 +68,10 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+packages/gagent-desktop/node_modules/
+packages/gagent-desktop/python-runtime/
+packages/gagent-desktop/release/
+.cache/gagent-desktop/
 core/graphify-out/
 memory/graphify-out/
 graphify-out/

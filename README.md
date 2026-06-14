@@ -54,7 +54,7 @@ key1_native_oai_config = {
     'name': 'deepseek',
     'apikey': 'sk-你的key放这里',    # ← 改这里
     'apibase': 'https://api.deepseek.com',
-    'model': 'deepseek-chat',
+    'model': 'deepseek-v4-pro',
     ...
 }
 ```

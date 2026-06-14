@@ -3,7 +3,7 @@
 GenericAgent now has two frontend tracks:
 
 - **Legacy Streamlit track**: `start_local.bat` / `frontends/stapp.py`.
-- **React track**: `start_react.bat` for browser development and `start_desktop.bat` for the Electron desktop shell.
+- **React track**: `start_react.bat` / `start_desktop.bat` for the Electron desktop shell, and `start_react_browser.bat` for browser development.
 
 The Streamlit track is frozen for new product interactions. It remains available for critical bug fixes, debugging, and fallback use. New chat-composer, upload, streaming, stop, copy, event-trace, memory, and history work should target the React track first.
 
@@ -25,6 +25,16 @@ Electron is the desktop packaging route. React still owns the UI; Electron owns 
 
 ```bat
 start_react.bat
+```
+
+Starts:
+
+- FastAPI on `http://127.0.0.1:8765`
+- Vite on `http://127.0.0.1:5173`
+- Electron desktop shell
+
+```bat
+start_react_browser.bat
 ```
 
 Starts:
