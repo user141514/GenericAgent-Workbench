@@ -6,6 +6,10 @@ type RenderMessageTextOptions = {
 };
 
 const TURN_MARKER_RE = /(\**LLM Running \(Turn (\d+)\) \.\.\.\*\*)/g;
+const TOOL_CALL_BLOCK_RE = /^Tool:\s*`[^`]+`\s+args:\s*\n`{3,}[^\n]*\n[\s\S]*?\n`{3,}\s*/gm;
+const RUNTIME_FENCE_BLOCK_RE = /^`{3,}\s*\n\[(?:Action|Status|Stdout|Stderr|Error|Path Guard|Info)\][\s\S]*?\n`{3,}\s*/gm;
+const RUNTIME_LINE_RE = /^\[(?:Action|Status|Stdout|Stderr|Error|Path Guard|Info)\].*$/gm;
+const SUMMARY_TAG_RE = /<summary>[\s\S]*?<\/summary>/gi;
 
 export function renderMessageText(text: string, options: RenderMessageTextOptions) {
   const visible = options.role === "assistant"
@@ -13,8 +17,7 @@ export function renderMessageText(text: string, options: RenderMessageTextOption
     : text;
 
   if (!visible && options.streaming && options.role !== "assistant") return "Thinking...";
-  if (options.role !== "assistant" || !options.compact || visible.length <= 1800) return visible;
-  return `${visible.slice(0, 1800)}\n\n[已压缩显示，复制按钮仍复制最后完整回复]`;
+  return visible;
 }
 
 export function stripLegacyTurnResidue(text: string, latestTraceTurn = 0) {
@@ -31,4 +34,24 @@ export function stripLegacyTurnResidue(text: string, latestTraceTurn = 0) {
 
   const markerStart = last.index || 0;
   return raw.slice(markerStart + marker.length).trimStart();
+}
+
+export function copyableMessageText(text: string) {
+  const visibleTail = stripLegacyTurnResidue(text, 0);
+  return normalizeCopyText(
+    visibleTail
+      .replace(SUMMARY_TAG_RE, "")
+      .replace(TOOL_CALL_BLOCK_RE, "")
+      .replace(RUNTIME_FENCE_BLOCK_RE, "")
+      .replace(RUNTIME_LINE_RE, "")
+      .replace(TURN_MARKER_RE, ""),
+  );
+}
+
+function normalizeCopyText(text: string) {
+  return text
+    .replace(/\r\n/g, "\n")
+    .replace(/^\s*---+\s*/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }

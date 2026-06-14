@@ -726,6 +726,7 @@ def start_agent_task(prompt, dispatch_agent):
     drainer = AgentOutputDrainer(channel, stop_requested=False)
     st.session_state._drainer = drainer
     st.session_state.agent_running = True
+    st.session_state._poll_count = 0
 
 
 def poll_agent_output():
@@ -880,9 +881,14 @@ if st.session_state.get("agent_running", False):
         st.session_state.stream_started = False
         st.session_state.stop_requested = False
         st.session_state.stop_requested_at = 0.0
+        st.session_state._poll_count = 0
         st.rerun()
 
-    time.sleep(0.2)
+    # Exponential backoff polling (P0 fix: was flat 0.2s → CPU 37-45%)
+    poll_n = st.session_state.get("_poll_count", 0) + 1
+    st.session_state["_poll_count"] = poll_n
+    sleep_s = min(0.2 * (1.3 ** min(poll_n, 15)), 2.0)
+    time.sleep(sleep_s)
     st.rerun()
 
 if st.session_state.autonomous_enabled:

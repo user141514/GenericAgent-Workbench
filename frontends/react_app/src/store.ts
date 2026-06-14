@@ -44,12 +44,13 @@ export function applyAgentEvent(
   }
 
   if (event.kind === "error") {
+    const errorText = friendlyErrorText(event.error || "Run failed.");
     if (!last || last.role !== "assistant" || !last.streaming) {
-      next.push({ id: cryptoId(), role: "assistant", text: event.error || "Run failed.", streaming: false });
+      next.push({ id: cryptoId(), role: "assistant", text: errorText, streaming: false });
     } else {
-      next[next.length - 1] = { ...last, text: event.error || last.text, streaming: false };
+      next[next.length - 1] = { ...last, text: errorText || last.text, streaming: false };
     }
-    return { messages: next, status: "error", error: event.error || "Run failed." };
+    return { messages: next, status: "error", error: errorText };
   }
 
   return { messages: next, status: terminal ? "idle" : "running", error: "" };
@@ -62,6 +63,26 @@ export function lastAssistantText(messages: ChatMessage[]) {
     }
   }
   return "";
+}
+
+export function friendlyErrorText(error: string) {
+  const text = error || "Run failed.";
+  const lowered = text.toLowerCase();
+  const looksLikeNetworkFault = [
+    "connection_error",
+    "connecttimeout",
+    "connect timeout",
+    "connection timed out",
+    "timed out",
+    "httpsconnectionpool",
+    "max retries exceeded",
+    "connection refused",
+    "networkerror",
+  ].some((needle) => lowered.includes(needle));
+  if (looksLikeNetworkFault && !text.includes("网络连接故障")) {
+    return `网络连接故障：${text}`;
+  }
+  return text;
 }
 
 export const useAppStore = create<AppState>((set) => ({
@@ -114,7 +135,7 @@ export const useAppStore = create<AppState>((set) => ({
   setHistory: (history) => set({ history }),
   setMemory: (memory) => set({ memory }),
   setSettings: (settings) => set({ settings }),
-  setError: (error) => set({ error, status: "error" }),
+  setError: (error) => set({ error: friendlyErrorText(error), status: "error" }),
   restoreConversation: (messages) =>
     set({
       messages: messages.map((message) => ({ ...message, id: cryptoId() })),

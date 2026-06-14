@@ -1,5 +1,9 @@
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, Menu, shell } = require("electron");
 const path = require("node:path");
+const {
+  createTextEditingMenuTemplate,
+  shouldShowTextEditingMenu,
+} = require("./text-context-menu.cjs");
 
 const DEV_URL = process.env.GA_REACT_DESKTOP_URL || "http://127.0.0.1:5173";
 
@@ -23,6 +27,12 @@ function createWindow() {
   win.webContents.setWindowOpenHandler(({ url }) => {
     shell.openExternal(url);
     return { action: "deny" };
+  });
+  win.webContents.on("context-menu", (_event, params) => {
+    if (!shouldShowTextEditingMenu(params)) return;
+    Menu.buildFromTemplate(createTextEditingMenuTemplate(params)).popup({
+      window: win,
+    });
   });
 
   if (app.isPackaged) {

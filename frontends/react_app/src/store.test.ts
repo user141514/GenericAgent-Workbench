@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { applyAgentEvent, lastAssistantText, useAppStore } from "./store";
+import { applyAgentEvent, friendlyErrorText, lastAssistantText, useAppStore } from "./store";
 import type { AgentEvent, ChatMessage } from "./types";
 
 function event(kind: AgentEvent["kind"], text = "", error = ""): AgentEvent {
@@ -60,6 +60,17 @@ describe("lastAssistantText", () => {
   });
 });
 
+describe("friendlyErrorText", () => {
+  it("labels connection timeouts as network faults", () => {
+    const text = friendlyErrorText(
+      "CONNECTION_ERROR ConnectTimeout: HTTPSConnectionPool(host='api.deepseek.com') timed out",
+    );
+
+    expect(text).toContain("网络连接故障");
+    expect(text).toContain("api.deepseek.com");
+  });
+});
+
 describe("useAppStore run lifecycle", () => {
   it("clears previous run events when a new run starts", () => {
     useAppStore.setState({
@@ -75,7 +86,7 @@ describe("useAppStore run lifecycle", () => {
     const state = useAppStore.getState();
     expect(state.runId).toBe("new_run");
     expect(state.events).toEqual([]);
-    expect(state.messages.at(-1)).toMatchObject({ role: "user", text: "new question" });
+    expect(state.messages[state.messages.length - 1]).toMatchObject({ role: "user", text: "new question" });
   });
 
   it("updates frontier state without creating assistant text", () => {

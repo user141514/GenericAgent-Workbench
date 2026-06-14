@@ -1,4 +1,11 @@
-import type { AgentEvent, AppSettings, AttachmentMeta, ChatMessage, HistoryItem, RoutingMode } from "./types";
+import type {
+  AgentEvent,
+  AppSettings,
+  AttachmentMeta,
+  ChatMessage,
+  HistoryItem,
+  RoutingMode,
+} from "./types";
 
 export const API_BASE =
   (import.meta.env.VITE_AGENT_API_BASE as string | undefined) || "http://127.0.0.1:8765";

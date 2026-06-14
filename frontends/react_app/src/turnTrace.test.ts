@@ -53,6 +53,6 @@ describe("buildTurnSummaries", () => {
     ]);
 
     expect(turns[0].entries.map((entry) => entry.kind)).toEqual(["turn_start", "chunk", "chunk", "done"]);
-    expect(turns[0].entries.at(-1)?.text).toBe("final");
+    expect(turns[0].entries[turns[0].entries.length - 1]?.text).toBe("final");
   });
 });

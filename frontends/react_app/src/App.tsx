@@ -1,4 +1,14 @@
-import { FormEvent, MouseEvent, useEffect, useMemo, useRef, useState } from "react";
+import {
+  DragEvent,
+  FormEvent,
+  KeyboardEvent,
+  MouseEvent,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   createRun,
   distillDeleteHistory,
@@ -17,7 +27,7 @@ import {
 } from "./api";
 import { FrontierStatePanel } from "./FrontierStatePanel";
 import { MarkdownMessage } from "./MarkdownMessage";
-import { renderMessageText } from "./messageText";
+import { copyableMessageText, renderMessageText } from "./messageText";
 import { lastAssistantText, useAppStore } from "./store";
 import { TurnTraceList } from "./TurnTracePanel";
 import type { AgentEvent, AppSettings, RoutingMode } from "./types";
@@ -40,11 +50,13 @@ const routingLabels: Record<RoutingMode, string> = {
 export default function App() {
   const [input, setInput] = useState("");
   const [isUploading, setIsUploading] = useState(false);
+  const [isDragActive, setIsDragActive] = useState(false);
   const [notice, setNotice] = useState("");
   const [sidePanel, setSidePanel] = useState<SidePanel>("");
   const [historyMenu, setHistoryMenu] = useState<HistoryContextMenu>(null);
   const eventSource = useRef<EventSource | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const {
     messages,
     events,
@@ -71,7 +83,7 @@ export default function App() {
 
   const canSend = status === "idle" && input.trim().length > 0;
   const canStop = status === "running";
-  const latestReply = useMemo(() => lastAssistantText(messages), [messages]);
+  const latestReply = useMemo(() => copyableMessageText(lastAssistantText(messages)), [messages]);
   const latestAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i -= 1) {
       if (messages[i].role === "assistant") return messages[i].id;
@@ -103,6 +115,10 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useLayoutEffect(() => {
+    resizeTextarea();
+  }, [input]);
+
   async function refreshSidebarData() {
     await Promise.all([
       fetchHistory().then((data) => setHistory(data.items)).catch(() => setHistory([])),
@@ -120,9 +136,18 @@ export default function App() {
     );
   }
 
-  async function onSubmit(event: FormEvent) {
-    event.preventDefault();
-    if (!canSend) return;
+  function resizeTextarea(element = textareaRef.current) {
+    if (!element) return;
+    element.style.height = "auto";
+    if (element.scrollHeight > 0) {
+      const nextHeight = Math.min(element.scrollHeight, 280);
+      element.style.height = `${nextHeight}px`;
+      element.style.overflowY = element.scrollHeight > 280 ? "auto" : "hidden";
+    }
+  }
+
+  async function submitPrompt() {
+    if (!canSend || isUploading) return;
     const query = input.trim();
     setInput("");
     setNotice("");
@@ -136,6 +161,26 @@ export default function App() {
     }
   }
 
+  function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    void submitPrompt();
+  }
+
+  function onComposerKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
+    if (
+      event.key !== "Enter"
+      || event.shiftKey
+      || event.altKey
+      || event.ctrlKey
+      || event.metaKey
+      || event.nativeEvent.isComposing
+    ) {
+      return;
+    }
+    event.preventDefault();
+    void submitPrompt();
+  }
+
   async function onStop() {
     if (!runId) return;
     setStopping();
@@ -146,8 +191,42 @@ export default function App() {
     }
   }
 
-  async function onFileChange(files: FileList | null) {
+  function hasDraggedFiles(event: DragEvent<HTMLElement>) {
+    const transfer = event.dataTransfer;
+    return Array.from(transfer.types || []).includes("Files") || transfer.files.length > 0;
+  }
+
+  function onComposerDragEnter(event: DragEvent<HTMLFormElement>) {
+    if (status !== "idle" || isUploading || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    setIsDragActive(true);
+  }
+
+  function onComposerDragOver(event: DragEvent<HTMLFormElement>) {
+    if (status !== "idle" || isUploading || !hasDraggedFiles(event)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "copy";
+    if (!isDragActive) setIsDragActive(true);
+  }
+
+  function onComposerDragLeave(event: DragEvent<HTMLFormElement>) {
+    const nextTarget = event.relatedTarget;
+    if (nextTarget instanceof Node && event.currentTarget.contains(nextTarget)) return;
+    setIsDragActive(false);
+  }
+
+  async function onComposerDrop(event: DragEvent<HTMLFormElement>) {
+    if (!hasDraggedFiles(event)) return;
+    event.preventDefault();
+    setIsDragActive(false);
+    if (status !== "idle" || isUploading) return;
+    await onFileChange(event.dataTransfer.files);
+  }
+
+  async function onFileChange(files: FileList | File[] | null) {
     if (!files?.length) return;
+    if (status !== "idle" || isUploading) return;
     setIsUploading(true);
     setNotice("");
     try {
@@ -411,7 +490,6 @@ export default function App() {
         <header className="topbar">
           <div>
             <p>Backend: genericagent / {routingLabels[settings.routing_mode]}</p>
-            <h1>What can I help you?</h1>
           </div>
           <div className={`status-pill status-${status}`}>{status}</div>
         </header>
@@ -466,46 +544,69 @@ export default function App() {
           {notice && !error && <div className="notice-banner">{notice}</div>}
         </section>
 
-        <form className="composer" onSubmit={onSubmit}>
-          {attachments.length > 0 && (
-            <div className="composer-attachments">
-              {attachments.map((file) => (
-                <span key={file.id} title={file.warning || file.name}>
-                  {file.status === "ready" ? "📎" : "⚠"} {file.name}
-                </span>
-              ))}
-              <button type="button" onClick={clearAttachments}>
-                清空
-              </button>
-            </div>
-          )}
-          <div className="composer-row">
-            <label className="attach-button" title="上传附件">
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                onChange={(event) => onFileChange(event.currentTarget.files)}
-                disabled={status !== "idle" || isUploading}
-              />
-              +
-            </label>
+        <form
+          className="composer"
+          onSubmit={onSubmit}
+          onDragEnter={onComposerDragEnter}
+          onDragOver={onComposerDragOver}
+          onDragLeave={onComposerDragLeave}
+          onDrop={onComposerDrop}
+          aria-label="chat composer"
+        >
+          <div className={`composer-surface${isDragActive ? " drag-active" : ""}`}>
+            {isDragActive && <div className="composer-drop-hint">Drop files to attach</div>}
+            {attachments.length > 0 && (
+              <div className="composer-attachments">
+                {attachments.map((file) => (
+                  <span key={file.id} title={file.warning || file.name}>
+                    {file.status === "ready" ? "📎" : "⚠"} {file.name}
+                  </span>
+                ))}
+                <button type="button" onClick={clearAttachments}>
+                  清空
+                </button>
+              </div>
+            )}
             <textarea
+              ref={textareaRef}
               value={input}
-              onChange={(event) => setInput(event.target.value)}
+              onChange={(event) => {
+                setInput(event.target.value);
+                resizeTextarea(event.currentTarget);
+              }}
+              onKeyDown={onComposerKeyDown}
               placeholder={status === "idle" ? "any task?" : "Agent is running..."}
               disabled={status !== "idle"}
               rows={1}
             />
-            {canStop ? (
-              <button type="button" className="stop-button" onClick={onStop}>
-                Stop
-              </button>
-            ) : (
-              <button type="submit" disabled={!canSend || isUploading}>
-                Send
-              </button>
-            )}
+            <div className="composer-toolbar">
+              <div className="composer-left-actions">
+                <label className="attach-button" title="上传附件" aria-label="Upload files">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    multiple
+                    onChange={(event) => onFileChange(event.currentTarget.files)}
+                    disabled={status !== "idle" || isUploading}
+                  />
+                  +
+                </label>
+              </div>
+              <div className="composer-right-actions">
+                <span className="composer-model-pill" title={settings.backend || "unknown"}>
+                  {settings.backend || "GenericAgent"}
+                </span>
+                {canStop ? (
+                  <button type="button" className="stop-button send-button" onClick={onStop}>
+                    Stop
+                  </button>
+                ) : (
+                  <button className="send-button" type="submit" disabled={!canSend || isUploading} aria-label="Send">
+                    ↑
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         </form>
       </main>
