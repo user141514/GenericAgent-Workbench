@@ -193,6 +193,10 @@ async function main() {
       fail(`No healthy API at ${config.apiUrl}, and --no-api was set.`);
     }
     await ensurePythonEnvironment(config, { force: false });
+    // after venv creation, prefer venv Python over system Python
+    if (fs.existsSync(config.venvPython)) {
+      config.python = config.venvPython;
+    }
     const busy = await isPortBusy(config.host, config.port);
     if (busy) {
       fail(`Port ${config.port} is occupied, but ${config.apiUrl}/api/status is not healthy.`);

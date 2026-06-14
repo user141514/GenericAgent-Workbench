@@ -1,6 +1,6 @@
 {
   "name": "gagent-desktop",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "description": "GenericAgent desktop app with packaged React UI and sanitized local backend.",
   "license": "MIT",
   "type": "commonjs",
@@ -20,10 +20,6 @@
     "electron/**/*",
     "scripts/**/*",
     "dist/**/*",
-    "python-runtime/**/*",
-    "!python-runtime/**/__pycache__/**",
-    "!python-runtime/**/*.pyc",
-    "!python-runtime/**/*.pyo",
     "README.md",
     "package.json"
   ],
@@ -33,8 +29,8 @@
     "pack:npm": "npm pack",
     "publish:dry": "npm publish --dry-run",
     "publish:npm": "npm publish",
+    "postinstall": "node -e \"console.log('\\n  gagent-desktop installed.\\n  First run: gagent-desktop setup  (auto-creates Python env)\\n  Or with custom Python: gagent-desktop --python D:\\\\\\\\python\\\\\\\\python.exe\\n')\"",
     "runtime:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\tools\\prepare_gagent_desktop_windows_runtime.ps1",
-    "publish:win": "npm run runtime:win && npm publish",
     "dist:dir": "node scripts/run-electron-builder.cjs --dir --win --x64",
     "dist:win": "node scripts/run-electron-builder.cjs --win portable --x64"
   },
