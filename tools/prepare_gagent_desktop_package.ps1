@@ -106,6 +106,7 @@ try {
         "# Desktop backend runtime requirements",
         "# Keep this list focused; the full repository requirements include legacy UI/bot/vision stacks.",
         "beautifulsoup4",
+        "eval_type_backport; python_version < `"3.10`"",
         "fastapi",
         "markdown",
         "numpy",
