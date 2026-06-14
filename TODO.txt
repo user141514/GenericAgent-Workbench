@@ -1,0 +1,22 @@
+# TODO (规划于 2026-06-13 自主行动 第4周期)
+# 价值公式：AI训练数据无法覆盖 x 对未来协作有持久收益
+# 线索驱动：用户上传C3R手稿(45KB) → 论文复现为第4周期核心方向
+# 排序：实用产出 > 环境发现 > 工具挖掘 > 了解用户 > 自身演进
+
+[ ] 产出 | C3R完整复现：LBC-Ranker(Known-Candidate) | LBC-Ranker(Learned Binary-fingerprint Compatibility)，ChEMBL数据，复现OF-macro Hit@10>=0.80 | 验收：指标与论文一致
+[ ] 产出 | C3R完整复现：C3R主算法(Candidate-Heldout) | C3R排除protein target ID，BindingDB-Hard CA-matched split | 验收：MRR从0.540->0.670的relative improvement复现
+[ ] 产出 | BindingDB-Hard数据管道 | 下载BindingDB，实现CA-matched split(5.4M行->train/val/test) | 验收：split统计匹配论文描述
+[ ] 产出 | C3R评估指标体系 | MRR/Hit@1/Hit@10/OF-macro + seed-wise统计检验(10 seed wins) | 验收：自动输出与论文Table对比
+[ ] 产出 | mmpdb->C3R->评估全流程串联 | R32/R33产物+C3R复现->端到端fragment replacement ranking | 验收：命令行一键运行
+[ ] 环境 | molli工具链探查 | R30发现的molli冷门工具：具体能力/依赖/适用场景 | 验收：运行demo+能力清单
+[ ] 产出 | 论文缺口分析 | R32 demo vs 完整论文自动对比，输出差距清单 | 验收：生成gap_report.md
+
+---
+
+## 2026-06-14 14:15 +08:00 Refactor Checkpoint
+
+- Step6 completed: extracted 8 pure message-conversion helpers into `core/openai_runtime/message_conversion.py`.
+- `core/openai_agentmain.py` now imports those helpers and removed the old inline function block, reducing the file by about 221 lines.
+- Verification reported by user: `67 passed, 0 failed`; new unit coverage includes 23 message-conversion tests.
+- Current refactor direction: continue reducing `openai_agentmain.py` by extracting low-state helper modules before touching `OpenAIOrchestratedAgent._run_task_async`.
+- Suggested next step: review Step6 diff, then consider extracting stream/artifact helpers or `GenericAgentSDKModel` only with focused tests.

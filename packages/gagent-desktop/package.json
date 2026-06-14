@@ -1,0 +1,93 @@
+{
+  "name": "gagent-desktop",
+  "version": "0.1.0",
+  "description": "GenericAgent desktop app with packaged React UI and sanitized local backend.",
+  "license": "MIT",
+  "type": "commonjs",
+  "main": "electron/main.cjs",
+  "bin": {
+    "gagent-desktop": "bin/gagent-desktop.js"
+  },
+  "files": [
+    "backend/**/*",
+    "!backend/**/__pycache__/**",
+    "!backend/**/*.pyc",
+    "!backend/**/*.pyo",
+    "bin/**/*",
+    "electron/**/*",
+    "scripts/**/*",
+    "dist/**/*",
+    "python-runtime/**/*",
+    "!python-runtime/**/__pycache__/**",
+    "!python-runtime/**/*.pyc",
+    "!python-runtime/**/*.pyo",
+    "README.md",
+    "package.json"
+  ],
+  "scripts": {
+    "dry-run": "node bin/gagent-desktop.js --dry-run --json",
+    "pack:dry": "npm pack --dry-run",
+    "publish:dry": "npm publish --dry-run",
+    "runtime:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\tools\\prepare_gagent_desktop_windows_runtime.ps1",
+    "dist:dir": "node scripts/run-electron-builder.cjs --dir --win --x64",
+    "dist:win": "node scripts/run-electron-builder.cjs --win portable --x64"
+  },
+  "dependencies": {
+    "electron": "^42.4.0"
+  },
+  "devDependencies": {
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "local.gagent.desktop",
+    "productName": "GenericAgent",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo"
+        ]
+      },
+      {
+        "from": "python-runtime",
+        "to": "python-runtime",
+        "filter": [
+          "**/*",
+          "!**/__pycache__/**",
+          "!**/*.pyc",
+          "!**/*.pyo"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "backend/assets/icons/genericagent.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "asar": true
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

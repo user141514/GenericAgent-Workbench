@@ -1,0 +1,16 @@
+﻿# Desktop backend runtime requirements
+# Keep this list focused; the full repository requirements include legacy UI/bot/vision stacks.
+beautifulsoup4
+fastapi
+markdown
+numpy
+openai
+Pillow
+PyMuPDF
+pyperclip
+python-docx
+python-dotenv>=1.0
+pywin32; platform_system == "Windows"
+requests
+urllib3
+uvicorn
