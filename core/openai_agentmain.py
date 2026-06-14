@@ -26,17 +26,11 @@ from urllib.parse import urlparse
 from .router_rules import RouterRules, RouteResult
 from .quality import (
     ExecutionAction,
-    ExecutionState,
-    ResponseClaim,
-    StateDelta,
     answer_quality_enabled,
     build_answer_quality_context,
     build_problem_framing_context,
     build_research_code_priority_context,
     build_research_workflow_context,
-    evaluate_execution_honesty,
-    execution_honesty_enabled,
-    format_honesty_user_notice,
     problem_framing_enabled,
     research_code_priority_enabled,
     research_workflow_enabled,
@@ -44,6 +38,29 @@ from .quality import (
     should_inject_problem_framing,
     should_inject_research_code_priority,
     should_inject_research_workflow,
+)
+from .openai_runtime import (
+    ClassicProgressAccumulator,
+    apply_openai_execution_honesty_gate,
+    build_minimal_runtime_graph as build_minimal_openai_runtime_graph,
+)
+from .openai_runtime.backend_config import (
+    _describe_variant_backend,
+    _infer_backend_kind,
+    _normalize_model_identity,
+    _normalized_backend_base_url,
+    _normalized_url_host,
+    _strip_url,
+)
+from .openai_runtime.message_conversion import (
+    _chat_messages_to_claude_messages,
+    _extract_classic_executor_report,
+    _inject_turn_markers,
+    _input_items_to_history_lines,
+    _latest_turn_marker,
+    _message_content_to_claude_blocks,
+    _restored_lines_to_inputs,
+    _tool_message_content_to_text,
 )
 from .runtime import (
     RuntimeProfiler,
@@ -402,391 +419,14 @@ def _ensure_openai_agents_on_path() -> None:
             return
 
 
-def _load_json_file(path: str) -> dict[str, Any]:
-    if not os.path.exists(path):
-        return {}
-    with open(path, encoding="utf-8") as f:
-        data = json.load(f)
-    return data if isinstance(data, dict) else {}
 
+from .openai_runtime.model_variants import (
+    _describe_classic_backend,
+    _looks_like_backend_unavailable,
+    _resolve_model_variants,
+    _score_variant_to_classic_backend,
+)
 
-def _load_mykeys() -> dict[str, Any]:
-    py_path = os.path.join(SCRIPT_DIR, "mykey.py")
-    if os.path.exists(py_path):
-        spec = importlib.util.spec_from_file_location("ga_mykey", py_path)
-        if spec is None or spec.loader is None:
-            raise RuntimeError("Unable to load mykey.py")
-        module = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(module)
-        return {k: v for k, v in vars(module).items() if not k.startswith("_")}
-
-    json_path = os.path.join(SCRIPT_DIR, "mykey.json")
-    if os.path.exists(json_path):
-        return _load_json_file(json_path)
-
-    # Fall back to environment variables (preferred new approach)
-    api_key = os.environ.get("GA_API_KEY", "").strip()
-    if api_key:
-        return {
-            "native_oai_config": {
-                "name": os.environ.get("GA_BACKEND_NAME", "env-configured"),
-                "apikey": api_key,
-                "apibase": os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com").rstrip("/"),
-                "model": os.environ.get("GA_MODEL", "deepseek-chat"),
-                "stream": os.environ.get("GA_STREAM", "true").lower() != "false",
-                "max_retries": int(os.environ.get("GA_MAX_RETRIES", "3")),
-                "connect_timeout": int(os.environ.get("GA_CONNECT_TIMEOUT", "10")),
-                "read_timeout": int(os.environ.get("GA_READ_TIMEOUT", "120")),
-            }
-        }
-    return {}
-
-
-def _load_claude_settings() -> dict[str, Any]:
-    return _load_json_file(CLAUDE_SETTINGS_PATH)
-
-
-def _strip_url(url: str | None) -> str | None:
-    if not url:
-        return None
-    return str(url).rstrip("/")
-
-
-def _normalize_openai_base_url(base_url: str | None) -> str | None:
-    stripped = _strip_url(base_url)
-    if not stripped:
-        return None
-    if "/v1" not in stripped:
-        return f"{stripped}/v1"
-    return stripped
-
-
-def _infer_backend_kind(name: str, base_url: str | None, model: str | None) -> str | None:
-    """Infer the backend protocol from configuration metadata.
-
-    Priority (highest to lowest):
-      1. Explicit `native_oai` / `native_claude` in the config key name
-      2. Base URL structure (anthropic endpoint vs openai endpoint)
-      3. Model name keywords with base URL context
-      4. Protocol override via GA_PROTOCOL env var
-    """
-    lname = name.lower()
-    lbase = (base_url or "").lower()
-    lmodel = (model or "").lower()
-
-    # ── Explicit backend type in config key name (highest priority) ──
-    if "native_claude" in lname:
-        return "native_claude"
-    if "native_oai" in lname:
-        return "native_oai"
-
-    # ── Backward-compatible name heuristics ──
-    # "native" + "claude" anywhere → native_claude
-    if "native" in lname and "claude" in lname:
-        return "native_claude"
-    if "native" in lname and ("oai" in lname or "openai" in lname or "gpt" in lname):
-        return "native_oai"
-    # Legacy: just "claude" in name → native_claude
-    if any(token in lname for token in ("claude", "anthropic")):
-        return "native_claude"
-    # Legacy: just "openai" / "oai" / "gpt" in name → native_oai
-    if any(token in lname for token in ("oai", "openai", "gpt")):
-        return "native_oai"
-
-    # ── Base URL indicates protocol ──
-    if any(token in lbase for token in ("anthropic", "/messages")):
-        return "native_claude"
-    if any(token in lbase for token in ("/v1", "chat/completions", "responses", "openai")):
-        # OpenAI-compatible endpoint → check model to decide
-        if any(token in lmodel for token in ("claude-", "claude3", "claude4", "anthropic")):
-            # Claude model on OpenAI-compatible proxy → native_oai (uses OAI protocol)
-            return "native_oai"
-        return "native_oai"
-
-    # ── Model name with no base URL context ──
-    if any(token in lmodel for token in ("claude-", "claude3", "claude4", "anthropic")):
-        # Unknown base URL but Claude model — could be either protocol
-        # Default to native_oai (more widely supported by proxies)
-        if lbase and not any(t in lbase for t in ("anthropic", "messages", "openai", "v1")):
-            return "native_oai"
-        return "native_claude"
-
-    if any(token in lmodel for token in ("deepseek",)):
-        return "native_oai"
-    if any(token in lmodel for token in ("gpt-", "o1", "o3", "o4")):
-        return "native_oai"
-
-    # ── Protocol override via environment ──
-    protocol_override = os.environ.get("GA_PROTOCOL", "").strip().lower()
-    if protocol_override == "claude":
-        return "native_claude"
-    if protocol_override == "openai":
-        return "native_oai"
-
-    # ── Fallback ──
-    if lbase and any(t in lbase for t in ("claude", "api.anthropic")):
-        return "native_claude"
-
-    return None
-
-
-def _candidate_priority(variant: dict[str, Any]) -> tuple[int, int, int, str]:
-    label = str(variant.get("label", "")).lower()
-    backend_kind = variant.get("backend_kind")
-    source = variant.get("source")
-    return (
-        0 if backend_kind == "native_claude" else 1,
-        0 if source == "mykey.py" else 1,
-        0 if "native" in label else 1,
-        label,
-    )
-
-
-def _make_variant(
-    *,
-    label: str,
-    backend_kind: str,
-    api_key: str,
-    base_url: str | None,
-    model: str | None,
-    source: str,
-    stream: bool | None = None,
-    connect_timeout: int | None = None,
-    read_timeout: int | None = None,
-) -> dict[str, Any] | None:
-    if not api_key or not base_url or not model:
-        return None
-    normalized_base_url = (
-        _strip_url(base_url)
-        if backend_kind == "native_claude"
-        else _normalize_openai_base_url(base_url)
-    )
-    if not normalized_base_url:
-        return None
-    variant = {
-        "label": label,
-        "backend_kind": backend_kind,
-        "api_key": api_key,
-        "base_url": normalized_base_url,
-        "model": model,
-        "source": source,
-    }
-    if stream is not None:
-        variant["stream"] = stream
-    if connect_timeout is not None:
-        variant["connect_timeout"] = connect_timeout
-    if read_timeout is not None:
-        variant["read_timeout"] = read_timeout
-    return variant
-
-
-def _resolve_model_variants() -> list[dict[str, Any]]:
-    variants: list[dict[str, Any]] = []
-
-    for name, cfg in _load_mykeys().items():
-        if not isinstance(cfg, dict):
-            continue
-        api_key = str(cfg.get("apikey") or "").strip()
-        base_url = str(cfg.get("apibase") or "").strip()
-        model = str(cfg.get("model") or cfg.get("name") or "").strip()
-        backend_kind = _infer_backend_kind(name, base_url, model)
-        if not backend_kind:
-            continue
-        variant = _make_variant(
-            label=name,
-            backend_kind=backend_kind,
-            api_key=api_key,
-            base_url=base_url,
-            model=model,
-            source="mykey.py",
-            stream=cfg.get("stream"),
-            connect_timeout=cfg.get("connect_timeout"),
-            read_timeout=cfg.get("read_timeout"),
-        )
-        if variant:
-            variants.append(variant)
-
-    settings_env = _load_claude_settings().get("env", {})
-    if isinstance(settings_env, dict):
-        anthropic_variant = _make_variant(
-            label="claude-settings/anthropic",
-            backend_kind="native_claude",
-            api_key=str(settings_env.get("ANTHROPIC_AUTH_TOKEN") or "").strip(),
-            base_url=str(settings_env.get("ANTHROPIC_BASE_URL") or "").strip(),
-            model=str(settings_env.get("ANTHROPIC_MODEL") or "").strip(),
-            source="~/.claude/settings.json",
-        )
-        if anthropic_variant:
-            variants.append(anthropic_variant)
-
-        openai_variant = _make_variant(
-            label="claude-settings/openai",
-            backend_kind="native_oai",
-            api_key=str(settings_env.get("OPENAI_API_KEY") or "").strip(),
-            base_url=str(settings_env.get("OPENAI_BASE_URL") or "").strip(),
-            model=str(settings_env.get("OPENAI_MODEL") or "").strip(),
-            source="~/.claude/settings.json",
-        )
-        if openai_variant:
-            variants.append(openai_variant)
-
-    env_anthropic_variant = _make_variant(
-        label="env/anthropic",
-        backend_kind="native_claude",
-        api_key=str(os.environ.get("ANTHROPIC_AUTH_TOKEN") or "").strip(),
-        base_url=str(os.environ.get("ANTHROPIC_BASE_URL") or "").strip(),
-        model=str(os.environ.get("ANTHROPIC_MODEL") or "").strip(),
-        source="env",
-    )
-    if env_anthropic_variant:
-        variants.append(env_anthropic_variant)
-
-    env_openai_variant = _make_variant(
-        label="env/openai",
-        backend_kind="native_oai",
-        api_key=str(os.environ.get("OPENAI_API_KEY") or "").strip(),
-        base_url=str(os.environ.get("OPENAI_BASE_URL") or "").strip(),
-        model=str(os.environ.get("OPENAI_MODEL") or "").strip(),
-        source="env",
-    )
-    if env_openai_variant:
-        variants.append(env_openai_variant)
-
-    deduped: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str, str]] = set()
-    for variant in sorted(variants, key=_candidate_priority):
-        key = (
-            str(variant["backend_kind"]),
-            str(variant["api_key"]),
-            str(variant["base_url"]),
-            str(variant["model"]),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(variant)
-    return deduped
-
-
-def _normalize_model_identity(model: str | None) -> str:
-    text = str(model or "").strip().lower()
-    if not text:
-        return ""
-    return text.replace("[1m]", "").strip()
-
-
-def _normalized_backend_base_url(backend_kind: str | None, base_url: str | None) -> str:
-    kind = str(backend_kind or "").strip().lower()
-    if kind == "native_oai":
-        return str(_normalize_openai_base_url(base_url) or "").strip().lower()
-    return str(_strip_url(base_url) or "").strip().lower()
-
-
-def _normalized_url_host(base_url: str | None) -> str:
-    normalized = str(_strip_url(base_url) or "").strip()
-    if not normalized:
-        return ""
-    parsed = urlparse(normalized)
-    if parsed.netloc:
-        return parsed.netloc.lower()
-    if "://" in normalized:
-        normalized = normalized.split("://", 1)[1]
-    return normalized.split("/", 1)[0].lower()
-
-
-def _describe_variant_backend(variant: dict[str, Any]) -> dict[str, Any]:
-    backend_kind = str(variant.get("backend_kind") or "").strip().lower()
-    base_url = variant.get("base_url")
-    return {
-        "backend_kind": backend_kind,
-        "base_url": _normalized_backend_base_url(backend_kind, base_url),
-        "host": _normalized_url_host(base_url),
-        "model": _normalize_model_identity(variant.get("model")),
-        "api_key": str(variant.get("api_key") or "").strip(),
-        "source": str(variant.get("source") or "").strip().lower(),
-        "label": str(variant.get("label") or "").strip().lower(),
-    }
-
-
-def _describe_classic_backend(llmclient: Any, index: int) -> dict[str, Any]:
-    backend = getattr(llmclient, "backend", None)
-    class_name = type(backend).__name__ if backend is not None else ""
-    base_url = getattr(backend, "api_base", None)
-    model = getattr(backend, "model", None)
-    backend_name = getattr(backend, "name", None)
-    backend_kind = (
-        _infer_backend_kind(class_name, base_url, model)
-        or _infer_backend_kind(str(backend_name or ""), base_url, model)
-        or ""
-    )
-    return {
-        "index": index,
-        "backend_kind": backend_kind,
-        "base_url": _normalized_backend_base_url(backend_kind, base_url),
-        "host": _normalized_url_host(base_url),
-        "model": _normalize_model_identity(model),
-        "api_key": str(getattr(backend, "api_key", "") or "").strip(),
-        "label": str(backend_name or "").strip().lower(),
-    }
-
-
-def _score_variant_to_classic_backend(variant: dict[str, Any], classic_info: dict[str, Any]) -> tuple[int, int, int, int, int, int]:
-    variant_info = _describe_variant_backend(variant)
-    same_kind = bool(variant_info["backend_kind"] and variant_info["backend_kind"] == classic_info["backend_kind"])
-    same_model = bool(variant_info["model"] and variant_info["model"] == classic_info["model"])
-    same_base = bool(variant_info["base_url"] and variant_info["base_url"] == classic_info["base_url"])
-    same_host = bool(variant_info["host"] and variant_info["host"] == classic_info["host"])
-    same_key = bool(variant_info["api_key"] and variant_info["api_key"] == classic_info["api_key"])
-    source_is_mykey = variant_info["source"] == "mykey.py"
-
-    score = 0
-    if same_kind and same_base and same_model:
-        score += 100
-    elif same_base and same_model:
-        score += 90
-    elif same_model and same_host:
-        score += 75
-    elif same_model:
-        score += 60
-    elif same_host and same_kind:
-        score += 45
-    elif same_host:
-        score += 35
-    elif same_kind:
-        score += 20
-    if same_key:
-        score += 5
-
-    return (
-        score,
-        1 if same_kind else 0,
-        1 if same_model else 0,
-        1 if same_base else 0,
-        1 if source_is_mykey else 0,
-        -int(classic_info.get("index", 0)),
-    )
-
-
-def _looks_like_backend_unavailable(output: str) -> bool:
-    text = str(output or "").strip().lower()
-    if not text:
-        return False
-    patterns = (
-        "no available channel for model",
-        '"code":"model_not_found"',
-        "model_not_found",
-        "503 server error",
-        "http 503",
-        "service unavailable",
-        "sslerror",
-        "max retries exceeded",
-        "connectionerror",
-        "connection aborted",
-        "read timed out",
-        "temporarily unavailable",
-        "unexpected eof while reading",
-    )
-    return any(pattern in text for pattern in patterns)
 
 
 def _log_exchange(prompt: str, response: str, input_items: list | None = None) -> None:
@@ -823,227 +463,6 @@ def _stop_manual_span(span_cm) -> None:
         return
     span_cm.__exit__(None, None, None)
 
-
-def _restored_lines_to_inputs(restored: list[str]) -> list[dict[str, str]]:
-    inputs: list[dict[str, str]] = []
-    for line in restored:
-        if line.startswith("[USER]: "):
-            inputs.append({"role": "user", "content": line[8:]})
-        elif line.startswith("[Agent] "):
-            inputs.append({"role": "assistant", "content": line[8:]})
-    return inputs
-
-
-def _input_items_to_history_lines(input_items: list[dict[str, Any]]) -> list[str]:
-    lines: list[str] = []
-    for item in input_items or []:
-        if not isinstance(item, dict):
-            continue
-        role = item.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        text = _tool_message_content_to_text(item.get("content"))
-        if not text and "output" in item:
-            text = _tool_message_content_to_text(item.get("output"))
-        text = (text or "").strip()
-        if not text:
-            continue
-        prefix = "[USER]: " if role == "user" else "[Agent] "
-        line = prefix + text
-        if lines:
-            same_role = (role == "user" and lines[-1].startswith("[USER]: ")) or (
-                role == "assistant" and lines[-1].startswith("[Agent] ")
-            )
-            if same_role:
-                lines[-1] += "\n\n" + text
-                continue
-        lines.append(line)
-    return lines
-
-
-def _message_content_to_claude_blocks(content: Any) -> list[dict[str, Any]]:
-    if content is None:
-        return []
-    if isinstance(content, str):
-        return [{"type": "text", "text": content}]
-    if not isinstance(content, list):
-        return [{"type": "text", "text": str(content)}]
-
-    blocks: list[dict[str, Any]] = []
-    for part in content:
-        if isinstance(part, str):
-            blocks.append({"type": "text", "text": part})
-            continue
-        if not isinstance(part, dict):
-            blocks.append({"type": "text", "text": str(part)})
-            continue
-        part_type = part.get("type")
-        if part_type in {"text", "input_text", "output_text"}:
-            blocks.append({"type": "text", "text": str(part.get("text") or "")})
-        elif part_type == "refusal":
-            blocks.append({"type": "text", "text": str(part.get("refusal") or "")})
-        elif part_type == "image_url":
-            image_url = (part.get("image_url") or {}).get("url", "")
-            if image_url:
-                blocks.append({"type": "text", "text": f"[image] {image_url}"})
-        else:
-            text_value = part.get("text")
-            if isinstance(text_value, str) and text_value:
-                blocks.append({"type": "text", "text": text_value})
-    return blocks
-
-
-def _tool_message_content_to_text(content: Any) -> str:
-    if isinstance(content, str):
-        return content
-    if not isinstance(content, list):
-        return str(content)
-    parts: list[str] = []
-    for part in content:
-        if isinstance(part, str):
-            parts.append(part)
-        elif isinstance(part, dict):
-            if part.get("type") in {"text", "input_text", "output_text"}:
-                parts.append(str(part.get("text") or ""))
-            elif part.get("type") == "refusal":
-                parts.append(str(part.get("refusal") or ""))
-    return "\n".join(p for p in parts if p)
-
-
-def _chat_messages_to_claude_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    claude_messages: list[dict[str, Any]] = []
-    pending_tool_results: list[dict[str, Any]] = []
-
-    def flush_tool_results() -> None:
-        nonlocal pending_tool_results
-        if pending_tool_results:
-            claude_messages.append({"role": "user", "content": list(pending_tool_results)})
-            pending_tool_results = []
-
-    for message in messages:
-        role = str(message.get("role") or "")
-        if role == "system":
-            continue
-        if role == "tool":
-            pending_tool_results.append(
-                {
-                    "type": "tool_result",
-                    "tool_use_id": str(message.get("tool_call_id") or ""),
-                    "content": _tool_message_content_to_text(message.get("content")),
-                }
-            )
-            continue
-        if role == "assistant":
-            flush_tool_results()
-            content_blocks = _message_content_to_claude_blocks(message.get("content"))
-
-            # Preserve reasoning_content as a thinking block so it is passed
-            # back to the API on subsequent turns (required by DeepSeek v4).
-            reasoning = message.get("reasoning_content")
-            if reasoning and isinstance(reasoning, str) and reasoning.strip():
-                content_blocks.insert(0, {"type": "thinking", "thinking": reasoning})
-
-            for tool_call in message.get("tool_calls") or []:
-                function = tool_call.get("function", {})
-                arguments = function.get("arguments") or "{}"
-                try:
-                    parsed_arguments = (
-                        json.loads(arguments) if isinstance(arguments, str) else arguments
-                    )
-                except Exception:
-                    parsed_arguments = {"_raw": arguments}
-                if not isinstance(parsed_arguments, dict):
-                    parsed_arguments = {"_raw": str(parsed_arguments)}
-                content_blocks.append(
-                    {
-                        "type": "tool_use",
-                        "id": str(tool_call.get("id") or ""),
-                        "name": str(function.get("name") or ""),
-                        "input": parsed_arguments,
-                    }
-                )
-            if not content_blocks:
-                content_blocks = [{"type": "text", "text": ""}]
-            claude_messages.append({"role": "assistant", "content": content_blocks})
-            continue
-        if role == "user":
-            content_blocks = list(pending_tool_results)
-            pending_tool_results = []
-            content_blocks.extend(_message_content_to_claude_blocks(message.get("content")))
-            if not content_blocks:
-                content_blocks = [{"type": "text", "text": ""}]
-            claude_messages.append({"role": "user", "content": content_blocks})
-
-    flush_tool_results()
-    if not claude_messages:
-        claude_messages.append({"role": "user", "content": [{"type": "text", "text": ""}]})
-    return claude_messages
-
-
-def _inject_turn_markers(text: str, start_turn: int = 1) -> str:
-    if not text.strip():
-        return text
-    if "LLM Running (Turn" in text:
-        return text
-
-    section_patterns = [
-        ("Plan", r"(?mi)^(?:#+\s*)?Plan\s*:?\s*$"),
-        ("Execution", r"(?mi)^(?:#+\s*)?Execution\s*:?\s*$"),
-        ("Verification", r"(?mi)^(?:#+\s*)?Verification\s*:?\s*$"),
-        ("Final Answer", r"(?mi)^(?:#+\s*)?Final Answer\s*:?\s*$"),
-    ]
-    matches: list[tuple[int, str, int]] = []
-    for label, pattern in section_patterns:
-        match = re.search(pattern, text)
-        if match:
-            matches.append((match.start(), label, match.end()))
-
-    if not matches:
-        return f"**LLM Running (Turn {start_turn}) ...**\n\n{text}"
-
-    matches.sort(key=lambda item: item[0])
-    rebuilt: list[str] = []
-    for idx, (start, _label, _end) in enumerate(matches):
-        next_start = matches[idx + 1][0] if idx + 1 < len(matches) else len(text)
-        chunk = text[start:next_start].strip()
-        if not chunk:
-            continue
-        rebuilt.append(f"**LLM Running (Turn {start_turn + len(rebuilt)}) ...**\n\n{chunk}")
-
-    if rebuilt:
-        prefix = text[: matches[0][0]].strip()
-        if prefix:
-            rebuilt.insert(0, f"**LLM Running (Turn {start_turn}) ...**\n\n{prefix}")
-        return "\n\n".join(rebuilt)
-
-    return f"**LLM Running (Turn {start_turn}) ...**\n\n{text}"
-
-
-def _latest_turn_marker(text: str) -> int:
-    matches = re.findall(r"LLM Running \(Turn (\d+)\)", str(text or ""))
-    if not matches:
-        return 0
-    try:
-        return int(matches[-1])
-    except (TypeError, ValueError):
-        return 0
-
-
-def _extract_classic_executor_report(text: str) -> str:
-    if not text:
-        return ""
-    if "</summary>" in text:
-        tail = text.rsplit("</summary>", 1)[-1].strip()
-        if tail:
-            return tail
-    sections = [
-        part.strip()
-        for part in re.split(r"\*\*LLM Running \(Turn \d+\) \.\.\.\*\*\s*", text)
-        if part.strip()
-    ]
-    if sections:
-        return sections[-1]
-    return text.strip()
 
 
 class GenericAgentSDKModel(Model):
@@ -2058,7 +1477,7 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     return "[Executor Error] Classic GenericAgent execution timed out (900s)."
                 import queue
                 try:
-                    item = dq.get(timeout=min(5, remaining))
+                    item = dq.get(timeout=max(0.01, min(5, remaining)))
                 except queue.Empty:
                     continue  # 单次超时继续等待，直到总超时
                 except Exception as e:
@@ -2354,411 +1773,6 @@ class OpenAIOrchestratedAgent(AgentBackend):
         display_queue.put({"done": f"未知命令: {cmd}", "source": "system"})
         return None
 
-    def _build_agent_graph(
-        self, original_user_request: str, executor_progress=None,
-        graph_mode: str = "full",
-    ) -> dict[str, Any]:
-        self._active_policy = None  # P2-4: reset per-run
-        if graph_mode == "dynamic":
-            return self._build_dynamic_graph(original_user_request, executor_progress)
-        # Return cached graph if model hasn't changed since last build.
-        if (
-            self._cached_agent_graph is not None
-            and self._cached_agent_graph_model_id == self.llm_no
-        ):
-            self._active_sdk_model = self._cached_agent_graph["root"].model
-            return self._cached_agent_graph
-        return self._build_minimal_runtime_graph(
-            original_user_request,
-            executor_progress=executor_progress,
-            cache_graph=True,
-        )
-
-        _ensure_openai_agents_on_path()
-        from agents import Agent, function_tool
-
-        model = self._build_model()
-        self._active_sdk_model = model
-        common = {"model": model}
-
-        chat_agent = Agent(
-            name="chat_specialist",
-            handoff_description="Handle simple conversation or explanation-only requests.",
-            instructions=(
-                f"{CAPABILITY_BRIEF}"
-                f"{_behavior_kernel()}"
-                "You handle simple conversational requests that do not require tool use. "
-                "If asked about tools or skills, explain that this app can delegate execution to "
-                "the classic GenericAgent executor through the workflow coordinator. "
-                "Be concise, helpful, and avoid inventing actions you did not take.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            **common,
-        )
-
-        # Shared executor tool - all specialized agents use this.
-        @function_tool(name_override="run_genericagent_executor")
-        async def run_genericagent_executor(user_request: str, execution_plan: str) -> str:
-            """Delegate execution to the classic GenericAgent runtime.
-
-            Args:
-                user_request: The original user request.
-                execution_plan: The current plan or corrective follow-up to execute.
-            """
-            return await asyncio.to_thread(
-                self._run_classic_executor_task,
-                user_request,
-                execution_plan,
-                executor_progress,
-                original_user_request,
-                getattr(self, "_run_store", None),
-            )
-
-        # ── Code Agent: writing, modifying, debugging code ──
-        code_agent = Agent(
-            name="code_agent",
-            handoff_description="Write, modify, debug, or refactor code.",
-            instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You are a code specialist. Your focus is producing correct, clean, well-structured code.\n"
-                "For every code task:\n"
-                "1. BRIEFLY state the approach (1-2 sentences) — do not write long plans.\n"
-                "2. Call run_genericagent_executor with a clear, actionable execution plan.\n"
-                "3. AFTER execution, verify:\n"
-                "   - Does the code compile / run without errors?\n"
-                "   - Are edge cases handled?\n"
-                "   - Is the code readable and follows conventions?\n"
-                "4. AFTER producing code, hand off to review_agent for review "
-                "(unless the user explicitly asked to skip review).\n"
-                "5. After producing code, write it to the shared workspace by instructing the executor "
-                "to include [artifact: <name>] markers in its output.\n"
-                "6. If the review comes back with issues, fix them and update the artifact.\n"
-                "7. When you encounter an unfamiliar API or library, hand off to research_agent "
-                "to look up documentation first.\n\n"
-                "Quality standards:\n"
-                "- Prefer tested, working code over speculative implementations.\n"
-                "- Handle errors explicitly, not silently.\n"
-                "- Name variables and functions clearly.\n"
-                "- Keep functions small and single-purpose.\n\n"
-                "IMPORTANT: You have ONE tool (run_genericagent_executor) and "
-                "TWO handoffs (review_agent for code review, research_agent for documentation lookup). "
-                "Use the shared workspace to store code artifacts so review_agent can access them.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            tools=[run_genericagent_executor],
-            handoffs=[],  # filled after other agents are defined
-            **common,
-        )
-
-        # ── Review Agent: code review, testing, security audit ──
-        review_agent = Agent(
-            name="review_agent",
-            handoff_description="Review code, run tests, verify correctness, find bugs and security issues.",
-            instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You are a code reviewer and quality specialist. Your focus is finding problems "
-                "and verifying correctness.\n"
-                "For every review task:\n"
-                "1. Identify what needs to be checked (correctness, security, performance, tests).\n"
-                "2. Call run_genericagent_executor with specific review instructions:\n"
-                "   - Run existing tests first.\n"
-                "   - Check for edge cases, error handling, input validation.\n"
-                "   - Look for security issues (injection, leaks, race conditions).\n"
-                "   - Check code style and conventions.\n"
-                "3. Summarize findings clearly:\n"
-                "   - Critical issues (must fix)\n"
-                "   - Warnings (should fix)\n"
-                "   - Suggestions (nice to have)\n"
-                "4. If you find issues that need code changes, reference the artifact key from the "
-                "shared workspace and hand off to code_agent with SPECIFIC fix instructions.\n"
-                "5. After the code_agent returns with fixes, re-review the artifact to verify.\n"
-                "6. If the code passes review, write your review report as an artifact "
-                "([artifact: review-report]) and present your final approval.\n"
-                "7. If you need to verify code against external documentation or specifications, "
-                "hand off to research_agent first.\n\n"
-                "Be specific. Point to exact lines or patterns. "
-                "Do NOT just say \"looks good\" — explain WHY it looks good.\n\n"
-                "IMPORTANT: You have ONE tool (run_genericagent_executor) and "
-                "TWO handoffs (code_agent for fixes, research_agent for spec/doc verification). "
-                "Read artifacts from the shared workspace to review code. "
-                "Write review findings as artifacts.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            tools=[run_genericagent_executor],
-            handoffs=[],  # filled after other agents are defined
-            **common,
-        )
-
-        # ── Research Agent: information gathering, documentation, exploration ──
-        research_agent = Agent(
-            name="research_agent",
-            handoff_description="Search information, read files and documentation, explore codebases.",
-            instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You are a research specialist. Your focus is finding accurate information "
-                "and presenting it clearly with sources.\n"
-                "For every research task:\n"
-                "1. Clarify what information is needed.\n"
-                "2. Call run_genericagent_executor to:\n"
-                "   - Read relevant files, documentation, or search results.\n"
-                "   - Explore the codebase to find relevant code patterns.\n"
-                "   - Search for API documentation and usage examples.\n"
-                "3. Organize findings:\n"
-                "   - Key facts with sources (file paths, URLs, line numbers).\n"
-                "   - Code examples with context.\n"
-                "   - Gotchas and common pitfalls.\n"
-                "4. If the executor's findings are incomplete, call it again with refined search terms.\n"
-                "5. Write your research findings as artifacts in the shared workspace "
-                "([artifact: research-findings]) with sources and code examples.\n"
-                "6. If your findings indicate that code implementation is needed, "
-                "hand off to code_agent with references to the research artifacts.\n"
-                "7. If you found potential issues or security concerns that need verification, "
-                "hand off to review_agent.\n"
-                "8. If the question can be answered with information alone (no code needed), "
-                "present your findings as the final answer.\n\n"
-                "Be thorough but concise. Always cite your sources. "
-                "Distinguish between facts you found and your interpretation.\n\n"
-                "IMPORTANT: You have ONE tool (run_genericagent_executor) and "
-                "TWO handoffs (code_agent for implementation, review_agent for verification). "
-                "Write research artifacts to the shared workspace. "
-                "Use handoffs only when the user's intent requires follow-up action.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            tools=[run_genericagent_executor],
-            handoffs=[],  # filled after other agents are defined
-            **common,
-        )
-
-        # ── General Executor (backward-compatible fallback) ──
-        planner_executor_agent = Agent(
-            name="planner_executor",
-            handoff_description="General-purpose planner and executor for complex multi-step tasks.",
-            instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You handle complex, multi-step tasks that do not clearly fall into code-writing, "
-                "code-review, or research categories.\n"
-                "1. FIRST create a short, actionable plan (2-5 steps)\n"
-                "2. Call run_genericagent_executor to execute the plan\n"
-                "3. AFTER execution, ALWAYS verify results:\n"
-                "   - Did the execution achieve all goals?\n"
-                "   - Is there already a usable answer or evidence?\n"
-                "   - Only retry if the first run produced no usable findings at all.\n"
-                "4. End with: Plan, Execution Summary, Verification, Final Answer\n\n"
-                "IMPORTANT: You have only ONE tool: run_genericagent_executor. "
-                "All file/code/browser operations happen inside the executor.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            tools=[run_genericagent_executor],
-            **common,
-        )
-
-        # ── Wire up cross-handoffs (Level 2: multi-hop pipelines) ──
-        # Set handoffs after all agents exist so they can reference each other.
-        code_agent.handoffs = [review_agent, research_agent]
-        review_agent.handoffs = [code_agent, research_agent]
-        research_agent.handoffs = [code_agent, review_agent]
-        # planner_executor and chat_specialist remain leaf agents (no handoffs).
-
-        root_agent = Agent(
-            name="task_router",
-            instructions=(
-                "You are a router. You have NO tools — do not attempt to call any tools.\n"
-                "Your ONLY job is to transfer to the appropriate agent via handoffs.\n"
-                "- Simple chat or conversation → chat_specialist\n"
-                "- Code writing, modification, debugging, refactoring → code_agent\n"
-                "- Code review, testing, security audit, bug finding → review_agent\n"
-                "- Information search, documentation lookup, codebase exploration → research_agent\n"
-                "- Complex multi-step tasks mixing multiple concerns → planner_executor\n"
-            ),
-            handoffs=[chat_agent, code_agent, review_agent, research_agent, planner_executor_agent],
-            **common,
-        )
-        graph = {
-            "root": root_agent,
-            "chat": chat_agent,
-            "executor": planner_executor_agent,
-            "code": code_agent,
-            "review": review_agent,
-            "research": research_agent,
-        }
-        self._cached_agent_graph = graph
-        self._cached_agent_graph_model_id = self.llm_no
-        return graph
-
-    def _build_dynamic_graph(
-        self, original_user_request: str, executor_progress=None,
-    ) -> dict[str, Any]:
-        """Level 3: Task→DAG compiler — build only the agents needed for this task.
-
-        Uses RouterRules keyword counts to determine which agents to create,
-        then wires the minimal handoff topology.
-        """
-        from core.router_rules import RouterRules
-
-        _ensure_openai_agents_on_path()
-        from agents import Agent, function_tool
-
-        model = self._build_model()
-        self._active_sdk_model = model
-        common = {"model": model}
-
-        # Analyze the query to determine needed agent types.
-        query = str(original_user_request or "").strip()
-        route_result = RouterRules.match(query)
-
-        # Count per-category keyword hits to determine needed agents.
-        hit_counts = RouterRules.keyword_hit_counts(query)
-        code_hits = int(hit_counts.get("code", 0))
-        review_hits = int(hit_counts.get("review", 0))
-        research_hits = int(hit_counts.get("research", 0))
-        chat_hits = int(hit_counts.get("chat", 0))
-        exec_hits = int(hit_counts.get("executor", 0))
-
-        needs_code = code_hits > 0 or (exec_hits > 0 and code_hits >= review_hits and code_hits >= research_hits)
-        needs_review = review_hits > 0
-        needs_research = research_hits > 0
-        needs_chat = route_result.target == "chat" or (chat_hits > exec_hits and chat_hits > 0)
-
-        # Shared executor tool
-        @function_tool(name_override="run_genericagent_executor")
-        async def run_genericagent_executor(user_request: str, execution_plan: str) -> str:
-            return await asyncio.to_thread(
-                self._run_classic_executor_task,
-                user_request,
-                execution_plan,
-                executor_progress,
-                original_user_request,
-                getattr(self, "_run_store", None),
-            )
-
-        agent_map: dict[str, Any] = {}
-        handoff_list: list[Any] = []
-        leaf_count = 0
-
-        # Always include chat_specialist for conversation fallback
-        chat_agent = Agent(
-            name="chat_specialist",
-            handoff_description="Handle simple conversation or explanation-only requests.",
-            instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You handle simple conversational requests that do not require tool use. "
-                "Be concise, helpful, and avoid inventing actions you did not take.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            **common,
-        )
-        agent_map["chat"] = chat_agent
-        handoff_list.append(chat_agent)
-
-        # Planner executor as general fallback
-        planner_executor_agent = Agent(
-            name="planner_executor",
-            handoff_description="General-purpose planner and executor.",
-            instructions=(
-                f"{CAPABILITY_BRIEF} "
-                "You handle complex, multi-step tasks.\n"
-                "1. Create a short, actionable plan.\n"
-                "2. Call run_genericagent_executor to execute.\n"
-                "3. Verify results.\n"
-                "4. End with: Plan, Execution Summary, Verification, Final Answer.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            tools=[run_genericagent_executor],
-            **common,
-        )
-        agent_map["executor"] = planner_executor_agent
-        handoff_list.append(planner_executor_agent)
-
-        # ── Create only the specialized agents needed ──
-
-        if needs_code or (not needs_review and not needs_research and exec_hits > 0):
-            code_agent = Agent(
-                name="code_agent",
-                handoff_description="Write, modify, debug, or refactor code.",
-                instructions=(
-                    f"{CAPABILITY_BRIEF} "
-                    "You are a code specialist. Produce correct, clean code. "
-                    "Call run_genericagent_executor to do the work. "
-                    "Write artifacts to the shared workspace with [artifact: <name>].\n\n"
-                    f"{_summary_protocol()}"
-                ),
-                tools=[run_genericagent_executor],
-                handoffs=[],
-                **common,
-            )
-            agent_map["code"] = code_agent
-            handoff_list.append(code_agent)
-            leaf_count += 1
-
-        if needs_review:
-            review_agent = Agent(
-                name="review_agent",
-                handoff_description="Review code, run tests, verify correctness.",
-                instructions=(
-                    f"{CAPABILITY_BRIEF} "
-                    "You are a code reviewer. Find problems, verify correctness. "
-                    "Call run_genericagent_executor for testing. "
-                    "Read and write artifacts from the shared workspace.\n\n"
-                    f"{_summary_protocol()}"
-                ),
-                tools=[run_genericagent_executor],
-                handoffs=[],
-                **common,
-            )
-            agent_map["review"] = review_agent
-            handoff_list.append(review_agent)
-            leaf_count += 1
-
-        if needs_research:
-            research_agent = Agent(
-                name="research_agent",
-                handoff_description="Search information, read documentation.",
-                instructions=(
-                    f"{CAPABILITY_BRIEF} "
-                    "You are a research specialist. Find accurate information. "
-                    "Call run_genericagent_executor to search and read. "
-                    "Write findings as artifacts. Always cite sources.\n\n"
-                    f"{_summary_protocol()}"
-                ),
-                tools=[run_genericagent_executor],
-                handoffs=[],
-                **common,
-            )
-            agent_map["research"] = research_agent
-            handoff_list.append(research_agent)
-            leaf_count += 1
-
-        # ── Wire cross-handoffs only between agents that exist ──
-        # If both code and review exist, connect them bidirectionally.
-        if "code" in agent_map and "review" in agent_map:
-            agent_map["code"].handoffs = [agent_map["review"]]
-            agent_map["review"].handoffs = [agent_map["code"]]
-            if "research" in agent_map:
-                agent_map["code"].handoffs.append(agent_map["research"])
-                agent_map["review"].handoffs.append(agent_map["research"])
-        if "research" in agent_map:
-            if "code" in agent_map and agent_map["code"] not in agent_map["research"].handoffs:
-                agent_map["research"].handoffs.append(agent_map["code"])
-            if "review" in agent_map and agent_map["review"] not in agent_map["research"].handoffs:
-                agent_map["research"].handoffs.append(agent_map["review"])
-
-        # ── Root agent with handoffs to all created agents ──
-        agent_list_str = ", ".join(
-            a.name for a in handoff_list if a.name != "task_router"
-        )
-        root_agent = Agent(
-            name="task_router",
-            instructions=(
-                f"You are a router with NO tools. Transfer to the appropriate agent. "
-                f"Available agents: {agent_list_str}."
-            ),
-            handoffs=handoff_list,
-            **common,
-        )
-        agent_map["root"] = root_agent
-
-        return agent_map
-
     # Active runtime graph override: keep the real orchestrator limited to
     # task_router -> chat_specialist/planner_executor.
     def _build_agent_graph(
@@ -2797,78 +1811,19 @@ class OpenAIOrchestratedAgent(AgentBackend):
         cache_graph: bool,
     ) -> dict[str, Any]:
         _ensure_openai_agents_on_path()
-        from agents import Agent, function_tool
 
         model = self._build_model()
         self._active_sdk_model = model
-        common = {"model": model}
-
-        chat_agent = Agent(
-            name="chat_specialist",
-            handoff_description="Handle simple conversation or explanation-only requests.",
-            instructions=(
-                f"{CAPABILITY_BRIEF}"
-                f"{_behavior_kernel()}"
-                "You handle simple conversational requests that do not require tool use. "
-                "If asked about tools or skills, explain that this app can delegate execution to "
-                "the classic GenericAgent executor through the workflow coordinator. "
-                "Be concise, helpful, and avoid inventing actions you did not take.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            **common,
+        graph = build_minimal_openai_runtime_graph(
+            model=model,
+            original_user_request=original_user_request,
+            executor_runner=self._run_classic_executor_task,
+            run_store_getter=lambda: getattr(self, "_run_store", None),
+            executor_progress=executor_progress,
+            capability_brief=CAPABILITY_BRIEF,
+            behavior_kernel=_behavior_kernel(),
+            summary_protocol=_summary_protocol(),
         )
-
-        @function_tool(name_override="run_genericagent_executor")
-        async def run_genericagent_executor(user_request: str, execution_plan: str) -> str:
-            """Delegate execution to the classic GenericAgent runtime."""
-            return await asyncio.to_thread(
-                self._run_classic_executor_task,
-                user_request,
-                execution_plan,
-                executor_progress,
-                original_user_request,
-                getattr(self, "_run_store", None),
-            )
-
-        planner_executor_agent = Agent(
-            name="planner_executor",
-            handoff_description="General-purpose planner and executor for all non-chat tasks.",
-            instructions=(
-                f"{CAPABILITY_BRIEF}"
-                f"{_behavior_kernel()}"
-                "You handle all non-chat execution tasks in this runtime, including code, review, "
-                "research, and mixed multi-step work.\n"
-                "1. FIRST create a short, actionable plan (2-5 steps)\n"
-                "2. Call run_genericagent_executor to execute the plan\n"
-                "3. AFTER execution, ALWAYS verify results:\n"
-                "   - Did the execution achieve all goals?\n"
-                "   - Is there already a usable answer or evidence?\n"
-                "   - Only retry if the first run produced no usable findings at all.\n"
-                "4. End with: Plan, Execution Summary, Verification, Final Answer\n\n"
-                "IMPORTANT: You have only ONE tool: run_genericagent_executor. "
-                "All file/code/browser operations happen inside the executor.\n\n"
-                f"{_summary_protocol()}"
-            ),
-            tools=[run_genericagent_executor],
-            **common,
-        )
-
-        root_agent = Agent(
-            name="task_router",
-            instructions=(
-                "You are a router. You have NO tools - do not attempt to call any tools.\n"
-                "Your ONLY job is to transfer to the appropriate agent via handoffs.\n"
-                "- Simple chat or conversation -> chat_specialist\n"
-                "- Any file/code/browser/research/review/multi-step task -> planner_executor\n"
-            ),
-            handoffs=[chat_agent, planner_executor_agent],
-            **common,
-        )
-        graph = {
-            "root": root_agent,
-            "chat": chat_agent,
-            "executor": planner_executor_agent,
-        }
         if cache_graph:
             self._cached_agent_graph = graph
             self._cached_agent_graph_model_id = self.llm_no
@@ -3031,11 +1986,11 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     )
                     last_sent_len = len(full_text)
 
-            classic_progress_snapshot = ""
             classic_progress_turn = 0
+            classic_progress = ClassicProgressAccumulator()
 
             def executor_progress(snapshot: Any, reset: bool = False) -> None:
-                nonlocal full_text, classic_progress_snapshot, classic_progress_turn
+                nonlocal full_text, classic_progress_turn
                 if isinstance(snapshot, dict) and snapshot.get("type") == "status":
                     status_item = dict(snapshot)
                     status_item.setdefault("source", source)
@@ -3052,25 +2007,11 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 if not snapshot:
                     return
                 classic_progress_turn = max(classic_progress_turn, _latest_turn_marker(snapshot))
-                if reset or not classic_progress_snapshot:
-                    classic_progress_snapshot = snapshot
-                    if full_text and not full_text.endswith("\n\n"):
-                        full_text += "\n\n"
-                    full_text += snapshot
-                    flush_progress(force=True)
-                    return
-                if snapshot.startswith(classic_progress_snapshot):
-                    delta = snapshot[len(classic_progress_snapshot) :]
-                    classic_progress_snapshot = snapshot
-                    if delta:
-                        full_text += delta
-                        flush_progress(force="\n" in delta or len(delta) >= 12)
-                    return
-                classic_progress_snapshot = snapshot
-                if full_text and not full_text.endswith("\n\n"):
-                    full_text += "\n\n"
-                full_text += snapshot
-                flush_progress(force=True)
+                before = full_text
+                full_text = classic_progress.apply(full_text, snapshot, reset=reset)
+                if full_text != before:
+                    delta = full_text[len(before) :] if full_text.startswith(before) else full_text
+                    flush_progress(force=reset or "\n" in delta or len(delta) >= 12)
 
             def runtime_collaboration_snapshot() -> dict[str, Any] | None:
                 store = getattr(self, "_run_store", None)
@@ -3121,99 +2062,13 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 except Exception:
                     pass
 
-            def build_openai_execution_state() -> ExecutionState:
-                executor_actions: list[ExecutionAction] = []
-                executor_state_delta = {}
-                if isinstance(_executor_execution_state, dict):
-                    for action in _executor_execution_state.get("actual_actions") or []:
-                        if not isinstance(action, dict):
-                            continue
-                        executor_actions.append(
-                            ExecutionAction(
-                                tool=str(action.get("tool") or ""),
-                                input_summary=str(action.get("input_summary") or ""),
-                                output_summary=str(action.get("output_summary") or ""),
-                                status=str(action.get("status") or ""),
-                                timestamp=str(action.get("timestamp") or ""),
-                            )
-                        )
-                    raw_delta = _executor_execution_state.get("state_delta")
-                    if isinstance(raw_delta, dict):
-                        executor_state_delta = raw_delta
-                all_actions = list(execution_actions) + executor_actions
-                successful_tools = {
-                    action.tool
-                    for action in all_actions
-                    if str(action.status or "").strip().lower() in {"success", "ok", "completed", "done"}
-                }
-                files_changed = tuple(
-                    str(path)
-                    for path in (executor_state_delta.get("files_changed") or ())
-                    if str(path or "").strip()
-                )
-                checkpoints_updated = bool(executor_state_delta.get("checkpoints_updated"))
-                metrics_verified = bool(executor_state_delta.get("metrics_verified")) or (
-                    "run_genericagent_executor" in successful_tools
-                )
-                response_claims: list[ResponseClaim] = []
-                if successful_tools:
-                    response_claims.append(
-                        ResponseClaim(
-                            claim="OpenAI orchestration observed successful tool output.",
-                            claim_type="causality",
-                            evidence_status="indirect",
-                            source="openai_stream_events",
-                            evidence_type="indirect",
-                            confidence=0.5,
-                        )
-                    )
-                if "run_genericagent_executor" in successful_tools:
-                    response_claims.append(
-                        ResponseClaim(
-                            claim="GenericAgent executor returned a successful tool output.",
-                            claim_type="quant",
-                            evidence_status="tool_verified",
-                            source="openai_stream_events",
-                            evidence_type="direct",
-                            confidence=0.7,
-                            verified=True,
-                        )
-                    )
-                return ExecutionState(
-                    actual_actions=all_actions,
-                    state_delta=StateDelta(
-                        files_changed=files_changed,
-                        checkpoints_updated=checkpoints_updated,
-                        metrics_verified=metrics_verified,
-                    ),
-                    response_claims=response_claims,
-                )
-
             def apply_execution_honesty_gate(final_text: str) -> tuple[str, bool]:
-                if not execution_honesty_enabled():
-                    return final_text, False
-                result = evaluate_execution_honesty(final_text, build_openai_execution_state())
-                if profiler is not None:
-                    try:
-                        profiler.record_event(
-                            "execution_honesty_gate",
-                            kind="quality",
-                            metadata={
-                                "allowed": result.allowed,
-                                "findings": [finding.rule for finding in result.findings],
-                                "successful_tool_count": sum(
-                                    1
-                                    for action in execution_actions
-                                    if str(action.status or "").strip().lower()
-                                    in {"success", "ok", "completed", "done"}
-                                ),
-                            },
-                        )
-                    except Exception:
-                        pass
-                if result.allowed:
-                    return final_text, False
-                return format_honesty_user_notice(result), True
+                return apply_openai_execution_honesty_gate(
+                    final_text,
+                    execution_actions=execution_actions,
+                    executor_execution_state=_executor_execution_state,
+                    profiler=profiler,
+                )
 
             try:
                 # Create a shared artifact store for this run (Level 4 blackboard).
@@ -4371,6 +3226,29 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             name="auto-maintenance",
                         )
                         _t.start()
+            except Exception:
+                pass
+            # ── Auto-distillation hook (GA_OPENAI_DISTILLATION) ──
+            try:
+                _distillation_mode = os.environ.get("GA_OPENAI_DISTILLATION", "0")
+                if _distillation_mode in ("preview", "write"):
+                    from core.memory.distillation import (
+                        build_distillation_candidate,
+                        write_distillation_candidate,
+                    )
+                    _summary = f"OpenAI agent turn: {raw_query[:300]}"
+                    _candidate = build_distillation_candidate(
+                        summary=_summary,
+                        source=source or "unknown",
+                        run_id=getattr(self, "_runtime_session_id", "") or getattr(self, "_profile_run_id", ""),
+                        task=raw_query,
+                        session=getattr(self, "_runtime_session_id", ""),
+                        files_touched=[],
+                    )
+                    write_distillation_candidate(
+                        candidate=_candidate,
+                        project_root=PROJECT_ROOT,
+                    )
             except Exception:
                 pass
 

@@ -56,20 +56,20 @@ _register(
     ),
 )
 
-# DeepSeek family (Claude-compatible with thinking)
+# DeepSeek family (OpenAI-compatible Chat Completions endpoint)
 _register(
     ["deepseek-v4", "deepseek-v4-pro", "deepseek-chat", "deepseek-reasoner",
      "deepseek-v3", "deepseek-r1"],
     ModelProfile(
         model_family="deepseek",
-        protocol="claude",  # DeepSeek supports Claude content-block format
+        protocol="openai",
         max_tokens=8192,
         context_window=128000,
         supports_thinking=True,
         supports_extended_thinking=False,
         supports_prompt_caching=False,
         supports_tools=True,
-        notes="DeepSeek supports Claude content-block format with thinking blocks",
+        notes="DeepSeek uses OpenAI-compatible /v1/chat/completions endpoints",
     ),
 )
 
@@ -135,7 +135,7 @@ def detect_model_profile(model: str, base_url: str | None = None) -> ModelProfil
 
     if "deepseek" in lmodel:
         return _MODEL_PROFILES.get(
-            "deepseek-chat",
+            "deepseek-v4-pro",
             ModelProfile(
                 model_family="deepseek", protocol="openai",
                 max_tokens=8192, context_window=128000,

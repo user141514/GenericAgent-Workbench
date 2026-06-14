@@ -64,12 +64,17 @@ def code_run(code, code_type="python", timeout=60, cwd=None, code_cwd=None, stop
     def stream_reader(proc, logs):
         try:
             for line_bytes in iter(proc.stdout.readline, b''):
-                try: line = line_bytes.decode('utf-8')
-                except UnicodeDecodeError: line = line_bytes.decode('utf-8', errors='replace')
+                try:
+                    line = line_bytes.decode('utf-8')
+                except UnicodeDecodeError:
+                    line = line_bytes.decode('utf-8', errors='replace')
                 logs.append(line)
-                try: print(line, end="") 
-                except: pass
-        except: pass
+                try:
+                    print(line, end="")
+                except OSError:
+                    pass
+        except (OSError, ValueError):
+            pass
 
     try:
         process = subprocess.Popen(
@@ -409,7 +414,8 @@ def log_memory_access(path):
     stats_file = os.path.join(script_dir, 'memory/file_access_stats.json')
     try:
         with open(stats_file, 'r', encoding='utf-8') as f: stats = json.load(f)
-    except: stats = {}
+    except (FileNotFoundError, json.JSONDecodeError):
+        stats = {}
     fname = os.path.basename(path)
     stats[fname] = {'count': stats.get(fname, {}).get('count', 0) + 1, 'last': datetime.now().strftime('%Y-%m-%d')}
     with open(stats_file, 'w', encoding='utf-8') as f: json.dump(stats, f, indent=2, ensure_ascii=False)
@@ -941,11 +947,11 @@ class GenericAgentHandler(BaseHandler):
             try:
                 with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))
                 result["js_return"] += f"\n\n[已保存完整内容到 {abs_path}]"
-            except:
+            except OSError:
                 result['js_return'] += f"\n\n[保存失败，无法写入文件 {abs_path}]"
         show = smart_format(json.dumps(result, ensure_ascii=False, indent=2, default=json_default), max_str_len=300)
         try: print("Web Execute JS Result:", show)
-        except: pass
+        except OSError: pass
         yield f"JS 执行结果:\n{show}\n"
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         if isinstance(result, dict) and result.get("error_category"):
@@ -1160,7 +1166,7 @@ class GenericAgentHandler(BaseHandler):
         p = self._in_plan_mode() or ""
         if not os.path.isfile(p): return None
         try: return len(re.findall(r'\[ \]', open(p, encoding='utf-8', errors='replace').read()))
-        except: return None
+        except (FileNotFoundError, OSError): return None
     
     def do_update_working_checkpoint(self, args, response):
         '''为整个任务设定后续需要临时记忆的重点。'''
@@ -1262,7 +1268,7 @@ class GenericAgentHandler(BaseHandler):
         if self.working.get('related_sop'): prompt += f"\n有不清晰的地方请再次读取{self.working.get('related_sop')}"
         if getattr(self.parent, 'verbose', False):
             try: print(prompt)
-            except: pass
+            except OSError: pass
         return prompt
 
     @staticmethod

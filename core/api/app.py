@@ -4,6 +4,7 @@ import asyncio
 import base64
 import json
 import os
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -15,11 +16,21 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from core.agent_factory import load_agent
+from core.api.frontier_bridge import (
+    FrontierRunState,
+    build_frontier_state_event,
+    create_frontier_run_state,
+)
+from core.api.llm_config import (
+    apply_llm_config_to_env,
+    check_llm_config,
+    public_llm_config,
+    save_llm_config,
+)
 from core.protocol.agent import AgentBackend
-from core.protocol.channel import AgentOutputChannel
+from core.protocol.channel import AgentOutputChannel, QueueOutputChannel
 from core.protocol.events import AgentOutputEvent
 from core.protocol.input import AgentInput
-from core.quality.frontier_state import build_frontier_state_snapshot, frontier_state_should_activate
 from frontends.file_processor import build_attachment_prompt
 from frontends.services.file_upload_service import FileUploadService
 from frontends.services.history_restore_service import HistoryRestoreService
@@ -57,6 +68,17 @@ class SettingsPatch(BaseModel):
     autonomous_enabled: bool | None = None
 
 
+class LlmConfigPatch(BaseModel):
+    provider: str | None = None
+    api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
+
+
+class LlmConfigCheckRequest(LlmConfigPatch):
+    probe_chat: bool = True
+
+
 class SwitchKeyRequest(BaseModel):
     index: int = Field(ge=0)
 
@@ -69,10 +91,7 @@ class AutonomousTriggerRequest(BaseModel):
 class ActiveRun:
     run_id: str
     channel: AgentOutputChannel
-    user_input: str = ""
-    route_target: str = ""
-    frontier_enabled: bool = False
-    frontier_state: dict[str, Any] | None = None
+    frontier: FrontierRunState
     terminal: bool = False
 
 
@@ -87,6 +106,43 @@ class _UploadedBytes:
         return self._data
 
 
+class UnconfiguredAgentBackend(AgentBackend):
+    """Fallback backend that lets the desktop API boot before API keys exist."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = reason
+
+    def submit(self, task: AgentInput) -> AgentOutputChannel:
+        channel = QueueOutputChannel()
+        channel.put(
+            AgentOutputEvent(
+                kind="error",
+                text="Backend is not configured. Set GA_API_KEY or create a local key configuration, then restart.",
+                task_id=task.run_id,
+                error=self.reason,
+                metadata={"configuration_required": True},
+            )
+        )
+        channel.close()
+        return channel
+
+    def abort(self) -> None:
+        return None
+
+    @property
+    def is_running(self) -> bool:
+        return False
+
+    def get_llm_name(self) -> str:
+        return "unconfigured"
+
+    def get_key_labels(self) -> list[str]:
+        return []
+
+    def switch_to_key(self, index: int) -> str:
+        return ""
+
+
 class ReactApiRuntime:
     """Small HTTP-facing runtime wrapper around the existing AgentBackend."""
 
@@ -96,6 +152,7 @@ class ReactApiRuntime:
         self.active_run: ActiveRun | None = None
         self.upload_cache: dict[str, dict[str, Any]] = {}
         self.tools_injected = False
+        self._run_lock = threading.Lock()
         self.ui_state: dict[str, Any] = {
             "routing_mode": "auto",
             "compact_assistant_history": True,
@@ -104,25 +161,24 @@ class ReactApiRuntime:
         }
 
     def create_run(self, request: RunCreateRequest) -> RunCreateResponse:
-        if self.active_run is not None and not self.active_run.terminal:
-            raise HTTPException(status_code=409, detail="A run is already active")
+        with self._run_lock:
+            if self.active_run is not None and not self.active_run.terminal:
+                raise HTTPException(status_code=409, detail="A run is already active")
 
-        run_id = f"run_{uuid.uuid4().hex[:12]}"
-        query = self._query_with_attachments(request.query, request.attachments)
-        channel = self.agent.submit(
-            AgentInput(
-                query=query,
-                run_id=run_id,
-                metadata={"attachments": request.attachments, "routing_mode": request.routing_mode},
+            run_id = f"run_{uuid.uuid4().hex[:12]}"
+            query = self._query_with_attachments(request.query, request.attachments)
+            channel = self.agent.submit(
+                AgentInput(
+                    query=query,
+                    run_id=run_id,
+                    metadata={"attachments": request.attachments, "routing_mode": request.routing_mode},
+                )
             )
-        )
-        self.active_run = ActiveRun(
-            run_id=run_id,
-            channel=channel,
-            user_input=request.query,
-            route_target=request.routing_mode,
-            frontier_enabled=frontier_state_should_activate(request.query, request.routing_mode),
-        )
+            self.active_run = ActiveRun(
+                run_id=run_id,
+                channel=channel,
+                frontier=create_frontier_run_state(request.query, request.routing_mode),
+            )
         return RunCreateResponse(run_id=run_id)
 
     def stop_run(self, run_id: str) -> StopRunResponse:
@@ -133,7 +189,7 @@ class ReactApiRuntime:
 
     async def stream_events(self, run_id: str):
         run = self._get_run(run_id)
-        initial_frontier = self._frontier_event(run)
+        initial_frontier = build_frontier_state_event(run.run_id, run.frontier)
         if initial_frontier is not None:
             yield _sse_payload(initial_frontier)
         while True:
@@ -146,7 +202,7 @@ class ReactApiRuntime:
                 continue
             if not event.task_id:
                 event.task_id = run_id
-            frontier_event = self._frontier_event(run, event)
+            frontier_event = build_frontier_state_event(run.run_id, run.frontier, event)
             if frontier_event is not None and event.kind != "frontier_state":
                 yield _sse_payload(frontier_event)
             yield _sse_payload(event)
@@ -247,6 +303,42 @@ class ReactApiRuntime:
             self.ui_state["autonomous_enabled"] = bool(patch.autonomous_enabled)
         return self.settings()
 
+    def llm_config(self) -> dict[str, Any]:
+        return {
+            **public_llm_config(),
+            "backend": self.agent.get_llm_name(),
+        }
+
+    def update_llm_config(self, patch: LlmConfigPatch) -> dict[str, Any]:
+        if self.active_run is not None and not self.active_run.terminal:
+            raise HTTPException(status_code=409, detail="Cannot change LLM config while a run is active")
+        if hasattr(patch, "model_dump"):
+            patch_data = patch.model_dump(exclude_unset=True)
+        else:
+            patch_data = patch.dict(exclude_unset=True)
+        saved = save_llm_config(patch_data)
+        apply_llm_config_to_env(saved)
+        try:
+            self.agent.abort()
+        except Exception:
+            pass
+        try:
+            self.agent = load_agent(os.getenv("GA_REACT_BACKEND", "classic"))
+        except Exception as exc:
+            if not _is_configuration_error(exc):
+                raise
+            self.agent = UnconfiguredAgentBackend(str(exc))
+        self.active_run = None
+        return self.llm_config()
+
+    def check_llm_config(self, request: LlmConfigCheckRequest) -> dict[str, Any]:
+        if hasattr(request, "model_dump"):
+            data = request.model_dump(exclude_unset=True)
+        else:
+            data = request.dict(exclude_unset=True)
+        probe_chat = bool(data.pop("probe_chat", True))
+        return check_llm_config(data, probe_chat=probe_chat)
+
     def reset_conversation(self) -> dict[str, Any]:
         from frontends.services.conversation_reset_service import reset_agent_conversation_state
 
@@ -321,30 +413,6 @@ class ReactApiRuntime:
                     info.title = service.extract_title(info.filepath)
                 return service, info
         raise HTTPException(status_code=404, detail="History file not found")
-
-    def _frontier_event(
-        self,
-        run: ActiveRun,
-        event: AgentOutputEvent | None = None,
-    ) -> AgentOutputEvent | None:
-        if not run.frontier_enabled:
-            return None
-        metadata = dict(event.metadata if event is not None else {})
-        snapshot = build_frontier_state_snapshot(
-            user_input=run.user_input,
-            route_target=run.route_target,
-            response_text=(event.text or event.error) if event is not None else "",
-            execution_state=metadata.get("execution_state"),
-            run_id=run.run_id,
-            metadata=metadata,
-        )
-        run.frontier_state = snapshot.to_dict()
-        return AgentOutputEvent(
-            kind="frontier_state",
-            task_id=run.run_id,
-            turn=event.turn if event is not None else 0,
-            metadata={"frontier_state": run.frontier_state},
-        )
 
     def _restore_agent_history(self, restored: list[Any], fmt_type: str) -> None:
         from frontends.chatapp_common import (
@@ -456,7 +524,15 @@ def create_app(
     backend: str | None = None,
 ) -> FastAPI:
     root = os.path.abspath(project_root or os.getcwd())
-    runtime = ReactApiRuntime(agent or load_agent(backend or os.getenv("GA_REACT_BACKEND", "classic")), project_root=root)
+    apply_llm_config_to_env()
+    if agent is None:
+        try:
+            agent = load_agent(backend or os.getenv("GA_REACT_BACKEND", "classic"))
+        except Exception as exc:
+            if os.getenv("GA_REACT_ALLOW_UNCONFIGURED", "1") == "0" or not _is_configuration_error(exc):
+                raise
+            agent = UnconfiguredAgentBackend(str(exc))
+    runtime = ReactApiRuntime(agent, project_root=root)
     app = FastAPI(title="GenericAgent React API")
     app.state.runtime = runtime
 
@@ -483,6 +559,18 @@ def create_app(
     @app.patch("/api/settings")
     def update_settings(patch: SettingsPatch):
         return runtime.update_settings(patch)
+
+    @app.get("/api/llm-config")
+    def llm_config():
+        return runtime.llm_config()
+
+    @app.patch("/api/llm-config")
+    def update_llm_config(patch: LlmConfigPatch):
+        return runtime.update_llm_config(patch)
+
+    @app.post("/api/llm-config/check")
+    def check_llm_config_endpoint(request: LlmConfigCheckRequest):
+        return runtime.check_llm_config(request)
 
     @app.post("/api/runs", response_model=RunCreateResponse)
     def create_run(request: RunCreateRequest):
@@ -537,3 +625,18 @@ def create_app(
         return runtime.memory()
 
     return app
+
+
+def _is_configuration_error(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(
+        marker in text
+        for marker in (
+            "api key",
+            "mykey",
+            "key configuration",
+            "llm config",
+            "no valid backend",
+            "no backend",
+        )
+    )

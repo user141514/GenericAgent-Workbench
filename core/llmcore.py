@@ -9,6 +9,8 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 _RESP_CACHE_KEY = str(uuid.uuid4()) 
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
 _LLM_AUDIT_CACHE = LLMCallCache(Path(PROJECT_ROOT) / "temp" / "llm_cache")
+_MYKEYS_CACHE_LOCK = threading.Lock()
+_MYKEYS_CACHE: tuple[dict[str, Any], dict[str, str] | None] | None = None
 
 # Load .env file for API key configuration (preferred over mykey.py)
 try:
@@ -183,7 +185,7 @@ def _load_mykeys_from_env():
             "name": os.environ.get("GA_KEY1_NAME", os.environ.get("GA_BACKEND_NAME", "key1")),
             "apikey": key1_api,
             "apibase": os.environ.get("GA_KEY1_API_BASE", os.environ.get("GA_API_BASE_URL", "https://api.deepseek.com")).rstrip("/"),
-            "model": os.environ.get("GA_KEY1_MODEL", os.environ.get("GA_MODEL", "deepseek-chat")),
+            "model": os.environ.get("GA_KEY1_MODEL", os.environ.get("GA_MODEL", "deepseek-v4-pro")),
             "stream": os.environ.get("GA_KEY1_STREAM", os.environ.get("GA_STREAM", "true")).lower() != "false",
             "max_retries": int(os.environ.get("GA_KEY1_MAX_RETRIES", os.environ.get("GA_MAX_RETRIES", "3"))),
             "connect_timeout": int(os.environ.get("GA_KEY1_CONNECT_TIMEOUT", os.environ.get("GA_CONNECT_TIMEOUT", "10"))),
@@ -196,7 +198,7 @@ def _load_mykeys_from_env():
             "name": os.environ.get("GA_KEY2_NAME", "key2"),
             "apikey": key2_api,
             "apibase": os.environ.get("GA_KEY2_API_BASE", "https://api.deepseek.com").rstrip("/"),
-            "model": os.environ.get("GA_KEY2_MODEL", "deepseek-chat"),
+            "model": os.environ.get("GA_KEY2_MODEL", "deepseek-v4-pro"),
             "stream": os.environ.get("GA_KEY2_STREAM", "true").lower() != "false",
             "max_retries": int(os.environ.get("GA_KEY2_MAX_RETRIES", "3")),
             "connect_timeout": int(os.environ.get("GA_KEY2_CONNECT_TIMEOUT", "10")),
@@ -225,27 +227,60 @@ def _load_mykeys():
         "Set GA_API_KEY environment variable, or create mykey.py from mykey_template.py."
     )
 
+def _load_mykeys_cached():
+    global _MYKEYS_CACHE
+    if _MYKEYS_CACHE is None:
+        with _MYKEYS_CACHE_LOCK:
+            if _MYKEYS_CACHE is None:
+                mk = _load_mykeys()
+                proxy = mk.get("proxy", 'http://127.0.0.1:2082')
+                px = {"http": proxy, "https": proxy} if proxy else None
+                _MYKEYS_CACHE = (mk, px)
+                globals()["mykeys"] = mk
+                globals()["proxies"] = px
+    return _MYKEYS_CACHE
+
+
 def __getattr__(name):
     if name in ('mykeys', 'proxies'):
-        mk = _load_mykeys()
-        proxy = mk.get("proxy", 'http://127.0.0.1:2082')
-        px = {"http": proxy, "https": proxy} if proxy else None
-        globals().update(mykeys=mk, proxies=px)
-        return globals()[name]
+        mk, px = _load_mykeys_cached()
+        return mk if name == 'mykeys' else px
     raise AttributeError(f"module 'llmcore' has no attribute {name}")
+
+# Compiled once at module load — reused across all compress_history_tags calls.
+_COMPRESS_TAG_PATS = {
+    tag: re.compile(rf'(<{tag}>)([\s\S]*?)(</{tag}>)')
+    for tag in ('thinking', 'think', 'tool_use', 'tool_result')
+}
+_COMPRESS_HIST_PAT = re.compile(r'<(history|key_info)>[\s\S]*?</\1>')
+_COMPRESS_HISTORY_LOCK = threading.Lock()
+_COMPRESS_HISTORY_COUNTS: dict[int, int] = {}
+_COMPRESS_HISTORY_MAX_TRACKED = 4096
+
+
+def _should_compress_history(messages, force=False):
+    key = id(messages)
+    with _COMPRESS_HISTORY_LOCK:
+        if force:
+            _COMPRESS_HISTORY_COUNTS[key] = 0
+            return True
+        count = _COMPRESS_HISTORY_COUNTS.get(key, 0) + 1
+        _COMPRESS_HISTORY_COUNTS[key] = count
+        if len(_COMPRESS_HISTORY_COUNTS) > _COMPRESS_HISTORY_MAX_TRACKED:
+            for stale_key in list(_COMPRESS_HISTORY_COUNTS)[:512]:
+                if stale_key != key:
+                    _COMPRESS_HISTORY_COUNTS.pop(stale_key, None)
+        return count % 5 == 0
+
 
 def compress_history_tags(messages, keep_recent=10, max_len=800, force=False):
     """Compress <thinking>/<tool_use>/<tool_result> tags in older messages to save tokens."""
-    compress_history_tags._cd = getattr(compress_history_tags, '_cd', 0) + 1
-    if force: compress_history_tags._cd = 0
-    if compress_history_tags._cd % 5 != 0: return messages
+    if not _should_compress_history(messages, force=force): return messages
     _before = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)
-    _pats = {tag: re.compile(rf'(<{tag}>)([\s\S]*?)(</{tag}>)') for tag in ('thinking', 'think', 'tool_use', 'tool_result')}
-    _hist_pat = re.compile(r'<(history|key_info)>[\s\S]*?</\1>')
     def _trunc_str(s): return s[:max_len//2] + '\n...[Truncated]...\n' + s[-max_len//2:] if isinstance(s, str) and len(s) > max_len else s
     def _trunc(text):
-        text = _hist_pat.sub(lambda m: f'<{m.group(1)}>[...]</{m.group(1)}>', text)
-        for pat in _pats.values(): text = pat.sub(lambda m: m.group(1) + _trunc_str(m.group(2)) + m.group(3), text)
+        text = _COMPRESS_HIST_PAT.sub(lambda m: f'<{m.group(1)}>[...]</{m.group(1)}>', text)
+        for pat in _COMPRESS_TAG_PATS.values(): text = pat.sub(lambda m: m.group(1) + _trunc_str(m.group(2)) + m.group(3), text)
         return text
     for i, msg in enumerate(messages):
         if i >= len(messages) - keep_recent: break
@@ -326,6 +361,10 @@ def auto_make_url(base, path):
     if b.endswith(p): return b
     return f"{b}/{p}" if re.search(r'/v\d+(/|$)', b) else f"{b}/v1/{p}"
 
+
+def _log_sse_json_error(exc, data_str):
+    print(f"[SSE] JSON parse error: {exc}, line: {str(data_str)[:200]}")
+
 def _parse_claude_sse(resp_lines):
     """Parse Anthropic SSE stream. Yields text chunks, returns list[content_block]."""
     content_blocks = []; current_block = None; tool_json_buf = ""
@@ -338,7 +377,7 @@ def _parse_claude_sse(resp_lines):
         if data_str == "[DONE]": break
         try: evt = json.loads(data_str)
         except Exception as e:
-            print(f"[SSE] JSON parse error: {e}, line: {data_str[:200]}")
+            _log_sse_json_error(e, data_str)
             continue
         evt_type = evt.get("type", "")
         if evt_type == "message_start":
@@ -364,8 +403,10 @@ def _parse_claude_sse(resp_lines):
         elif evt_type == "content_block_stop":
             if current_block:
                 if current_block["type"] == "tool_use":
-                    try: current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
-                    except: current_block["input"] = {"_raw": tool_json_buf}
+                    try:
+                        current_block["input"] = json.loads(tool_json_buf) if tool_json_buf else {}
+                    except (json.JSONDecodeError, TypeError):
+                        current_block["input"] = {"_raw": tool_json_buf}
                 content_blocks.append(current_block)
                 current_block = None
         elif evt_type == "message_delta":
@@ -402,7 +443,9 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
             data_str = line[5:].lstrip()
             if data_str == "[DONE]": break
             try: evt = json.loads(data_str)
-            except: continue
+            except Exception as e:
+                _log_sse_json_error(e, data_str)
+                continue
             etype = evt.get("type", "")
             if etype == "response.output_text.delta":
                 delta = evt.get("delta", "")
@@ -437,8 +480,10 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
         if content_text: blocks.append({"type": "text", "text": content_text})
         for idx in sorted(fc_buf):
             fc = fc_buf[idx]
-            try: inp = json.loads(fc["args"]) if fc["args"] else {}
-            except: inp = {"_raw": fc["args"]}
+            try:
+                inp = json.loads(fc["args"]) if fc["args"] else {}
+            except (json.JSONDecodeError, TypeError):
+                inp = {"_raw": fc["args"]}
             blocks.append({"type": "tool_use", "id": fc["id"], "name": fc["name"], "input": inp})
         return blocks
     else:
@@ -451,7 +496,9 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
             data_str = line[5:].lstrip()
             if data_str == "[DONE]": break
             try: evt = json.loads(data_str)
-            except: continue
+            except Exception as e:
+                _log_sse_json_error(e, data_str)
+                continue
             ch = (evt.get("choices") or [{}])[0]
             delta = ch.get("delta") or {}
             if delta.get("reasoning_content"):
@@ -472,8 +519,10 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
         if content_text: blocks.append({"type": "text", "text": content_text})
         for idx in sorted(tc_buf):
             tc = tc_buf[idx]
-            try: inp = json.loads(tc["args"]) if tc["args"] else {}
-            except: inp = {"_raw": tc["args"]}
+            try:
+                inp = json.loads(tc["args"]) if tc["args"] else {}
+            except (json.JSONDecodeError, TypeError):
+                inp = {"_raw": tc["args"]}
             blocks.append({"type": "tool_use", "id": tc["id"], "name": tc["name"], "input": inp})
         return blocks
 
@@ -494,8 +543,10 @@ def _parse_openai_json(data, api_mode="chat_completions"):
                 if text: blocks.append({"type": "text", "text": text})
             elif item.get("type") == "function_call":
                 args = item.get("arguments", "")
-                try: inp = json.loads(args) if args else {}
-                except: inp = {"_raw": args}
+                try:
+                    inp = json.loads(args) if args else {}
+                except (json.JSONDecodeError, TypeError):
+                    inp = {"_raw": args}
                 blocks.append({"type": "tool_use", "id": item.get("call_id", item.get("id", "")), "name": item.get("name", ""), "input": inp})
         return blocks
     usage = data.get("usage") or {}
@@ -516,8 +567,10 @@ def _parse_openai_json(data, api_mode="chat_completions"):
     for tc in (msg.get("tool_calls") or []):
         fn = tc.get("function", {})
         args = fn.get("arguments", "")
-        try: inp = json.loads(args) if args else {}
-        except: inp = {"_raw": args}
+        try:
+            inp = json.loads(args) if args else {}
+        except (json.JSONDecodeError, TypeError):
+            inp = {"_raw": args}
         blocks.append({"type": "tool_use", "id": tc.get("id", ""), "name": fn.get("name", ""), "input": inp})
     return blocks
 
@@ -745,22 +798,23 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
         return False
 
     def _delay(resp, attempt):
-        try: ra = float((resp.headers or {}).get("retry-after"))
-        except: ra = None
+        try:
+            ra = float((resp.headers or {}).get("retry-after"))
+        except (ValueError, TypeError):
+            ra = None
         return max(0.5, ra if ra is not None else min(30.0, 1.5 * (2 ** attempt)))
-    def _post(url, **kwargs):
-        with requests.Session() as sess:
-            sess.trust_env = False
-            return sess.post(url, proxies=proxies, **kwargs)
-    for attempt in range(max_retries + 1):
+    _sess = requests.Session()
+    _sess.trust_env = False
+    try:
+     for attempt in range(max_retries + 1):
         streamed = False
         try:
-            with _post(url, headers=headers, json=payload, stream=stream,
+            with _sess.post(url, headers=headers, json=payload, stream=stream, proxies=proxies,
                        timeout=(connect_timeout, read_timeout)) as r:
                 if r.status_code >= 400:
                     err_body = ""
                     try: err_body = r.text.strip()[:1200]
-                    except: pass
+                    except AttributeError: pass
                     cat, act = classify_http_error(r.status_code, err_body)
                     if _should_retry(r.status_code, err_body, attempt, max_retries, False):
                         d = _delay(r, attempt)
@@ -823,10 +877,17 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
         except requests.HTTPError as e:
             resp = getattr(e, "response", None); status = getattr(resp, "status_code", None)
             body = ""; rid = ""; ra = ""; ct = ""
-            try: body = getattr(e, '_err_body', '') or (resp.text or "").strip()[:1200]
-            except: pass
-            try: h = resp.headers or {}; rid = h.get("x-request-id","") or h.get("request-id",""); ra = h.get("retry-after",""); ct = h.get("content-type","")
-            except: pass
+            try:
+                body = getattr(e, '_err_body', '') or (resp.text or "").strip()[:1200]
+            except (AttributeError, ValueError):
+                pass
+            try:
+                h = resp.headers or {}
+                rid = h.get("x-request-id","") or h.get("request-id","")
+                ra = h.get("retry-after","")
+                ct = h.get("content-type","")
+            except AttributeError:
+                pass
             cat, act = classify_http_error(status, body)
             if _should_retry(status, body, attempt, max_retries, streamed):
                 d = _delay(resp, attempt)
@@ -887,6 +948,9 @@ def _openai_stream(api_base, api_key, messages, model, api_mode='chat_completion
                     streaming=stream,
                 )
             return [{"type": "text", "text": err}]
+    finally:
+        _sess.close()
+
 
 def _to_responses_input(messages):
     result = []
@@ -1440,18 +1504,25 @@ Follow these steps to think and act:
         system_content = next((m['content'] for m in messages if m['role'].lower() == 'system'), "")
         history_msgs = [m for m in messages if m['role'].lower() != 'system']
         tool_instruction = self._prepare_tool_instruction_v2(tools)
-        system = ""; user = ""
-        if system_content: system += f"{system_content}\n"
-        system += f"{tool_instruction}"
+        system_parts = []
+        if system_content:
+            system_parts.append(f"{system_content}\n")
+        system_parts.append(f"{tool_instruction}")
+        system = "".join(system_parts)
+        user_parts = []
         for m in history_msgs:
             role = "USER" if m['role'] == 'user' else "ASSISTANT"
-            user += f"=== {role} ===\n"
-            for tr in m.get('tool_results', []): user += f'<tool_result>{tr["content"]}</tool_result>\n'
-            user += str(m['content']) + "\n"
-            self.total_cd_tokens += self._estimate_content_len(user)           
-        if self.total_cd_tokens > 9000: self.last_tools = ''
-        user += "=== ASSISTANT ===\n" 
-        return system + user
+            user_parts.append(f"=== {role} ===\n")
+            for tr in m.get('tool_results', []):
+                user_parts.append(f'<tool_result>{tr["content"]}</tool_result>\n')
+            user_parts.append(str(m['content']) + "\n")
+        user = "".join(user_parts)
+        self.total_cd_tokens += self._estimate_content_len(user)
+        if self.total_cd_tokens > 9000:
+            self.last_tools = ''
+            self.total_cd_tokens = 0
+        user_parts.append("=== ASSISTANT ===\n")
+        return system + "".join(user_parts)
 
     def _parse_mixed_response(self, text):
         remaining_text = text; thinking = ''
@@ -1514,7 +1585,8 @@ def _parse_text_tool_calls(content):
             idx = content.index(_jp); raw = json.loads(content[idx:])
             tcs = [MockToolCall(b["name"], b.get("input", {}), id=b.get("id", "")) for b in raw if b.get("type") == "tool_use"]
             return tcs, content[:idx].strip()
-        except: pass
+        except (json.JSONDecodeError, KeyError, ValueError):
+            pass
     # try XML tags: <tool_call>{"name":..., "arguments":...}</tool_call>
     _xp = r"<(?:tool_use|tool_call)>((?:(?!<(?:tool_use|tool_call)>).){15,}?)</(?:tool_use|tool_call)>"
     for s in re.findall(_xp, content, re.DOTALL):
@@ -1522,7 +1594,8 @@ def _parse_text_tool_calls(content):
             d = tryparse(s.strip()); name = d.get('name')
             args = d.get('arguments') or d.get('args') or d.get('input') or {}
             if name: tcs.append(MockToolCall(name, args))
-        except: pass
+        except (AttributeError, ValueError, TypeError):
+            pass
     if tcs: content = re.sub(_xp, "", content, flags=re.DOTALL).strip()
     return tcs, content
 
@@ -1535,13 +1608,17 @@ def _write_llm_log(label, content):
         f.write(f"=== {label} === {ts}\n{content}\n\n")
 
 def tryparse(json_str):
-    try: return json.loads(json_str)
-    except: pass
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, ValueError):
+        pass
     json_str = json_str.strip().strip('`').replace('json\n', '', 1).strip()
-    try: return json.loads(json_str)
-    except: pass
+    try:
+        return json.loads(json_str)
+    except (json.JSONDecodeError, ValueError):
+        pass
     try: return json.loads(json_str[:-1])
-    except: pass
+    except (json.JSONDecodeError, ValueError): pass
     if '}' in json_str: json_str = json_str[:json_str.rfind('}') + 1]
     return json.loads(json_str)
 

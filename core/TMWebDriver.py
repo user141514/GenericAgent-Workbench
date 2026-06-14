@@ -69,7 +69,7 @@ class TMWebDriver:
                 try:
                     msg = msgQ.get(timeout=0.2)
                     try: self.acks[json.loads(msg).get('id','')] = True
-                    except: traceback.print_exc()
+                    except (json.JSONDecodeError, KeyError, ValueError): traceback.print_exc()
                     return msg
                 except queue.Empty: continue
             return json.dumps({"id": "", "ret": "next long-poll"})

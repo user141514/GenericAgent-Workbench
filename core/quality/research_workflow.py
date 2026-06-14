@@ -69,6 +69,30 @@ _OPEN_ENDED_TRIGGERS = [
     "turn this into a workflow",
 ]
 
+_STRONG_RESEARCH_SIGNALS = [
+    "ablation",
+    "audit",
+    "bad strategy",
+    "baseline",
+    "bottleneck",
+    "claim",
+    "diagnostic",
+    "failed",
+    "failure",
+    "frontier",
+    "innovation",
+    "kill test",
+    "mechanism",
+    "negative result",
+    "open-ended",
+    "paper",
+    "pivot",
+    "research",
+    "scientific",
+    "strong baseline",
+    "system dynamics",
+]
+
 _READ_EXCLUDES = [
     "read readme first line",
     "readme first line",
@@ -159,6 +183,8 @@ def should_inject_research_workflow(user_input: str, route_target: str | None = 
     if not has_research_signal:
         return False
 
+    if route == "code" and not _contains_any(query, _STRONG_RESEARCH_SIGNALS):
+        return False
     if route in {"code", "review"} and _contains_any(query, _PLAIN_CODE_REVIEW_EXCLUDES):
         return False
     if route == "review" and "research" not in query and "strategy" not in query:

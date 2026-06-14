@@ -207,6 +207,18 @@ def run_memory_maintenance(project_root: str | Path | None = None) -> dict:
         if fpath.is_file():
             report["tasks"][f"size_{fname}"] = fpath.stat().st_size
 
+    # 5. Archive inbox to structured memory (inbox → catalog.sqlite)
+    try:
+        archive_result = archive_inbox_to_structured(
+            project_root=root,
+            dry_run=False,
+            backup_first=True,
+            truncate_after_write=False,
+        )
+        report["tasks"]["archive"] = archive_result
+    except Exception as e:
+        report["tasks"]["archive"] = {"error": str(e)}
+
     return report
 
 

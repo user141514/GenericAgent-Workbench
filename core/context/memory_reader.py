@@ -14,6 +14,10 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .session_store import SessionRecord, TaskState, SessionSnapshot
 
 from . import _context_enabled
 

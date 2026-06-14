@@ -8,10 +8,20 @@ M4: Added recent_turns and working_memory as first-class source types.
     Preview mode writes ContextPacket as JSON to temp/context_audit/.
 """
 
+from __future__ import annotations
+
 import json
 import os
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .workspace_probe import WorkspaceSnapshot
+    from .project_identity import ProjectIdentity
+    from .runtime_identity import RuntimeIdentity
+    from .session_store import SessionRecord, TaskState
+    from .memory_reader import MemoryBundle
 
 # ── Route budgets ──
 

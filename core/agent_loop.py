@@ -484,6 +484,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 ]
 
             tool_results = []
+            all_tool_results = []
             next_prompts = set()
             for ii, tc in enumerate(tool_calls):
                 if _stopped():
@@ -609,8 +610,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         if type(outcome.data) in [dict, list]
                         else str(outcome.data)
                     )
-                    tool_results.append({"tool_use_id": tid, "content": datastr})
-                    if len(tool_results) > 20:
+                    result_item = {"tool_use_id": tid, "content": datastr}
+                    all_tool_results.append(result_item)
+                    tool_results.append(result_item)
+                    if len(all_tool_results) > 20 and len(tool_results) > 10:
                         tool_results[:] = tool_results[-10:]
                 next_prompts.add(outcome.next_prompt)
 
@@ -618,7 +621,7 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 direct_answer_reason = _maybe_apply_direct_answer(
                     handler,
                     tool_calls,
-                    tool_results,
+                    all_tool_results,
                     turn,
                 )
                 if direct_answer_reason is not None:
@@ -632,13 +635,15 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     handler,
                     response,
                     tool_calls,
-                    tool_results,
+                    all_tool_results,
                     turn,
                 )
                 if early_stop_reason is not None:
                     exit_reason = early_stop_reason
 
-            if len(next_prompts) == 0 or exit_reason:
+            if exit_reason:
+                break
+            if len(next_prompts) == 0:
                 if len(handler._done_hooks) == 0:
                     break
                 next_prompts.add(handler._done_hooks.pop(0))
