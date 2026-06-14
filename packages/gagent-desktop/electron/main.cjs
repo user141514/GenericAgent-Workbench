@@ -140,7 +140,7 @@ function resolvePythonExecutable() {
   const embedded = path.join(resourceRoot(), "python-runtime", "python.exe");
   const embeddedVenv = path.join(resourceRoot(), "python-runtime", "Scripts", "python.exe");
   const localEmbedded = path.resolve(__dirname, "..", "python-runtime", "python.exe");
-  const candidates = [process.env.GAGENT_PYTHON, embedded, embeddedVenv, localEmbedded, "python"].filter(Boolean);
+  const candidates = [embedded, embeddedVenv, localEmbedded, process.env.GAGENT_PYTHON, "python"].filter(Boolean);
   for (const candidate of candidates) {
     if (candidate === "python" || fs.existsSync(candidate)) {
       return candidate;
