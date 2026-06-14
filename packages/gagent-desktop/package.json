@@ -31,15 +31,16 @@
     "dry-run": "node bin/gagent-desktop.js --dry-run --json",
     "pack:dry": "npm pack --dry-run",
     "pack:npm": "npm pack",
+    "prepublishOnly": "node scripts/prepublish-check.cjs",
     "publish:dry": "npm publish --dry-run",
-    "publish:npm": "npm publish",
+    "publish:npm": "npm publish --access public",
     "postinstall": "node -e \"console.log('\\n  gagent-desktop installed.\\n  First run: gagent-desktop setup  (auto-creates Python env)\\n  Or with custom Python: gagent-desktop --python D:\\\\\\\\python\\\\\\\\python.exe\\n')\"",
     "runtime:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\tools\\prepare_gagent_desktop_windows_runtime.ps1",
     "dist:dir": "node scripts/run-electron-builder.cjs --dir --win --x64",
     "dist:win": "node scripts/run-electron-builder.cjs --win portable --x64"
   },
   "dependencies": {
-    "electron": "^42.4.0"
+    "electron": "42.4.0"
   },
   "devDependencies": {
     "electron-builder": "^26.0.12"

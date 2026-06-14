@@ -17,6 +17,27 @@ const builderBin = path.join(
 function withBuilderManifest(callback) {
   const originalText = fs.readFileSync(packageJsonPath, "utf8");
   const manifest = JSON.parse(originalText);
+  let restored = false;
+  const restoreManifest = () => {
+    if (restored) {
+      return;
+    }
+    fs.writeFileSync(packageJsonPath, originalText, "utf8");
+    restored = true;
+  };
+  const handleSignal = (signal) => {
+    restoreManifest();
+    const exitCode = signal === "SIGINT" ? 130 : 143;
+    process.exit(exitCode);
+  };
+  const handleUncaughtException = (error) => {
+    restoreManifest();
+    throw error;
+  };
+  process.once("exit", restoreManifest);
+  process.once("SIGINT", handleSignal);
+  process.once("SIGTERM", handleSignal);
+  process.once("uncaughtException", handleUncaughtException);
   manifest.devDependencies = manifest.devDependencies || {};
   if (manifest.dependencies && manifest.dependencies.electron) {
     manifest.devDependencies.electron = manifest.devDependencies.electron || manifest.dependencies.electron;
@@ -29,7 +50,11 @@ function withBuilderManifest(callback) {
   try {
     return callback();
   } finally {
-    fs.writeFileSync(packageJsonPath, originalText, "utf8");
+    process.removeListener("exit", restoreManifest);
+    process.removeListener("SIGINT", handleSignal);
+    process.removeListener("SIGTERM", handleSignal);
+    process.removeListener("uncaughtException", handleUncaughtException);
+    restoreManifest();
   }
 }
 

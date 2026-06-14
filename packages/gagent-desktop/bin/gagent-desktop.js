@@ -25,6 +25,7 @@ function parseArgs(argv) {
     noSetup: false,
     setup: false,
     help: false,
+    version: false,
   };
 
   const rest = [...argv];
@@ -43,6 +44,7 @@ function parseArgs(argv) {
     else if (item === "--json") args.json = true;
     else if (item === "--no-api") args.noApi = true;
     else if (item === "--no-setup") args.noSetup = true;
+    else if (item === "--version" || item === "-v") args.version = true;
     else if (item === "--help" || item === "-h") args.help = true;
     else fail(`Unknown argument: ${item}`);
   }
@@ -63,8 +65,18 @@ function usage() {
     "  --no-setup        Do not auto-create the bundled backend Python environment.",
     "  --dry-run         Print planned launch configuration and exit.",
     "  --json            Print dry-run output as JSON.",
+    "  -v, --version     Print the installed gagent-desktop version.",
     "  -h, --help        Show this help.",
   ].join("\n");
+}
+
+function packageVersion() {
+  try {
+    const manifest = JSON.parse(fs.readFileSync(path.join(PACKAGE_ROOT, "package.json"), "utf8"));
+    return String(manifest.version || "unknown");
+  } catch {
+    return "unknown";
+  }
 }
 
 function findRepoRoot(explicitRepo) {
@@ -165,6 +177,10 @@ async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     console.log(usage());
+    return 0;
+  }
+  if (args.version) {
+    console.log(packageVersion());
     return 0;
   }
 
