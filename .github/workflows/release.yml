@@ -1,0 +1,74 @@
+name: Build and Release gagent-desktop
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: packages/gagent-desktop
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: packages/gagent-desktop/package-lock.json
+
+      - name: Install npm dependencies
+        run: npm ci
+
+      - name: Build React frontend
+        run: npx react-scripts build
+        working-directory: frontends/react_app
+
+      - name: Copy React dist to package
+        run: |
+          Remove-Item -Recurse -Force packages/gagent-desktop/dist -ErrorAction SilentlyContinue
+          Copy-Item -Recurse frontends/react_app/build packages/gagent-desktop/dist
+
+      - name: Prepare sanitized backend
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/prepare_gagent_desktop_package.ps1
+
+      - name: Download embedded Python runtime
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools/prepare_gagent_desktop_windows_runtime.ps1
+
+      - name: Build Windows .exe
+        run: npm run dist:win
+        env:
+          ELECTRON_MIRROR: https://npmmirror.com/mirrors/electron/
+          ELECTRON_BUILDER_BINARIES_MIRROR: https://npmmirror.com/mirrors/electron-builder-binaries/
+
+      - name: Find built .exe
+        id: find-exe
+        run: |
+          $exe = Get-ChildItem -Path packages/gagent-desktop/release -Filter "*.exe" | Select-Object -First 1
+          echo "exe_path=$($exe.FullName)" >> $env:GITHUB_OUTPUT
+          echo "exe_name=$($exe.Name)" >> $env:GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.find-exe.outputs.exe_path }}
+          generate_release_notes: true
+          draft: false
+          prerelease: ${{ contains(github.ref, 'beta') || contains(github.ref, 'alpha') || contains(github.ref, 'rc') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to npm (optional)
+        if: ${{ !contains(github.ref, 'beta') && !contains(github.ref, 'alpha') && !contains(github.ref, 'rc') }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

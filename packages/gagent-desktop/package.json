@@ -20,6 +20,10 @@
     "electron/**/*",
     "scripts/**/*",
     "dist/**/*",
+    "python-runtime/**/*",
+    "!python-runtime/**/__pycache__/**",
+    "!python-runtime/**/*.pyc",
+    "!python-runtime/**/*.pyo",
     "README.md",
     "package.json"
   ],
