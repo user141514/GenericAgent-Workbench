@@ -9,7 +9,7 @@ Pillow
 PyMuPDF
 pyperclip
 python-docx
-python-dotenv>=1.0
+python-dotenv>=0.20
 pywin32; platform_system == "Windows"
 requests
 urllib3
