@@ -3,9 +3,10 @@
 
 const fs = require("node:fs");
 const http = require("node:http");
+const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
-const { spawn } = require("node:child_process");
+const { spawn, spawnSync } = require("node:child_process");
 
 const PACKAGE_ROOT = path.resolve(__dirname, "..");
 const PACKAGED_BACKEND = path.join(PACKAGE_ROOT, "backend");
@@ -26,6 +27,7 @@ function parseArgs(argv) {
     setup: false,
     help: false,
     version: false,
+    update: false,
   };
 
   const rest = [...argv];
@@ -45,6 +47,7 @@ function parseArgs(argv) {
     else if (item === "--no-api") args.noApi = true;
     else if (item === "--no-setup") args.noSetup = true;
     else if (item === "--version" || item === "-v") args.version = true;
+    else if (item === "--update" || item === "-U") args.update = true;
     else if (item === "--help" || item === "-h") args.help = true;
     else fail(`Unknown argument: ${item}`);
   }
@@ -66,6 +69,7 @@ function usage() {
     "  --dry-run         Print planned launch configuration and exit.",
     "  --json            Print dry-run output as JSON.",
     "  -v, --version     Print the installed gagent-desktop version.",
+    "  -U, --update      Check npm for newer version and self-update.",
     "  -h, --help        Show this help.",
   ].join("\n");
 }
@@ -184,6 +188,10 @@ async function main() {
     return 0;
   }
 
+  if (args.update) {
+    return await updateSelf();
+  }
+
   const config = buildConfig(args);
   if (args.dryRun) {
     dryRunOutput(config, args.json);
@@ -235,6 +243,83 @@ async function main() {
       backendProcess.kill();
     }
   }
+}
+
+function compareVersions(a, b) {
+  const pa = String(a || "0.0.0").split(".").map(Number);
+  const pb = String(b || "0.0.0").split(".").map(Number);
+  for (let i = 0; i < 3; i += 1) {
+    const diff = (pa[i] || 0) - (pb[i] || 0);
+    if (diff !== 0) return diff;
+  }
+  return 0;
+}
+
+async function updateSelf() {
+  const current = packageVersion();
+  const npmName = "gagent-desktop";
+
+  console.log(`gagent-desktop ${current} — checking for updates...`);
+
+  const latest = await fetchLatestVersion(npmName);
+  if (!latest) {
+    console.log("Could not reach npm registry. Try again later.");
+    return 1;
+  }
+
+  if (current === latest) {
+    console.log(`Already up to date (v${current}).`);
+    return 0;
+  }
+
+  // Don't downgrade if current is newer than npm registry
+  if (compareVersions(current, latest) >= 0) {
+    console.log(`Already up to date (v${current}). Remote is v${latest}.`);
+    return 0;
+  }
+
+  console.log(`Update available: v${current} → v${latest}`);
+  console.log(`Running: npm install -g ${npmName}@latest ...`);
+
+  const result = spawnSync(
+    process.platform === "win32" ? "npm.cmd" : "npm",
+    ["install", "-g", `${npmName}@latest`],
+    { stdio: "inherit", shell: false },
+  );
+
+  if (result.status !== 0) {
+    console.error(`Update failed (exit ${result.status}). Try manually: npm install -g ${npmName}@latest`);
+    return 1;
+  }
+
+  console.log(`Updated to v${latest}. Restart gagent-desktop to use the new version.`);
+  return 0;
+}
+
+function fetchLatestVersion(packageName) {
+  const url = `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`;
+
+  return new Promise((resolve) => {
+    const request = https.get(url, { timeout: 10000 }, (response) => {
+      if (response.statusCode !== 200) {
+        response.resume();
+        resolve(null);
+        return;
+      }
+      let body = "";
+      response.on("data", (chunk) => { body += chunk; });
+      response.on("end", () => {
+        try {
+          const data = JSON.parse(body);
+          resolve(String(data.version || ""));
+        } catch {
+          resolve(null);
+        }
+      });
+    });
+    request.on("timeout", () => { request.destroy(); resolve(null); });
+    request.on("error", () => resolve(null));
+  });
 }
 
 async function ensurePythonEnvironment(config, { force }) {

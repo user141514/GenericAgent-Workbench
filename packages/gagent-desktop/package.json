@@ -1,6 +1,6 @@
 {
   "name": "gagent-desktop",
-  "version": "0.1.4",
+  "version": "0.2.0",
   "description": "GenericAgent desktop app with packaged React UI and sanitized local backend.",
   "license": "MIT",
   "type": "commonjs",
