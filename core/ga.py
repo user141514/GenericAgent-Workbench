@@ -499,6 +499,9 @@ def expand_file_refs(text, base_dir=None):
     def replacer(match):
         path, start, end = match.group(1), int(match.group(2)), int(match.group(3))
         path = os.path.abspath(os.path.join(base_dir or '.', path))
+        result = resolve_tool_path(path, base_dir=base_dir or '.', project_root=PROJECT_ROOT, mode="read")
+        if not result.allowed:
+            return f"[blocked: {path}]"
         if not os.path.isfile(path): raise ValueError(f"引用文件不存在: {path}")
         with open(path, 'r', encoding='utf-8') as f: lines = f.readlines()
         if start < 1 or end > len(lines) or start > end: raise ValueError(f"行号越界: {path} 共{len(lines)}行, 请求{start}-{end}")
@@ -781,43 +784,32 @@ class GenericAgentHandler(BaseHandler):
         raw_path = os.path.join(self.cwd, args.get("cwd", './'))
         cwd = os.path.normpath(os.path.abspath(raw_path))
         code_cwd = os.path.normpath(self.cwd)
-        if code_type == 'python' and args.get("inline_eval"):
-            ns = {'handler': self, 'parent': self.parent}
-            old_cwd = os.getcwd()
+        preflight = evaluate_code_run_preflight(
+            code, code_type, cwd, args,
+            smoke_cache=get_smoke_cache(),
+        )
+        profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
+        if profiler is not None:
             try:
-                os.chdir(cwd)
-                try:
-                    try: result = repr(eval(code, ns))
-                    except SyntaxError: exec(code, ns); result = ns.get('_r', 'OK')
-                except Exception as e: result = f'Error: {e}'
-            finally: os.chdir(old_cwd)
+                profiler.record_event(
+                    "code_preflight_gate",
+                    kind="tool",
+                    metadata={
+                        "allowed": preflight.allowed,
+                        "checks": preflight.checks,
+                        "blocked_reasons": preflight.blocked_reasons,
+                        "warnings": preflight.warnings,
+                        "code_type": code_type,
+                        "cwd": cwd,
+                    },
+                )
+            except Exception:
+                pass
+        if preflight.allowed:
+            result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
         else:
-            preflight = evaluate_code_run_preflight(
-                code, code_type, cwd, args,
-                smoke_cache=get_smoke_cache(),
-            )
-            profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
-            if profiler is not None:
-                try:
-                    profiler.record_event(
-                        "code_preflight_gate",
-                        kind="tool",
-                        metadata={
-                            "allowed": preflight.allowed,
-                            "checks": preflight.checks,
-                            "blocked_reasons": preflight.blocked_reasons,
-                            "warnings": preflight.warnings,
-                            "code_type": code_type,
-                            "cwd": cwd,
-                        },
-                    )
-                except Exception:
-                    pass
-            if preflight.allowed:
-                result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
-            else:
-                yield "[Code Preflight] blocked before execution.\n"
-                result = preflight.to_tool_message()
+            yield "[Code Preflight] blocked before execution.\n"
+            result = preflight.to_tool_message()
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         if 'preflight' in locals() and not preflight.allowed:
             next_prompt += "\n[CODE PREFLIGHT]\n"
@@ -941,9 +933,12 @@ class GenericAgentHandler(BaseHandler):
         if not script:
             _, script = self._extract_code_block(response, "javascript")
         if not script: return StepOutcome("[Error] Script missing. Use ```javascript block or 'script' arg.", next_prompt="\n")
-        abs_path = self._get_abs_path(script.strip())
-        if os.path.isfile(abs_path):
-            with open(abs_path, 'r', encoding='utf-8') as f: script = f.read()
+        path_result = self._resolve_tool_path(script.strip(), mode="read")
+        if not path_result.allowed:
+            yield f"[Path Guard] {path_result.message}\n"
+            return self._path_blocked_outcome(path_result)
+        if os.path.isfile(path_result.path):
+            with open(path_result.path, 'r', encoding='utf-8') as f: script = f.read()
         save_to_file = args.get("save_to_file", "")
         switch_tab_id = args.get("switch_tab_id") or args.get("tab_id")
         no_monitor = args.get("no_monitor", False)
@@ -951,13 +946,16 @@ class GenericAgentHandler(BaseHandler):
         result = enrich_web_tool_result("web_execute_js", result)
         if save_to_file and "js_return" in result:
             content = str(result["js_return"] or '')
-            abs_path = self._get_abs_path(save_to_file)
+            path_result = self._resolve_tool_path(save_to_file, mode="write")
             result["js_return"] = smart_format(content, max_str_len=170)
-            try:
-                with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))
-                result["js_return"] += f"\n\n[已保存完整内容到 {abs_path}]"
-            except OSError:
-                result['js_return'] += f"\n\n[保存失败，无法写入文件 {abs_path}]"
+            if not path_result.allowed:
+                result["js_return"] += f"\n\n[保存失败：{path_result.message}]"
+            else:
+                try:
+                    with open(path_result.path, 'w', encoding='utf-8') as f: f.write(str(content))
+                    result["js_return"] += f"\n\n[已保存完整内容到 {path_result.path}]"
+                except OSError:
+                    result['js_return'] += f"\n\n[保存失败，无法写入文件 {path_result.path}]"
         show = smart_format(json.dumps(result, ensure_ascii=False, indent=2, default=json_default), max_str_len=300)
         try: print("Web Execute JS Result:", show)
         except OSError: pass

@@ -29,7 +29,9 @@ sys.path.append(os.path.abspath(os.path.join(script_dir, "..")))
 import streamlit as st
 
 # ── Mobile password gate ───────────────────────────────────
-_PASSWORD = "136168"  # ← 改这里
+_PASSWORD = os.environ.get("GA_MOBILE_PASSWORD", "").strip()
+if not _PASSWORD:
+    print("[WARN] GA_MOBILE_PASSWORD not set; mobile frontend will be inaccessible.")
 if not st.session_state.get("_authenticated"):
     st.title("🔒 请输入访问密码")
     _pwd = st.text_input("密码", type="password")

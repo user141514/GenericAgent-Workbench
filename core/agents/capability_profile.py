@@ -9,6 +9,7 @@ its instructions describe its tools, budget, and constraints.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -154,10 +155,13 @@ def _parse_frontmatter(text: str) -> tuple[dict[str, Any], str]:
                     val = val[1:-1]
                 result[key] = val
             current_key = key
-        elif current_key:
-            # Continuation line for previous key
-            v = str(result.get(current_key, ""))
-            result[current_key] = v + " " + stripped
+        elif current_key and stripped:
+            # Only append if the line looks like a continuation (indented or starts without key-like prefix)
+            if stripped.startswith(("- ", "* ", "  ", "\t")) or not re.match(
+                r'^[a-zA-Z_][a-zA-Z0-9_]*\s*:', stripped
+            ):
+                v = str(result.get(current_key, ""))
+                result[current_key] = v + " " + stripped
 
     return result, body
 

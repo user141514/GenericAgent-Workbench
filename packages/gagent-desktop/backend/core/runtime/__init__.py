@@ -12,8 +12,12 @@ from .clarification_gate import (
 from .code_preflight import (
     CODE_PREFLIGHT_ENV_VAR,
     CodePreflightResult,
+    SmokeCache,
+    SmokeCacheEntry,
     code_preflight_enabled,
     evaluate_code_run_preflight,
+    get_smoke_cache,
+    reset_smoke_cache,
 )
 from .direct_answer import (
     DIRECT_ANSWER_ENV_VAR,
@@ -82,6 +86,7 @@ from .read_shortcut import (
     detect_read_shortcut,
     read_shortcut_enabled,
 )
+from .tool_orchestrator import orchestrator_enabled
 from .session import RuntimeSessionState
 from .shared_store import Artifact, SharedArtifactStore
 from .state_machine import IllegalModeTransition, ModeStateMachine, mode_for_route
@@ -98,6 +103,10 @@ __all__ = [
     "CACHE_ENV_VAR",
     "CODE_PREFLIGHT_ENV_VAR",
     "CodePreflightResult",
+    "SmokeCache",
+    "SmokeCacheEntry",
+    "get_smoke_cache",
+    "reset_smoke_cache",
     "TOOL_PATH_ALLOW_SENSITIVE_ENV_VAR",
     "TOOL_PATH_GUARD_ENV_VAR",
     "ToolPathResult",
@@ -152,4 +161,5 @@ __all__ = [
     "IllegalModeTransition",
     "ModeStateMachine",
     "mode_for_route",
+    "orchestrator_enabled",
 ]

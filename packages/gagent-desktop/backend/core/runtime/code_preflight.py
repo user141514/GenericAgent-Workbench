@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import ast
 import csv
+import hashlib
 import os
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +34,23 @@ _SMOKE_CHECKED_NAMES = {
     "SMOKE_TEST_PASSED",
     "PREFLIGHT_SMOKE_CHECKED",
 }
+_SMOKE_POLICY_NAMES = {
+    "SMOKE_POLICY",
+}
+
+# P3: Three-state smoke enforcement
+class SmokePolicy:
+    OFF = "off"          # skip smoke check entirely
+    WARN = "warn"        # smoke required but not checked → warning, allow
+    REQUIRE = "require"  # smoke required but not checked → block (default)
+
+    @classmethod
+    def from_value(cls, value) -> str:
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("off", "warn", "require"):
+                return v
+        return cls.REQUIRE  # default
 _DESTRUCTIVE_SHELL_PATTERNS = (
     r"\brm\s+-rf\b",
     r"\bRemove-Item\b(?=.*-Recurse\b)(?=.*-Force\b)",
@@ -53,6 +72,7 @@ class CodePreflightResult:
     blocked_reasons: list[str]
     warnings: list[str]
     suggested_next_step: str = ""
+    action: dict | None = None  # P2: structured smoke action, e.g. {"type":"run_smoke","function":"smoke"}
 
     def to_tool_message(self) -> str:
         if self.allowed:
@@ -67,7 +87,9 @@ class CodePreflightResult:
         if self.warnings:
             lines.append("Warnings:")
             lines.extend(f"- {warning}" for warning in self.warnings)
-        if self.suggested_next_step:
+        if self.action:
+            lines.append(f"Action: {self.action.get('description', '')}")
+        elif self.suggested_next_step:
             lines.append(f"Required next step: {self.suggested_next_step}")
         return "\n".join(lines)
 
@@ -76,11 +98,124 @@ def code_preflight_enabled() -> bool:
     return os.environ.get(CODE_PREFLIGHT_ENV_VAR, "1").strip().lower() not in _DISABLED_VALUES
 
 
+# ═══════════════════════════════════════════════════════════════════
+# L0: Hash-based smoke cache — solves findings 2/4/5
+# ═══════════════════════════════════════════════════════════════════
+
+
+@dataclass
+class SmokeCacheEntry:
+    passed: bool
+    timestamp: float = field(default_factory=time.time)
+    smoke_function_found: bool = False
+    smoke_function_name: str = ""
+
+
+class SmokeCache:
+    """In-memory cache of code_hash → preflight smoke result.
+
+    Lives for the session lifetime.  A hash hit means we skip re-parsing
+    the AST and re-running file/CSV/smoke checks for previously-seen code.
+
+    Thread-safe for the single-threaded agent loop.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[str, SmokeCacheEntry] = {}
+
+    @staticmethod
+    def hash_code(code: str) -> str:
+        """Semantic hash of code — stable when smoke-checked markers change.
+
+        Strips assignments to SMOKE_CHECKED / SMOKE_TEST_PASSED /
+        PREFLIGHT_SMOKE_CHECKED before hashing, so that an agent adding
+        ``SMOKE_CHECKED = True`` does not invalidate the cache.
+
+        Falls back to raw text hash when AST parsing fails (shell/non-Python).
+        """
+        try:
+            tree = ast.parse(code or "")
+            cleaned = _strip_smoke_assignments(tree)
+            normalized = ast.unparse(cleaned)
+            return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        except Exception:
+            return hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()
+
+    def get(self, code_hash: str) -> SmokeCacheEntry | None:
+        return self._entries.get(code_hash)
+
+    def put(self, code_hash: str, entry: SmokeCacheEntry) -> None:
+        self._entries[code_hash] = entry
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+
+# Module-level singleton for ga.py call site to use without plumbing.
+_smoke_cache: SmokeCache | None = None
+
+
+def get_smoke_cache() -> SmokeCache:
+    global _smoke_cache
+    if _smoke_cache is None:
+        _smoke_cache = SmokeCache()
+    return _smoke_cache
+
+
+def reset_smoke_cache() -> None:
+    global _smoke_cache
+    _smoke_cache = None
+
+
+# ═══════════════════════════════════════════════════════════════════
+# L1: Structured smoke protocol — detects ``def smoke():`` in AST
+# ═══════════════════════════════════════════════════════════════════
+
+
+_SMOKE_FUNCTION_NAMES = frozenset({"smoke", "smoke_test", "minimal_smoke", "smoke_check"})
+
+
+def _strip_smoke_assignments(tree: ast.AST) -> ast.AST:
+    """Return a copy of *tree* with smoke-checked marker assignments removed.
+
+    Strips top-level assignments to SMOKE_CHECKED, SMOKE_TEST_PASSED,
+    and PREFLIGHT_SMOKE_CHECKED so the semantic hash is stable when
+    an agent marks smoke as passed.
+    """
+
+    class SmokeStripper(ast.NodeTransformer):
+        def visit_Assign(self, node):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in _SMOKE_CHECKED_NAMES:
+                    return None  # remove this node
+            return node
+
+        def visit_AnnAssign(self, node):
+            if isinstance(node.target, ast.Name) and node.target.id in _SMOKE_CHECKED_NAMES:
+                return None
+            return node
+
+    return SmokeStripper().visit(tree)
+
+
+def _detect_smoke_function(tree: ast.AST) -> tuple[bool, str]:
+    """Return (found, function_name) if a smoke entry point exists in the AST."""
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name in _SMOKE_FUNCTION_NAMES:
+                return True, node.name
+    return False, ""
+
+
 def evaluate_code_run_preflight(
     code: str,
     code_type: str,
     cwd: str,
     args: dict[str, Any] | None = None,
+    smoke_cache: SmokeCache | None = None,
 ) -> CodePreflightResult:
     args = args or {}
     if not code_preflight_enabled():
@@ -121,6 +256,35 @@ def evaluate_code_run_preflight(
             warnings=[f"non_python_code_type:{code_type}"],
         )
 
+    # ── L0: hash cache lookup ──────────────────────────────────────
+    code_hash = SmokeCache.hash_code(code) if smoke_cache is not None else ""
+    if smoke_cache is not None and code_hash:
+        cached = smoke_cache.get(code_hash)
+        if cached is not None and cached.passed:
+            return CodePreflightResult(
+                allowed=True,
+                checks={**checks, "smoke_check": True, "cached": True},
+                blocked_reasons=[],
+                warnings=[],
+                suggested_next_step="",
+            )
+        if cached is not None and not cached.passed:
+            # Previously failed — enforce smoke unless code has changed
+            checks["smoke_check"] = False
+            hint = "smoke check previously failed for this exact code; fix the script or run a smoke test first"
+            if cached.smoke_function_found:
+                hint += (
+                    f"; a smoke entry point `{cached.smoke_function_name}()` "
+                    f"was detected — call it with a minimal test case"
+                )
+            return CodePreflightResult(
+                allowed=False,
+                checks=checks,
+                blocked_reasons=[f"cached_smoke_failure: {hint}"],
+                warnings=[],
+                suggested_next_step=hint,
+            )
+
     try:
         tree = ast.parse(code or "")
     except SyntaxError as exc:
@@ -138,7 +302,10 @@ def evaluate_code_run_preflight(
             ),
         )
 
-    manifest_files, column_manifest_values, manifest_requires_smoke, manifest_smoke_checked = _extract_manifests(tree)
+    # ── L1: detect smoke function entry point ──────────────────────
+    smoke_fn_found, smoke_fn_name = _detect_smoke_function(tree)
+
+    manifest_files, column_manifest_values, manifest_requires_smoke, manifest_smoke_checked, smoke_policy = _extract_manifests(tree)
     inferred_csv_files, inferred_column_contracts = _infer_pandas_csv_contracts(tree)
 
     required_files = set(manifest_files)
@@ -159,6 +326,11 @@ def evaluate_code_run_preflight(
         checks["csv_columns"] = False
         blocked_reasons.extend(column_failures)
 
+    # ── P3: args can override policy ──
+    policy_override = args.get("smoke_policy")
+    if policy_override is not None and isinstance(policy_override, str):
+        smoke_policy = SmokePolicy.from_value(policy_override)
+
     requires_smoke = (
         _truthy(args.get("requires_smoke"))
         or _truthy(args.get("full_run"))
@@ -169,17 +341,65 @@ def evaluate_code_run_preflight(
         or _truthy(args.get("smoke_passed"))
         or manifest_smoke_checked
     )
-    if requires_smoke and not smoke_checked:
-        checks["smoke_check"] = False
-        blocked_reasons.append("missing_smoke_check: full or risky run requires a passed smoke/minimal check first")
 
-    return CodePreflightResult(
+    # In OFF/WARN mode smoke is not enforced, so treat as "passed" for caching.
+    # Only REQUIRE mode with unchecked smoke counts as "not passed".
+    smoke_passed = (
+        smoke_policy in (SmokePolicy.OFF, SmokePolicy.WARN)
+        or smoke_checked
+        or not requires_smoke
+    )
+
+    smoke_action: dict | None = None
+    if requires_smoke and not smoke_checked:
+        if smoke_policy == SmokePolicy.OFF:
+            pass  # skip smoke entirely
+        elif smoke_policy == SmokePolicy.WARN:
+            checks["smoke_check"] = False
+            warnings.append(
+                "smoke_warning: smoke check recommended but not enforced "
+                f"(SMOKE_POLICY={smoke_policy})"
+            )
+        else:  # REQUIRE (default)
+            checks["smoke_check"] = False
+            reason = "missing_smoke_check: full or risky run requires a passed smoke/minimal check first"
+            if smoke_fn_found:
+                reason += (
+                    f"; smoke entry point `{smoke_fn_name}()` detected — "
+                    f"run it via code_run with args={{smoke: True}} to satisfy this check"
+                )
+                smoke_action = {
+                    "type": "run_smoke",
+                    "function": smoke_fn_name,
+                    "description": (
+                        f"Run `{smoke_fn_name}()` as a minimal smoke test. "
+                        f"Call code_run with args={{smoke: True}} to execute only the smoke function. "
+                        f"Once smoke passes, the full script will be allowed."
+                    ),
+                }
+            blocked_reasons.append(reason)
+
+    result = CodePreflightResult(
         allowed=not blocked_reasons,
         checks=checks,
         blocked_reasons=blocked_reasons,
         warnings=warnings,
-        suggested_next_step=_suggest_next_step(blocked_reasons),
+        suggested_next_step=_suggest_next_step(blocked_reasons, smoke_fn_found, smoke_fn_name),
+        action=smoke_action,
     )
+
+    # ── L0: cache the result ──────────────────────────────────────
+    if smoke_cache is not None and code_hash:
+        smoke_cache.put(
+            code_hash,
+            SmokeCacheEntry(
+                passed=smoke_passed,
+                smoke_function_found=smoke_fn_found,
+                smoke_function_name=smoke_fn_name,
+            ),
+        )
+
+    return result
 
 
 def _normalize_code_type(code_type: str) -> str:
@@ -197,11 +417,12 @@ def _check_shell_policy(code: str) -> list[str]:
     return failures
 
 
-def _extract_manifests(tree: ast.AST) -> tuple[set[str], list[Any], bool, bool]:
+def _extract_manifests(tree: ast.AST) -> tuple[set[str], list[Any], bool, bool, str]:
     required_files: set[str] = set()
     column_manifest_values: list[Any] = []
     requires_smoke = False
     smoke_checked = False
+    smoke_policy = SmokePolicy.REQUIRE  # default
 
     for name, value in _iter_literal_assignments(tree):
         if name in _FILE_MANIFEST_NAMES:
@@ -212,8 +433,10 @@ def _extract_manifests(tree: ast.AST) -> tuple[set[str], list[Any], bool, bool]:
             requires_smoke = requires_smoke or _truthy(value)
         elif name in _SMOKE_CHECKED_NAMES:
             smoke_checked = smoke_checked or _truthy(value)
+        elif name in _SMOKE_POLICY_NAMES:
+            smoke_policy = SmokePolicy.from_value(value)
 
-    return required_files, column_manifest_values, requires_smoke, smoke_checked
+    return required_files, column_manifest_values, requires_smoke, smoke_checked, smoke_policy
 
 
 def _iter_literal_assignments(tree: ast.AST):
@@ -395,15 +618,30 @@ def _truthy(value: Any) -> bool:
     return False
 
 
-def _suggest_next_step(blocked_reasons: list[str]) -> str:
+def _suggest_next_step(
+    blocked_reasons: list[str],
+    smoke_fn_found: bool = False,
+    smoke_fn_name: str = "",
+) -> str:
     if not blocked_reasons:
         return ""
     if any(reason.startswith("syntax_error") for reason in blocked_reasons):
         return "fix syntax and run a compile/py_compile check before any full execution"
     if any(reason.startswith("missing_required_file") for reason in blocked_reasons):
         return "create the required input file or correct cwd/path before rerunning"
+    if any(reason.startswith("cached_smoke_failure") for reason in blocked_reasons):
+        return "this exact code previously failed smoke; fix the script or run a verified smoke test"
     if any("csv" in reason or "columns" in reason for reason in blocked_reasons):
         return "inspect the CSV header, align the feature names, then rerun a small smoke case"
     if any("smoke" in reason for reason in blocked_reasons):
-        return "run a minimal smoke test first; set SMOKE_CHECKED=True only after it passes"
+        if smoke_fn_found:
+            return (
+                f"run `{smoke_fn_name}()` as a minimal smoke test first; "
+                f"use code_run with args={{smoke: True}} to invoke only the smoke function, "
+                f"then set SMOKE_CHECKED=True once it passes"
+            )
+        return (
+            "run a minimal smoke test first (e.g. with reduced data/iterations); "
+            "set SMOKE_CHECKED=True only after it passes"
+        )
     return "resolve the listed preflight failures before rerunning code_run"

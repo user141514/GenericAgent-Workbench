@@ -189,8 +189,9 @@ def _strip_smoke_assignments(tree: ast.AST) -> ast.AST:
     class SmokeStripper(ast.NodeTransformer):
         def visit_Assign(self, node):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id in _SMOKE_CHECKED_NAMES:
-                    return None  # remove this node
+                names = _assigned_names(target)
+                if all(n in _SMOKE_CHECKED_NAMES for n in names if n):
+                    return None  # all targets are smoke markers → strip entire assignment
             return node
 
         def visit_AnnAssign(self, node):
@@ -342,7 +343,13 @@ def evaluate_code_run_preflight(
         or manifest_smoke_checked
     )
 
-    smoke_passed = not (requires_smoke and not smoke_checked)
+    # In OFF/WARN mode smoke is not enforced, so treat as "passed" for caching.
+    # Only REQUIRE mode with unchecked smoke counts as "not passed".
+    smoke_passed = (
+        smoke_policy in (SmokePolicy.OFF, SmokePolicy.WARN)
+        or smoke_checked
+        or not requires_smoke
+    )
 
     smoke_action: dict | None = None
     if requires_smoke and not smoke_checked:

@@ -27,7 +27,7 @@ from .runtime.clarification_gate import (
     emit_clarification_allowed,
     emit_clarification_denied,
 )
-from .runtime.code_preflight import evaluate_code_run_preflight
+from .runtime.code_preflight import evaluate_code_run_preflight, get_smoke_cache
 from .runtime.path_safety import ToolPathResult, resolve_tool_path
 from .runtime.web_tool_errors import enrich_web_tool_result, web_tool_failure_prompt
 
@@ -792,7 +792,10 @@ class GenericAgentHandler(BaseHandler):
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
         else:
-            preflight = evaluate_code_run_preflight(code, code_type, cwd, args)
+            preflight = evaluate_code_run_preflight(
+                code, code_type, cwd, args,
+                smoke_cache=get_smoke_cache(),
+            )
             profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
             if profiler is not None:
                 try:
@@ -817,11 +820,17 @@ class GenericAgentHandler(BaseHandler):
                 result = preflight.to_tool_message()
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         if 'preflight' in locals() and not preflight.allowed:
-            next_prompt += (
-                "\n[CODE PREFLIGHT]\n"
-                "The previous code_run was blocked before execution. Do not claim the code ran. "
-                "Fix the listed syntax, input file, CSV schema, or smoke-check issue first; then rerun a minimal check before any full experiment."
-            )
+            next_prompt += "\n[CODE PREFLIGHT]\n"
+            if preflight.action:
+                next_prompt += (
+                    f"ACTION REQUIRED: {preflight.action.get('description', '')}\n"
+                    f"Execute this action first, then retry the full script."
+                )
+            else:
+                next_prompt += (
+                    "The previous code_run was blocked before execution. Do not claim the code ran. "
+                    "Fix the listed syntax, input file, CSV schema, or smoke-check issue first; then rerun a minimal check before any full experiment."
+                )
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_ask_user(self, args, response):
