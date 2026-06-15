@@ -56,9 +56,6 @@ class RuntimeEventMapper:
     # ── turn lifecycle ──────────────────────────────────────────────────
 
     def on_turn_start(self, turn: int, source: str = "", task_id: str = "") -> None:
-        # ── HookBus: turn.start ──
-        from core.hook_bus import HookBus
-        HookBus.global_instance().emit("turn.start", {"turn": turn, "source": source, "task_id": task_id})
         if self._host is None:
             return
         state = self._host._require_session()
@@ -69,9 +66,6 @@ class RuntimeEventMapper:
         )
 
     def on_turn_end(self, turn: int, source: str = "", task_id: str = "") -> None:
-        # ── HookBus: turn.end ──
-        from core.hook_bus import HookBus
-        HookBus.global_instance().emit("turn.end", {"turn": turn, "source": source, "task_id": task_id})
         if self._host is None:
             return
         self._host._append(
@@ -97,17 +91,11 @@ class RuntimeEventMapper:
     # ── terminal events ─────────────────────────────────────────────────
 
     def on_error(self, error_message: str) -> None:
-        # ── HookBus: session.end (error) ──
-        from core.hook_bus import HookBus
-        HookBus.global_instance().emit("session.end", {"error": error_message, "status": "error"})
         if self._host is None:
             return
         self._host.fail_session(error=error_message)
 
     def on_done(self, summary: str = "") -> None:
-        # ── HookBus: session.end (done) ──
-        from core.hook_bus import HookBus
-        HookBus.global_instance().emit("session.end", {"summary": summary, "status": "done"})
         if self._host is None:
             return
         self._host.complete_session(
@@ -115,9 +103,6 @@ class RuntimeEventMapper:
         )
 
     def on_stop_requested(self) -> None:
-        # ── HookBus: stop ──
-        from core.hook_bus import HookBus
-        HookBus.global_instance().emit("stop", {"reason": "user_requested"})
         if self._host is None:
             return
         self._host.request_stop(reason="user_requested")

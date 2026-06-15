@@ -4,11 +4,9 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from .hook_bus import HookBus as _HookBus
 from .runtime import (
     direct_answer_enabled,
     early_stop_enabled,
-    orchestrator_enabled,
     should_stop_classic_executor,
     try_direct_answer_from_tool_result,
 )
@@ -370,9 +368,6 @@ def _maybe_apply_early_stop(client, handler, response, tool_calls, tool_results,
 
 
 def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, max_turns=80, verbose=True, initial_user_content=None, stop_event=None, runtime_mapper=None, formatter=None, turn_gap=0.0):
-    # ── HookBus: get singleton for event emission ──
-    _bus = _HookBus.global_instance()
-
     # ── Formatter: backward-compat construction from verbose flag ──
     if formatter is None:
         if verbose:
@@ -416,8 +411,6 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
         # ── Runtime: emit turn_start event ──
         if runtime_mapper is not None:
             runtime_mapper.on_turn_start(turn)
-        # ── HookBus: turn.start ──
-        _bus.emit("turn.start", {"turn": turn, "max_turns": handler.max_turns}, source=__name__)
         with _profile_span(profiler, f"agent_turn_{turn}", kind="agent", metadata={"turn": turn}):
             status_payload = {
                 "type": "status",
@@ -505,12 +498,6 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                 tool_args_chars = _tool_args_chars(args)
                 if runtime_mapper is not None:
                     runtime_mapper.on_tool_requested(tool_name, args)
-                # ── HookBus: tool.pre_execute ──
-                _bus.emit(
-                    "tool.pre_execute",
-                    {"tool_name": tool_name, "args": dict(args), "turn": turn, "index": ii},
-                    source=__name__,
-                )
                 if tool_name != "no_tool":
                     yield formatter.format_tool_call(tool_name, args)
                 _ledger = getattr(handler, "_tool_event_ledger", None)
@@ -526,68 +513,49 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         )
                     except Exception:
                         _ledger_event_id = ""
-                # ── ToolOrchestrator: pre-dispatch pipeline check ──
-                _orchestrator_blocked = False
-                _orchestrator_reason = ""
-                _orchestrator_yields: list[str] = []
-                if orchestrator_enabled():
-                    from .runtime.tool_orchestrator import ToolOrchestrator
-                    _orch = ToolOrchestrator(handler)
-                    _orchestrator_blocked, _orchestrator_reason, _orchestrator_yields = (
-                        _orch.pre_check(tool_name, args, index=ii)
-                    )
-                    for _line in _orchestrator_yields:
-                        yield _line
-                if _orchestrator_blocked:
-                    outcome = StepOutcome(
-                        None,
-                        next_prompt=f"Tool {tool_name} blocked: {_orchestrator_reason}",
-                        should_exit=False,
-                    )
-                else:
-                    with _profile_span(
-                        profiler,
-                        f"tool_call:{tool_name}",
-                        kind="tool",
-                        metadata={
-                            "turn": turn,
-                            "tool": tool_name,
-                            "index": ii,
-                            "tool_args_summary": tool_args_summary or None,
-                            "tool_target_path": tool_target_path,
-                            "tool_args_chars": tool_args_chars,
-                        },
-                    ):
-                        gen = handler.dispatch(tool_name, args, response, index=ii)
-                        try:
-                            first_value = next(gen)
+                with _profile_span(
+                    profiler,
+                    f"tool_call:{tool_name}",
+                    kind="tool",
+                    metadata={
+                        "turn": turn,
+                        "tool": tool_name,
+                        "index": ii,
+                        "tool_args_summary": tool_args_summary or None,
+                        "tool_target_path": tool_target_path,
+                        "tool_args_chars": tool_args_chars,
+                    },
+                ):
+                    gen = handler.dispatch(tool_name, args, response, index=ii)
+                    try:
+                        first_value = next(gen)
 
-                            def proxy():
-                                yield first_value
-                                if _stopped():
-                                    return None
-                                return (yield from gen)
+                        def proxy():
+                            yield first_value
+                            if _stopped():
+                                return None
+                            return (yield from gen)
 
-                            if formatter.is_verbose():
-                                yield "`````\n"
-                            outcome = (yield from proxy()) if formatter.is_verbose() else exhaust(proxy())
-                            if formatter.is_verbose():
-                                yield "`````\n"
-                        except StopIteration as e:
-                            outcome = e.value
-                        except BaseException as e:
-                            if _ledger is not None and _ledger_event_id:
-                                try:
-                                    _ledger.complete_call(
-                                        event_id=_ledger_event_id,
-                                        result=f"{type(e).__name__}: {e}",
-                                        status="error",
-                                        result_chars=len(str(e)),
-                                        error_like=True,
-                                    )
-                                except Exception:
-                                    pass
-                            raise
+                        if formatter.is_verbose():
+                            yield "`````\n"
+                        outcome = (yield from proxy()) if formatter.is_verbose() else exhaust(proxy())
+                        if formatter.is_verbose():
+                            yield "`````\n"
+                    except StopIteration as e:
+                        outcome = e.value
+                    except BaseException as e:
+                        if _ledger is not None and _ledger_event_id:
+                            try:
+                                _ledger.complete_call(
+                                    event_id=_ledger_event_id,
+                                    result=f"{type(e).__name__}: {e}",
+                                    status="error",
+                                    result_chars=len(str(e)),
+                                    error_like=True,
+                                )
+                            except Exception:
+                                pass
+                        raise
 
                 if profiler is not None:
                     try:
@@ -612,18 +580,6 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                         tool_name,
                         outcome_text[:200] if outcome_text else "",
                     )
-                # ── HookBus: tool.post_execute ──
-                _bus.emit(
-                    "tool.post_execute",
-                    {
-                        "tool_name": tool_name,
-                        "args": dict(args),
-                        "turn": turn,
-                        "index": ii,
-                        "outcome": outcome,
-                    },
-                    source=__name__,
-                )
 
                 # ── M7: Tool Event Ledger recording hook ──
                 # Minimal, gated, non-blocking. Records executed facts only.
@@ -688,19 +644,13 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
             if exit_reason:
                 break
             if len(next_prompts) == 0:
-                # ── HookBus: stop event (replaces _done_hooks) ──
-                stop_results = _bus.emit("stop", {"turn": turn}, source=__name__)
-                blocked = any(r.block for r in stop_results)
-                if not blocked and len(handler._done_hooks) == 0:
+                if len(handler._done_hooks) == 0:
                     break
-                if not blocked and handler._done_hooks:
-                    next_prompts.add(handler._done_hooks.pop(0))
+                next_prompts.add(handler._done_hooks.pop(0))
 
             # ── Runtime: emit turn_end event ──
             if runtime_mapper is not None:
                 runtime_mapper.on_turn_end(turn)
-            # ── HookBus: turn.end ──
-            _bus.emit("turn.end", {"turn": turn, "exit_reason": exit_reason}, source=__name__)
             with _profile_span(profiler, f"frontend_turn_gap_{turn}", kind="frontend", metadata={"turn": turn}):
                 if turn_gap > 0:
                     time.sleep(turn_gap)
