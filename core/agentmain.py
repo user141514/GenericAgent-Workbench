@@ -18,6 +18,7 @@ sys.path.append(PROJECT_ROOT)
 from .llmcore import LLMSession, ToolClient, ClaudeSession, MixinSession, NativeToolClient, NativeClaudeSession, NativeOAISession
 from .agent_loop import agent_runner_loop
 from .ga import GenericAgentHandler, consume_file, file_read, format_error, get_global_memory, smart_format
+from .hook_bus import HookBus as _HookBus
 from .runtime import (
     RuntimeProfiler,
     build_profile_path,
@@ -591,6 +592,9 @@ class GeneraticAgent(AgentBackend):
             self._running = True
             self._profile_status = 'success'
             self._profile_run_id = run_id
+            # ── HookBus: session.start ──
+            _bus = _HookBus.global_instance()
+            _bus.emit("session.start", {"run_id": run_id, "source": source}, source=__name__)
             self._active_display_queue = display_queue
             self._active_source = source
             self._current_user_input = raw_query
@@ -826,6 +830,9 @@ class GeneraticAgent(AgentBackend):
                 self._running = False
                 self.stop_sig = False
                 self._stop_event = None
+                # ── HookBus: session.end ──
+                _bus = _HookBus.global_instance()
+                _bus.emit("session.end", {"run_id": run_id, "status": self._profile_status, "source": source}, source=__name__)
                 self.task_queue.task_done()
                 if self.handler is not None:
                     self.handler.code_stop_signal.append(1)

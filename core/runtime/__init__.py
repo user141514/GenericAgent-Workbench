@@ -82,6 +82,7 @@ from .read_shortcut import (
     detect_read_shortcut,
     read_shortcut_enabled,
 )
+from .tool_orchestrator import orchestrator_enabled
 from .session import RuntimeSessionState
 from .shared_store import Artifact, SharedArtifactStore
 from .state_machine import IllegalModeTransition, ModeStateMachine, mode_for_route
@@ -152,4 +153,5 @@ __all__ = [
     "IllegalModeTransition",
     "ModeStateMachine",
     "mode_for_route",
+    "orchestrator_enabled",
 ]
