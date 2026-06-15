@@ -27,7 +27,7 @@ from .runtime.clarification_gate import (
     emit_clarification_allowed,
     emit_clarification_denied,
 )
-from .runtime.code_preflight import evaluate_code_run_preflight
+from .runtime.code_preflight import evaluate_code_run_preflight, get_smoke_cache
 from .runtime.path_safety import ToolPathResult, resolve_tool_path
 from .runtime.web_tool_errors import enrich_web_tool_result, web_tool_failure_prompt
 
@@ -792,7 +792,10 @@ class GenericAgentHandler(BaseHandler):
                 except Exception as e: result = f'Error: {e}'
             finally: os.chdir(old_cwd)
         else:
-            preflight = evaluate_code_run_preflight(code, code_type, cwd, args)
+            preflight = evaluate_code_run_preflight(
+                code, code_type, cwd, args,
+                smoke_cache=get_smoke_cache(),
+            )
             profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
             if profiler is not None:
                 try:

@@ -12,8 +12,12 @@ from .clarification_gate import (
 from .code_preflight import (
     CODE_PREFLIGHT_ENV_VAR,
     CodePreflightResult,
+    SmokeCache,
+    SmokeCacheEntry,
     code_preflight_enabled,
     evaluate_code_run_preflight,
+    get_smoke_cache,
+    reset_smoke_cache,
 )
 from .direct_answer import (
     DIRECT_ANSWER_ENV_VAR,
@@ -99,6 +103,10 @@ __all__ = [
     "CACHE_ENV_VAR",
     "CODE_PREFLIGHT_ENV_VAR",
     "CodePreflightResult",
+    "SmokeCache",
+    "SmokeCacheEntry",
+    "get_smoke_cache",
+    "reset_smoke_cache",
     "TOOL_PATH_ALLOW_SENSITIVE_ENV_VAR",
     "TOOL_PATH_GUARD_ENV_VAR",
     "ToolPathResult",
