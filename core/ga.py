@@ -820,11 +820,17 @@ class GenericAgentHandler(BaseHandler):
                 result = preflight.to_tool_message()
         next_prompt = self._get_anchor_prompt(skip=args.get('_index', 0) > 0)
         if 'preflight' in locals() and not preflight.allowed:
-            next_prompt += (
-                "\n[CODE PREFLIGHT]\n"
-                "The previous code_run was blocked before execution. Do not claim the code ran. "
-                "Fix the listed syntax, input file, CSV schema, or smoke-check issue first; then rerun a minimal check before any full experiment."
-            )
+            next_prompt += "\n[CODE PREFLIGHT]\n"
+            if preflight.action:
+                next_prompt += (
+                    f"ACTION REQUIRED: {preflight.action.get('description', '')}\n"
+                    f"Execute this action first, then retry the full script."
+                )
+            else:
+                next_prompt += (
+                    "The previous code_run was blocked before execution. Do not claim the code ran. "
+                    "Fix the listed syntax, input file, CSV schema, or smoke-check issue first; then rerun a minimal check before any full experiment."
+                )
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_ask_user(self, args, response):

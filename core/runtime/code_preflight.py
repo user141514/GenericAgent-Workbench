@@ -34,6 +34,23 @@ _SMOKE_CHECKED_NAMES = {
     "SMOKE_TEST_PASSED",
     "PREFLIGHT_SMOKE_CHECKED",
 }
+_SMOKE_POLICY_NAMES = {
+    "SMOKE_POLICY",
+}
+
+# P3: Three-state smoke enforcement
+class SmokePolicy:
+    OFF = "off"          # skip smoke check entirely
+    WARN = "warn"        # smoke required but not checked → warning, allow
+    REQUIRE = "require"  # smoke required but not checked → block (default)
+
+    @classmethod
+    def from_value(cls, value) -> str:
+        if isinstance(value, str):
+            v = value.strip().lower()
+            if v in ("off", "warn", "require"):
+                return v
+        return cls.REQUIRE  # default
 _DESTRUCTIVE_SHELL_PATTERNS = (
     r"\brm\s+-rf\b",
     r"\bRemove-Item\b(?=.*-Recurse\b)(?=.*-Force\b)",
@@ -55,6 +72,7 @@ class CodePreflightResult:
     blocked_reasons: list[str]
     warnings: list[str]
     suggested_next_step: str = ""
+    action: dict | None = None  # P2: structured smoke action, e.g. {"type":"run_smoke","function":"smoke"}
 
     def to_tool_message(self) -> str:
         if self.allowed:
@@ -69,7 +87,9 @@ class CodePreflightResult:
         if self.warnings:
             lines.append("Warnings:")
             lines.extend(f"- {warning}" for warning in self.warnings)
-        if self.suggested_next_step:
+        if self.action:
+            lines.append(f"Action: {self.action.get('description', '')}")
+        elif self.suggested_next_step:
             lines.append(f"Required next step: {self.suggested_next_step}")
         return "\n".join(lines)
 
@@ -105,7 +125,21 @@ class SmokeCache:
 
     @staticmethod
     def hash_code(code: str) -> str:
-        return hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()
+        """Semantic hash of code — stable when smoke-checked markers change.
+
+        Strips assignments to SMOKE_CHECKED / SMOKE_TEST_PASSED /
+        PREFLIGHT_SMOKE_CHECKED before hashing, so that an agent adding
+        ``SMOKE_CHECKED = True`` does not invalidate the cache.
+
+        Falls back to raw text hash when AST parsing fails (shell/non-Python).
+        """
+        try:
+            tree = ast.parse(code or "")
+            cleaned = _strip_smoke_assignments(tree)
+            normalized = ast.unparse(cleaned)
+            return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+        except Exception:
+            return hashlib.sha256(code.encode("utf-8", errors="replace")).hexdigest()
 
     def get(self, code_hash: str) -> SmokeCacheEntry | None:
         return self._entries.get(code_hash)
@@ -142,6 +176,29 @@ def reset_smoke_cache() -> None:
 
 
 _SMOKE_FUNCTION_NAMES = frozenset({"smoke", "smoke_test", "minimal_smoke", "smoke_check"})
+
+
+def _strip_smoke_assignments(tree: ast.AST) -> ast.AST:
+    """Return a copy of *tree* with smoke-checked marker assignments removed.
+
+    Strips top-level assignments to SMOKE_CHECKED, SMOKE_TEST_PASSED,
+    and PREFLIGHT_SMOKE_CHECKED so the semantic hash is stable when
+    an agent marks smoke as passed.
+    """
+
+    class SmokeStripper(ast.NodeTransformer):
+        def visit_Assign(self, node):
+            for target in node.targets:
+                if isinstance(target, ast.Name) and target.id in _SMOKE_CHECKED_NAMES:
+                    return None  # remove this node
+            return node
+
+        def visit_AnnAssign(self, node):
+            if isinstance(node.target, ast.Name) and node.target.id in _SMOKE_CHECKED_NAMES:
+                return None
+            return node
+
+    return SmokeStripper().visit(tree)
 
 
 def _detect_smoke_function(tree: ast.AST) -> tuple[bool, str]:
@@ -248,7 +305,7 @@ def evaluate_code_run_preflight(
     # ── L1: detect smoke function entry point ──────────────────────
     smoke_fn_found, smoke_fn_name = _detect_smoke_function(tree)
 
-    manifest_files, column_manifest_values, manifest_requires_smoke, manifest_smoke_checked = _extract_manifests(tree)
+    manifest_files, column_manifest_values, manifest_requires_smoke, manifest_smoke_checked, smoke_policy = _extract_manifests(tree)
     inferred_csv_files, inferred_column_contracts = _infer_pandas_csv_contracts(tree)
 
     required_files = set(manifest_files)
@@ -269,6 +326,11 @@ def evaluate_code_run_preflight(
         checks["csv_columns"] = False
         blocked_reasons.extend(column_failures)
 
+    # ── P3: args can override policy ──
+    policy_override = args.get("smoke_policy")
+    if policy_override is not None and isinstance(policy_override, str):
+        smoke_policy = SmokePolicy.from_value(policy_override)
+
     requires_smoke = (
         _truthy(args.get("requires_smoke"))
         or _truthy(args.get("full_run"))
@@ -282,15 +344,34 @@ def evaluate_code_run_preflight(
 
     smoke_passed = not (requires_smoke and not smoke_checked)
 
+    smoke_action: dict | None = None
     if requires_smoke and not smoke_checked:
-        checks["smoke_check"] = False
-        reason = "missing_smoke_check: full or risky run requires a passed smoke/minimal check first"
-        if smoke_fn_found:
-            reason += (
-                f"; smoke entry point `{smoke_fn_name}()` detected — "
-                f"run it via code_run with args={{smoke: True}} to satisfy this check"
+        if smoke_policy == SmokePolicy.OFF:
+            pass  # skip smoke entirely
+        elif smoke_policy == SmokePolicy.WARN:
+            checks["smoke_check"] = False
+            warnings.append(
+                "smoke_warning: smoke check recommended but not enforced "
+                f"(SMOKE_POLICY={smoke_policy})"
             )
-        blocked_reasons.append(reason)
+        else:  # REQUIRE (default)
+            checks["smoke_check"] = False
+            reason = "missing_smoke_check: full or risky run requires a passed smoke/minimal check first"
+            if smoke_fn_found:
+                reason += (
+                    f"; smoke entry point `{smoke_fn_name}()` detected — "
+                    f"run it via code_run with args={{smoke: True}} to satisfy this check"
+                )
+                smoke_action = {
+                    "type": "run_smoke",
+                    "function": smoke_fn_name,
+                    "description": (
+                        f"Run `{smoke_fn_name}()` as a minimal smoke test. "
+                        f"Call code_run with args={{smoke: True}} to execute only the smoke function. "
+                        f"Once smoke passes, the full script will be allowed."
+                    ),
+                }
+            blocked_reasons.append(reason)
 
     result = CodePreflightResult(
         allowed=not blocked_reasons,
@@ -298,6 +379,7 @@ def evaluate_code_run_preflight(
         blocked_reasons=blocked_reasons,
         warnings=warnings,
         suggested_next_step=_suggest_next_step(blocked_reasons, smoke_fn_found, smoke_fn_name),
+        action=smoke_action,
     )
 
     # ── L0: cache the result ──────────────────────────────────────
@@ -329,11 +411,12 @@ def _check_shell_policy(code: str) -> list[str]:
     return failures
 
 
-def _extract_manifests(tree: ast.AST) -> tuple[set[str], list[Any], bool, bool]:
+def _extract_manifests(tree: ast.AST) -> tuple[set[str], list[Any], bool, bool, str]:
     required_files: set[str] = set()
     column_manifest_values: list[Any] = []
     requires_smoke = False
     smoke_checked = False
+    smoke_policy = SmokePolicy.REQUIRE  # default
 
     for name, value in _iter_literal_assignments(tree):
         if name in _FILE_MANIFEST_NAMES:
@@ -344,8 +427,10 @@ def _extract_manifests(tree: ast.AST) -> tuple[set[str], list[Any], bool, bool]:
             requires_smoke = requires_smoke or _truthy(value)
         elif name in _SMOKE_CHECKED_NAMES:
             smoke_checked = smoke_checked or _truthy(value)
+        elif name in _SMOKE_POLICY_NAMES:
+            smoke_policy = SmokePolicy.from_value(value)
 
-    return required_files, column_manifest_values, requires_smoke, smoke_checked
+    return required_files, column_manifest_values, requires_smoke, smoke_checked, smoke_policy
 
 
 def _iter_literal_assignments(tree: ast.AST):

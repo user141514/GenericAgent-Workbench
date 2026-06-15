@@ -165,6 +165,43 @@ class TestSmokeCache:
         h2 = SmokeCache.hash_code("print(2)")
         assert h1 != h2
 
+    # ── P1: Semantic hash — smoke markers don't change hash ──
+
+    def test_hash_stable_when_smoke_checked_added(self):
+        """Adding SMOKE_CHECKED = True should not change semantic hash."""
+        base = "REQUIRES_SMOKE = True\nprint('heavy')\n"
+        with_check = "REQUIRES_SMOKE = True\nSMOKE_CHECKED = True\nprint('heavy')\n"
+        assert SmokeCache.hash_code(base) == SmokeCache.hash_code(with_check)
+
+    def test_hash_stable_when_smoke_test_passed_added(self):
+        base = "REQUIRES_SMOKE = True\nx = 1\n"
+        with_check = "REQUIRES_SMOKE = True\nSMOKE_TEST_PASSED = True\nx = 1\n"
+        assert SmokeCache.hash_code(base) == SmokeCache.hash_code(with_check)
+
+    def test_hash_stable_when_preflight_smoke_checked_added(self):
+        base = "REQUIRES_SMOKE = True\ny = 2\n"
+        with_check = "PREFLIGHT_SMOKE_CHECKED = True\nREQUIRES_SMOKE = True\ny = 2\n"
+        assert SmokeCache.hash_code(base) == SmokeCache.hash_code(with_check)
+
+    def test_hash_changes_when_logic_changes(self):
+        """Changing actual logic (not smoke markers) MUST change hash."""
+        h1 = SmokeCache.hash_code("REQUIRES_SMOKE = True\nprint('a')\n")
+        h2 = SmokeCache.hash_code("REQUIRES_SMOKE = True\nprint('b')\n")
+        assert h1 != h2
+
+    def test_hash_stable_with_different_comments(self):
+        """Comments and whitespace don't affect AST, so hash is stable."""
+        h1 = SmokeCache.hash_code("print(1)\n")
+        h2 = SmokeCache.hash_code("# comment\nprint(1)\n")
+        assert h1 == h2
+
+    def test_hash_fallback_on_non_python(self):
+        """Shell code falls back to raw text hash."""
+        h1 = SmokeCache.hash_code("rm -rf /tmp/*")
+        h2 = SmokeCache.hash_code("rm -rf /tmp/*")
+        assert h1 == h2
+        assert len(h1) == 64
+
     def test_put_and_get(self):
         c = SmokeCache()
         h = SmokeCache.hash_code("x = 1")
@@ -279,6 +316,41 @@ class TestSmokeFunctionDetection:
         result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
         assert result.allowed  # SMOKE_CHECKED set, function irrelevant
 
+    def test_action_field_when_smoke_detected(self, monkeypatch, tmp_path):
+        """P2: action field must be set when smoke function found + smoke required."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = (
+            "REQUIRES_SMOKE = True\n"
+            "def smoke():\n"
+            "    return True\n"
+            "print('main')\n"
+        )
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert not result.allowed
+        assert result.action is not None
+        assert result.action["type"] == "run_smoke"
+        assert result.action["function"] == "smoke"
+        assert "smoke()" in result.action["description"]
+
+    def test_no_action_without_smoke_function(self, monkeypatch, tmp_path):
+        """P2: no action when no def smoke() exists."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = "REQUIRES_SMOKE = True\nprint('heavy')\n"
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert not result.allowed
+        assert result.action is None  # no smoke function → no action
+
+    def test_action_in_to_tool_message(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = (
+            "REQUIRES_SMOKE = True\n"
+            "def smoke():\n"
+            "    pass\n"
+        )
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        msg = result.to_tool_message()
+        assert "Action:" in msg
+
 
 def test_smoke_cache_does_not_affect_no_cache_path(monkeypatch, tmp_path):
     """Backward compat: passing no cache should work exactly as before."""
@@ -289,3 +361,60 @@ def test_smoke_cache_does_not_affect_no_cache_path(monkeypatch, tmp_path):
     result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
     assert not result.allowed
     assert "cached" not in result.checks  # no cache metadata leaked
+
+
+# ═══════════════════════════════════════════════════════════════════
+# P3: Three-state smoke policy
+# ═══════════════════════════════════════════════════════════════════
+
+
+class TestSmokePolicy:
+    def test_policy_off_skips_smoke(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = 'SMOKE_POLICY = "off"\nREQUIRES_SMOKE = True\nprint("risky")\n'
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert result.allowed
+
+    def test_policy_warn_allows_with_warning(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = 'SMOKE_POLICY = "warn"\nREQUIRES_SMOKE = True\nprint("risky")\n'
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert result.allowed
+        assert any("smoke_warning" in w for w in result.warnings)
+
+    def test_policy_require_blocks(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = 'SMOKE_POLICY = "require"\nREQUIRES_SMOKE = True\nprint("risky")\n'
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert not result.allowed
+
+    def test_args_override_policy_to_off(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = 'SMOKE_POLICY = "require"\nprint("risky")\n'
+        result = evaluate_code_run_preflight(
+            code, "python", str(tmp_path), {"smoke_policy": "off"},
+        )
+        assert result.allowed
+
+    def test_args_override_policy_to_warn(self, monkeypatch, tmp_path):
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = 'SMOKE_POLICY = "require"\nREQUIRES_SMOKE = True\nprint("risky")\n'
+        result = evaluate_code_run_preflight(
+            code, "python", str(tmp_path), {"smoke_policy": "warn"},
+        )
+        assert result.allowed
+        assert any("smoke_warning" in w for w in result.warnings)
+
+    def test_backward_compat_requires_smoke_true(self, monkeypatch, tmp_path):
+        """Legacy REQUIRES_SMOKE = True without SMOKE_POLICY → REQUIRE (block)."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = "REQUIRES_SMOKE = True\nprint('risky')\n"
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert not result.allowed
+
+    def test_backward_compat_requires_smoke_false(self, monkeypatch, tmp_path):
+        """REQUIRES_SMOKE = False → no smoke needed, allowed."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = "REQUIRES_SMOKE = False\nprint('safe')\n"
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert result.allowed
