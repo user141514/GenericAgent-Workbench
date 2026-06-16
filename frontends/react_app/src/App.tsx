@@ -104,6 +104,17 @@ export default function App() {
     () => events.reduce((maxTurn, event) => (event.kind === "status" ? maxTurn : Math.max(maxTurn, event.turn || 0)), 0),
     [events],
   );
+  const thinkingByTurn = useMemo(() => {
+    const map = new Map<number, string[]>();
+    for (const e of events) {
+      if (e.kind === "thinking_block" && e.text) {
+        const arr = map.get(e.turn) || [];
+        arr.push(e.text);
+        map.set(e.turn, arr);
+      }
+    }
+    return map;
+  }, [events]);
   const traceMessageId = hasTurnTrace
     ? streamingAssistantId || (status === "idle" || status === "error" ? latestAssistantId : "")
     : "";
@@ -519,7 +530,7 @@ export default function App() {
               return (
                 <article key={message.id} className={`message message-${message.role}`}>
                   <div className="message-role">{message.role}</div>
-                  {showTraceHere && <TurnTraceList events={events} />}
+                  {showTraceHere && <TurnTraceList events={events} thinkingByTurn={thinkingByTurn} />}
                   {showFrontierHere && <FrontierStatePanel snapshot={frontierState} />}
                   {text && <MarkdownMessage role={message.role} text={text} />}
                   {showCopyHere && (
@@ -536,7 +547,7 @@ export default function App() {
           {needsLiveAssistantMessage && (
             <article className="message message-assistant message-live-trace">
               <div className="message-role">assistant</div>
-              {hasTurnTrace ? <TurnTraceList events={events} /> : <p>正在分析任务…</p>}
+              {hasTurnTrace ? <TurnTraceList events={events} thinkingByTurn={thinkingByTurn} /> : <p>正在分析任务…</p>}
               {frontierState?.enabled && <FrontierStatePanel snapshot={frontierState} />}
             </article>
           )}
