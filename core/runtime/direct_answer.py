@@ -31,22 +31,14 @@ _BANNED_ACTION_PHRASES = (
 )
 
 _BANNED_COMPLEX_PHRASES = (
+    # Only ban requests that genuinely require multi-step reasoning.
+    # Simple "read and show" requests with words like 分析/解释 are fine.
     "详细分析",
-    "复杂分析",
-    "架构分析",
     "架构审查",
-    "分析",
-    "解释",
     "优化",
     "重构",
-    "对比",
-    "找问题",
-    "执行流程",
-    "代码结构",
-    "架构",
-    "逻辑",
-    "review",
-    "审查",
+    "对比多个",
+    "对比两个",
     "多个文件",
     "多文件",
     "综合分析",
@@ -54,16 +46,11 @@ _BANNED_COMPLEX_PHRASES = (
     "完整内容",
     "whole file",
     "full file",
-    "analyze",
-    "analysis",
-    "explain",
     "optimize",
     "refactor",
-    "compare",
+    "compare multiple",
     "execution flow",
     "code structure",
-    "architecture",
-    "logic",
 )
 
 _READ_HINTS = (
@@ -90,11 +77,10 @@ _FIRST_LINE_HINTS = (
 )
 
 _SUMMARY_HINTS = (
-    "一句话",
     "一句话总结",
-    "项目定位",
+    "一句话概括",
+    "概括",
     "summary",
-    "定位",
 )
 
 _FIELD_HINTS = (
@@ -232,6 +218,10 @@ def _clean_view_block(text: str) -> str:
 
 
 def _extract_positioning_sentence(text: str, title: str | None) -> str | None:
+    """Extract a generic one-line project description from README text.
+
+    Returns a short positioning sentence, or None if nothing reliable found.
+    """
     clean_lines = [_strip_markup(line) for line in _meaningful_lines(text)]
     title_lower = _normalize(title)
     for line in clean_lines:
@@ -239,14 +229,12 @@ def _extract_positioning_sentence(text: str, title: str | None) -> str | None:
         normalized_line = lowered.lstrip("#").strip()
         if not lowered or normalized_line == title_lower:
             continue
-        if "multi-agent workbench" in lowered and "genericagent" in lowered and "built on top of" in lowered:
-            return f"《{title}》是一个基于 GenericAgent 构建的多智能体工作台。"
-        if "keep the classic genericagent executor" in lowered and title:
-            return f"《{title}》是一个在保留经典 GenericAgent 执行器基础上扩展工作流能力的多智能体工作台。"
-        if "multi-agent workbench" in lowered and title:
-            return f"《{title}》是一个多智能体工作台项目。"
-        if "genericagent" in lowered and "workbench" in lowered and title:
-            return f"《{title}》是一个围绕 GenericAgent 构建的工作台项目。"
+        # Generic pattern: "X is a Y built on top of Z" or "X is a Y workbench"
+        if title and any(phrase in lowered for phrase in (
+            "is a", "是一个", "built on top of", "基于",
+            "workbench", "工作台", "framework", "框架",
+        )):
+            return f"《{title}》是一个项目工作台/框架。"
     return None
 
 

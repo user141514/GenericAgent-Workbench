@@ -219,52 +219,62 @@ class TestSmokeCache:
         c.clear()
         assert len(c) == 0
 
+    def test_cache_version_default(self):
+        """SmokeCacheEntry defaults to current CACHE_VERSION."""
+        from core.runtime.code_preflight import CACHE_VERSION
+        entry = SmokeCacheEntry(passed=True)
+        assert entry.cache_version == CACHE_VERSION
+
+    def test_cache_version_stale_entry_ignored_by_caller(self):
+        """Caller should check cache_version before trusting cache."""
+        entry = SmokeCacheEntry(passed=True, cache_version=999)
+        from core.runtime.code_preflight import CACHE_VERSION
+        assert entry.cache_version != CACHE_VERSION
+        # The caller (ga.py) is responsible for rejecting stale entries
+
 
 class TestSmokeCacheIntegration:
-    """Tests that the cache actually changes preflight behavior."""
+    """Cache read/write moved to ga.py — preflight no longer uses cache."""
 
-    def test_cache_hit_skips_checks(self, monkeypatch, tmp_path):
+    def test_preflight_does_not_read_cache(self, monkeypatch, tmp_path):
+        """Passing a pre-populated cache to preflight must not change behavior."""
         monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
         cache = SmokeCache()
 
         smoke_code = "REQUIRES_SMOKE = True\nprint('heavy')\n"
         code_hash = SmokeCache.hash_code(smoke_code)
 
-        # First call: smoke required, not checked → blocked
-        result1 = evaluate_code_run_preflight(
+        # Pre-populate cache with passed=True — preflight must ignore it
+        cache.put(code_hash, SmokeCacheEntry(passed=True))
+
+        result = evaluate_code_run_preflight(
             smoke_code, "python", str(tmp_path), {}, smoke_cache=cache,
         )
-        assert not result1.allowed
-        assert not result1.checks["smoke_check"]
+        # smoke required, not checked → blocked, regardless of cache
+        assert not result.allowed
+        assert not result.checks["smoke_check"]
+        assert "cached" not in result.checks  # cache metadata must not leak
 
-        # Cache now has passed=False entry
-
-        # Second call with same code: cache hit → still blocked
-        result2 = evaluate_code_run_preflight(
-            smoke_code, "python", str(tmp_path), {}, smoke_cache=cache,
-        )
-        assert not result2.allowed
-        assert any("cached_smoke_failure" in r for r in result2.blocked_reasons)
-
-    def test_cache_passed_bypasses_checks(self, monkeypatch, tmp_path):
+    def test_preflight_does_not_write_cache(self, monkeypatch, tmp_path):
+        """Preflight must not populate the cache — ga.py owns cache writes."""
         monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
         cache = SmokeCache()
 
         clean_code = "print('hello')\n"
-        code_hash = SmokeCache.hash_code(clean_code)
-
-        # First call: no requires_smoke → allowed
-        result1 = evaluate_code_run_preflight(
+        evaluate_code_run_preflight(
             clean_code, "python", str(tmp_path), {}, smoke_cache=cache,
         )
-        assert result1.allowed
+        # Cache must remain empty — preflight no longer writes to it
+        assert len(cache) == 0
 
-        # Second call: cache hit with passed=True → skip AST entirely
-        result2 = evaluate_code_run_preflight(
-            clean_code, "python", str(tmp_path), {}, smoke_cache=cache,
-        )
-        assert result2.allowed
-        assert result2.checks.get("cached") is True
+    def test_preflight_still_works_without_cache(self, monkeypatch, tmp_path):
+        """Backward compat: passing no cache must work as before."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        code = "REQUIRES_SMOKE = True\nprint('x')\n"
+
+        result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
+        assert not result.allowed
+        assert "cached" not in result.checks  # no cache metadata leaked
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -352,17 +362,6 @@ class TestSmokeFunctionDetection:
         assert "Action:" in msg
 
 
-def test_smoke_cache_does_not_affect_no_cache_path(monkeypatch, tmp_path):
-    """Backward compat: passing no cache should work exactly as before."""
-    monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
-    code = "REQUIRES_SMOKE = True\nprint('x')\n"
-
-    # Without cache — should still block normally
-    result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
-    assert not result.allowed
-    assert "cached" not in result.checks  # no cache metadata leaked
-
-
 # ═══════════════════════════════════════════════════════════════════
 # P3: Three-state smoke policy
 # ═══════════════════════════════════════════════════════════════════
@@ -418,3 +417,27 @@ class TestSmokePolicy:
         code = "REQUIRES_SMOKE = False\nprint('safe')\n"
         result = evaluate_code_run_preflight(code, "python", str(tmp_path), {})
         assert result.allowed
+
+    def test_warn_mode_does_not_populate_cache(self, monkeypatch, tmp_path):
+        """WARN mode: preflight must not write to cache (ga.py owns cache)."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        cache = SmokeCache()
+        code = 'SMOKE_POLICY = "warn"\nREQUIRES_SMOKE = True\nprint("risky")\n'
+
+        r = evaluate_code_run_preflight(
+            code, "python", str(tmp_path), {}, smoke_cache=cache,
+        )
+        assert r.allowed
+        assert len(cache) == 0  # preflight must not populate cache
+
+    def test_off_mode_does_not_populate_cache(self, monkeypatch, tmp_path):
+        """OFF mode: preflight must not write to cache."""
+        monkeypatch.delenv(CODE_PREFLIGHT_ENV_VAR, raising=False)
+        cache = SmokeCache()
+        code = 'SMOKE_POLICY = "off"\nREQUIRES_SMOKE = True\nprint("risky")\n'
+
+        r = evaluate_code_run_preflight(
+            code, "python", str(tmp_path), {}, smoke_cache=cache,
+        )
+        assert r.allowed
+        assert len(cache) == 0  # preflight must not populate cache

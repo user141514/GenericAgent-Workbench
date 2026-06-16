@@ -37,13 +37,14 @@ _TITLE_REQUEST_PHRASES = (
 )
 
 _SUMMARY_REQUEST_PHRASES = (
-    "总结",
-    "概括",
-    "定位",
-    "结论",
-    "summary",
-    "summarize",
-    "positioning",
+    "总结一下",
+    "总结全文",
+    "做个总结",
+    "概括一下",
+    "概述",
+    "summarize the",
+    "tl;dr",
+    "tldr",
 )
 
 _EXPLAIN_REQUEST_PHRASES = (
@@ -118,18 +119,13 @@ _COMPLETION_PHRASES = (
     "任务完成",
     "已经完成",
     "最终答案",
-    "结论",
-    "总结",
-    "项目定位",
-    "标题是",
-    "第一行标题",
-    "核心定位",
+    "以上是完整",
+    "以上就是",
     "complete",
     "completed",
     "final answer",
-    "conclusion",
-    "summary",
-    "title is",
+    "task complete",
+    "done",
 )
 
 _FAILURE_PHRASES = (
@@ -223,8 +219,8 @@ def _response_has_effective_answer(
         _contains_any(summary_lower, ("定位", "总结", "workbench", "built on top of", "multi-agent", "项目"))
         or sentence_count >= 1
     )
-    explain_answer = explain_request and len(summary_text.strip()) >= 40 and sentence_count >= 1
-    generic_answer = len(summary_text.strip()) >= 40 and sentence_count >= 1
+    explain_answer = explain_request and len(summary_text.strip()) >= 80 and sentence_count >= 2
+    generic_answer = len(summary_text.strip()) >= 120 and sentence_count >= 2
     concise_answer = concise_request and len(summary_text.strip()) >= 20 and sentence_count <= 3
     has_effective_answer = (
         (title_answer and (summary_answer or concise_answer))
@@ -278,7 +274,6 @@ def should_stop_classic_executor(
     completion_like = completion_markers or (
         has_effective_answer
         and turn_value >= 2
-        and (tool_results_ready or answer_signals.get("explain_request") or not tool_results)
     )
 
     signals: dict[str, Any] = {

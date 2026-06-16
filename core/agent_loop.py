@@ -536,10 +536,10 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                                 return None
                             return (yield from gen)
 
-                        if formatter.is_verbose():
+                        if formatter.is_verbose() and not formatter.hide_tool_calls():
                             yield "`````\n"
-                        outcome = (yield from proxy()) if formatter.is_verbose() else exhaust(proxy())
-                        if formatter.is_verbose():
+                        outcome = (yield from proxy()) if (formatter.is_verbose() and not formatter.hide_tool_calls()) else exhaust(proxy())
+                        if formatter.is_verbose() and not formatter.hide_tool_calls():
                             yield "`````\n"
                     except StopIteration as e:
                         outcome = e.value

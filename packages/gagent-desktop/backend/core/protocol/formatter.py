@@ -12,6 +12,11 @@ import re
 from abc import ABC, abstractmethod
 
 
+_SHOW_TOOL_CALLS = os.environ.get("GENERIC_AGENT_SHOW_TOOL_CALLS", "").strip().lower() in (
+    "1", "true", "yes", "on",
+)
+
+
 class AgentOutputFormatter(ABC):
     """Abstract formatter that controls how agent output is presented.
 
@@ -59,6 +64,16 @@ class AgentOutputFormatter(ABC):
         """Whether this formatter produces verbose (markdown) output."""
         ...
 
+    def hide_tool_calls(self) -> bool:
+        """Whether tool-call and tool-result output should be suppressed.
+
+        Tool calls are hidden by default.  Set
+        ``GENERIC_AGENT_SHOW_TOOL_CALLS=1`` to restore the old behaviour
+        where every ``file_read(…)`` / ``code_run(…)`` invocation is
+        printed inline.
+        """
+        return not _SHOW_TOOL_CALLS
+
 
 class NullFormatter(AgentOutputFormatter):
     """Minimal formatter — emits nothing extra. Raw text only."""
@@ -101,6 +116,8 @@ class CompactFormatter(AgentOutputFormatter):
         return ""
 
     def format_tool_call(self, tool_name: str, arguments: dict | str) -> str:
+        if self.hide_tool_calls():
+            return ""
         if isinstance(arguments, str):
             return f"{tool_name}({arguments[:120]})\n\n\n"
         return f"{tool_name}({self._compact_tool_args_static(tool_name, arguments)})\n\n\n"
@@ -174,6 +191,8 @@ class VerboseFormatter(AgentOutputFormatter):
         return ""
 
     def format_tool_call(self, tool_name: str, arguments: dict | str) -> str:
+        if self.hide_tool_calls():
+            return ""
         if isinstance(arguments, dict):
             args_str = json.dumps(arguments, ensure_ascii=False)
         else:

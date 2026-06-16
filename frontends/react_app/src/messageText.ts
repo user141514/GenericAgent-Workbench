@@ -10,10 +10,11 @@ const TOOL_CALL_BLOCK_RE = /^Tool:\s*`[^`]+`\s+args:\s*\n`{3,}[^\n]*\n[\s\S]*?\n
 const RUNTIME_FENCE_BLOCK_RE = /^`{3,}\s*\n\[(?:Action|Status|Stdout|Stderr|Error|Path Guard|Info)\][\s\S]*?\n`{3,}\s*/gm;
 const RUNTIME_LINE_RE = /^\[(?:Action|Status|Stdout|Stderr|Error|Path Guard|Info)\].*$/gm;
 const SUMMARY_TAG_RE = /<summary>[\s\S]*?<\/summary>/gi;
+const FUNCTION_TOOL_CALL_RE = /^[a-z][a-z0-9_]*\(\{.*\}\)\s*$/;
 
 export function renderMessageText(text: string, options: RenderMessageTextOptions) {
   const visible = options.role === "assistant"
-    ? stripLegacyTurnResidue(text, options.latestTraceTurn || 0)
+    ? cleanAssistantReplyText(text, options.latestTraceTurn || 0)
     : text;
 
   if (!visible && options.streaming && options.role !== "assistant") return "Thinking...";
@@ -37,7 +38,11 @@ export function stripLegacyTurnResidue(text: string, latestTraceTurn = 0) {
 }
 
 export function copyableMessageText(text: string) {
-  const visibleTail = stripLegacyTurnResidue(text, 0);
+  return cleanAssistantReplyText(text, 0);
+}
+
+function cleanAssistantReplyText(text: string, latestTraceTurn = 0) {
+  const visibleTail = stripLeadingFunctionToolCalls(stripLegacyTurnResidue(text, latestTraceTurn));
   return normalizeCopyText(
     visibleTail
       .replace(SUMMARY_TAG_RE, "")
@@ -46,6 +51,27 @@ export function copyableMessageText(text: string) {
       .replace(RUNTIME_LINE_RE, "")
       .replace(TURN_MARKER_RE, ""),
   );
+}
+
+function stripLeadingFunctionToolCalls(text: string) {
+  const lines = String(text || "").replace(/\r\n/g, "\n").split("\n");
+  let index = 0;
+  let sawToolCall = false;
+
+  while (index < lines.length) {
+    const line = lines[index].trim();
+    if (!line) {
+      index += 1;
+      continue;
+    }
+    if (!FUNCTION_TOOL_CALL_RE.test(line)) {
+      break;
+    }
+    sawToolCall = true;
+    index += 1;
+  }
+
+  return sawToolCall ? lines.slice(index).join("\n") : text;
 }
 
 function normalizeCopyText(text: string) {

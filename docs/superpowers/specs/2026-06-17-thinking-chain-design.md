@@ -146,31 +146,28 @@ export type AgentEventKind =
 
 #### C. `src/ThinkingChain.tsx` — NEW FILE
 
+Sub-component rendered inside each turn card's detail area. Collapsible within the turn.
+
 ```tsx
-interface ThinkingBlock {
-  text: string;
-  turn: number;
-}
-
 interface ThinkingChainProps {
-  blocks: ThinkingBlock[];
-  streaming: boolean;
+  steps: string[];        // thinking text per step (may be 1 string or split by newlines)
+  isLive: boolean;        // true = this turn is currently running → expanded
 }
 
-function ThinkingChain({ blocks, streaming }: ThinkingChainProps) {
-  const [collapsed, setCollapsed] = useState(!streaming);
+function ThinkingChain({ steps, isLive }: ThinkingChainProps) {
+  const [collapsed, setCollapsed] = useState(!isLive);
 
-  // Auto-collapse when streaming ends (assistant reply arrives)
+  // Auto-collapse when this turn stops running
   useEffect(() => {
-    if (!streaming) setCollapsed(true);
-  }, [streaming]);
+    if (!isLive) setCollapsed(true);
+  }, [isLive]);
 
-  if (!blocks.length) return null;
+  if (!steps.length) return null;
   if (collapsed) {
     return (
       <div className="thinking-chain thinking-collapsed" onClick={() => setCollapsed(false)}>
         <span className="thinking-chevron">›</span>
-        💭 思考过程 ({blocks.length} steps)
+        💭 思考过程 ({steps.length} steps)
       </div>
     );
   }
@@ -178,12 +175,12 @@ function ThinkingChain({ blocks, streaming }: ThinkingChainProps) {
     <div className="thinking-chain thinking-expanded">
       <div className="thinking-header" onClick={() => setCollapsed(true)}>
         <span className="thinking-chevron open">›</span>
-        💭 思考过程 ({blocks.length} steps)
+        💭 思考过程 ({steps.length} steps)
       </div>
       <ol className="thinking-steps">
-        {blocks.map((block, i) => (
-          <li key={i} className={i === blocks.length - 1 && streaming ? "thinking-live" : ""}>
-            {block.text}
+        {steps.map((text, i) => (
+          <li key={i} className={i === steps.length - 1 && isLive ? "thinking-live" : ""}>
+            {text}
           </li>
         ))}
       </ol>
@@ -192,49 +189,107 @@ function ThinkingChain({ blocks, streaming }: ThinkingChainProps) {
 }
 ```
 
-#### D. `src/App.tsx` — Integration
+**Note**: `steps` are derived from concatenated thinking_block events per turn. Each thinking_block event's `text` constitutes one step in the list.
 
-Extract thinking blocks from events per turn and render `<ThinkingChain>` above the assistant message:
+#### D. `src/TurnTracePanel.tsx` — Updated
+
+Add `thinkingByTurn` prop and render `<ThinkingChain>` inside each turn card:
 
 ```tsx
-// Derive thinking blocks for the current trace message
-const thinkingBlocks = useMemo(() => {
-  return events
-    .filter(e => e.kind === "thinking_block" && e.turn === latestTraceTurn)
-    .map(e => ({ text: e.text, turn: e.turn }));
-}, [events, latestTraceTurn]);
+type TurnTraceListProps = {
+  events: AgentEvent[];
+  thinkingByTurn: Map<number, string[]>;  // NEW
+};
+
+export function TurnTraceList({ events, thinkingByTurn }: TurnTraceListProps) {
+  const turnSummaries = useMemo(() => buildTurnSummaries(events), [events]);
+  // ...
+
+  return (
+    <div className="turn-list">
+      {turnSummaries.map((turn) => {
+        const thinkingSteps = thinkingByTurn.get(turn.turn) || [];
+        const isLive = turn.state === "running";
+        return (
+          <details key={turn.turn} className={`turn-card turn-${turn.state}`}>
+            <summary>
+              <span className="turn-chevron" aria-hidden="true">›</span>
+              <span className="turn-title">
+                {labelForTurnState(turn.state)} (Turn {turn.turn}) ...
+              </span>
+            </summary>
+            <div className="turn-detail">
+              <ThinkingChain steps={thinkingSteps} isLive={isLive} />
+              {/* existing turn detail content follows */}
+              <p>{turn.text || "..."}</p>
+              <div className="turn-meta">...</div>
+              {/* ... */}
+            </div>
+          </details>
+        );
+      })}
+    </div>
+  );
+}
 ```
 
-Render above the TurnTraceList:
+#### E. `src/App.tsx` — Integration
+
+Derive `thinkingByTurn` map from events, pass to TurnTraceList:
 
 ```tsx
-{showTraceHere && (
-  <>
-    <ThinkingChain blocks={thinkingBlocks} streaming={status === "running"} />
-    <TurnTraceList events={events} />
-  </>
+const thinkingByTurn = useMemo(() => {
+  const map = new Map<number, string[]>();
+  for (const e of events) {
+    if (e.kind === "thinking_block" && e.text) {
+      const arr = map.get(e.turn) || [];
+      arr.push(e.text);
+      map.set(e.turn, arr);
+    }
+  }
+  return map;
+}, [events]);
+```
+
+Pass to TurnTraceList (two locations: normal message render and live trace):
+
+```tsx
+{/* Inside normal message: */}
+{showTraceHere && <TurnTraceList events={events} thinkingByTurn={thinkingByTurn} />}
+
+{/* Inside live trace: */}
+{needsLiveAssistantMessage && (
+  <article className="message message-assistant message-live-trace">
+    <div className="message-role">assistant</div>
+    {hasTurnTrace ? (
+      <TurnTraceList events={events} thinkingByTurn={thinkingByTurn} />
+    ) : (
+      <p>正在分析任务…</p>
+    )}
+    {/* ... */}
+  </article>
 )}
 ```
 
-#### E. `src/styles.css` — Thinking Chain Styles
+#### F. `src/styles.css` — Thinking Chain Styles
 
 ```css
 .thinking-chain {
-  margin: 8px 0;
+  margin: 6px 0 10px;
   border-radius: 6px;
   border: 1px solid #e0d8cc;
   background: #faf8f5;
   overflow: hidden;
 }
 .thinking-collapsed {
-  padding: 8px 12px;
+  padding: 6px 10px;
   cursor: pointer;
   font-size: 13px;
   color: #777068;
 }
 .thinking-collapsed:hover { background: #f0ebe0; }
 .thinking-header {
-  padding: 8px 12px;
+  padding: 6px 10px;
   cursor: pointer;
   font-size: 13px;
   color: #777068;
@@ -250,13 +305,13 @@ Render above the TurnTraceList:
 .thinking-chevron.open { transform: rotate(90deg); }
 .thinking-steps {
   margin: 0;
-  padding: 10px 12px 10px 32px;
+  padding: 8px 10px 8px 28px;
   list-style: decimal;
   font-size: 13px;
   color: #555;
   line-height: 1.6;
 }
-.thinking-steps li { margin-bottom: 6px; }
+.thinking-steps li { margin-bottom: 5px; }
 .thinking-steps li:last-child { margin-bottom: 0; }
 .thinking-live { color: #c97754; }
 .thinking-live::after {
@@ -270,28 +325,39 @@ Render above the TurnTraceList:
 
 ```
 Message (assistant)
-├── ThinkingChain          ← NEW (thinking_block events, per turn)
-│   ├── collapsed: "💭 思考过程 (N steps)"
-│   └── expanded:
-│       ├── Step 1: "..."
-│       ├── Step 2: "..."
-│       └── Step N: "..." (blinking cursor if streaming)
-├── TurnTraceList          ← existing
-└── MarkdownMessage        ← existing (final answer text)
+├── TurnTraceList
+│   ├── TurnCard (Turn 1, done)
+│   │   ├── summary: "LLM Done (Turn 1) ..."
+│   │   └── detail:
+│   │       ├── ThinkingChain  ← NEW (collapsed by default)
+│   │       │   └── "💭 思考过程 (3 steps)"  (click → expand)
+│   │       ├── turn text summary
+│   │       ├── turn meta (chunks, deltas)
+│   │       └── event lines
+│   └── TurnCard (Turn 2, running)
+│       ├── summary: "LLM Running (Turn 2) ..."
+│       └── detail: (open while streaming)
+│           ├── ThinkingChain  ← EXPANDED while running
+│           │   ├── Step 1: "..."
+│           │   ├── Step 2: "..."
+│           │   └── Step 3: "..." (blinking cursor)
+│           ├── turn text summary
+│           └── ...
+└── MarkdownMessage (final answer text)
 ```
 
 ### 2.5 State Transitions
 
 ```
-idle → [user sends message] → running
-  → thinking_block events arrive (streaming)
-    → ThinkingChain: expanded, last step blinking
+idle → [user sends message] → running (Turn 1 begins)
+  → thinking_block events arrive
+    → TurnCard open, ThinkingChain expanded, last step blinking
   → chunk events arrive (text)
-    → MarkdownMessage: streams text
-    → ThinkingChain: still expanded
-  → done event
-    → ThinkingChain: auto-collapse to "💭 思考过程 (N steps)"
-    → MarkdownMessage: final text
+    → MarkdownMessage streams text
+  → turn_end / done event
+    → TurnCard stays as-is (open/close user-controlled)
+    → ThinkingChain auto-collapses to "💭 思考过程 (N steps)"
+    → MarkdownMessage shows final text
 ```
 
 ## 3. Testing Plan
@@ -302,9 +368,10 @@ idle → [user sends message] → running
 - Verify events.from_legacy_dict() correctly maps status→thinking_block
 
 ### Frontend Tests
-- `ThinkingChain.test.tsx`: renders collapsed/expanded, handles empty blocks, handles streaming
-- `store.test.ts`: thinking_block events pass through events array
-- Manual: send prompt requiring reasoning, verify thinking chain appears
+- `ThinkingChain.test.tsx`: renders collapsed/expanded, handles empty steps, auto-collapse on isLive change
+- `TurnTracePanel.test.tsx`: passes thinkingByTurn into ThinkingChain per turn
+- `store.test.ts`: thinking_block events accumulate in events[] without modifying messages[]
+- Manual: send prompt requiring reasoning, verify thinking appears inside turn card
 
 ## 4. Future Extensions
 

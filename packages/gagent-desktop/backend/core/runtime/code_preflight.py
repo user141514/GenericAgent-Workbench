@@ -7,6 +7,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -39,18 +40,38 @@ _SMOKE_POLICY_NAMES = {
 }
 
 # P3: Three-state smoke enforcement
-class SmokePolicy:
+class SmokePolicy(StrEnum):
+    """Three-state smoke enforcement policy.
+
+    ``StrEnum`` ensures ``SmokePolicy.OFF == "off"``, ``f"{policy}"``
+    returns the value, and membership prevents accidental boolean-context
+    collapse::
+
+        if policy:  # always True for any SmokePolicy member — don't do this
+            ...
+
+    Always compare explicitly: ``policy == SmokePolicy.REQUIRE``.
+    """
+
     OFF = "off"          # skip smoke check entirely
     WARN = "warn"        # smoke required but not checked → warning, allow
     REQUIRE = "require"  # smoke required but not checked → block (default)
 
     @classmethod
-    def from_value(cls, value) -> str:
+    def from_value(cls, value) -> "SmokePolicy":
+        """Normalise a string or SmokePolicy to a SmokePolicy member.
+
+        Returns ``REQUIRE`` for unrecognised input (secure default).
+        """
+        if isinstance(value, cls):
+            return value
         if isinstance(value, str):
             v = value.strip().lower()
-            if v in ("off", "warn", "require"):
-                return v
-        return cls.REQUIRE  # default
+            try:
+                return cls(v)
+            except ValueError:
+                pass
+        return cls.REQUIRE
 _DESTRUCTIVE_SHELL_PATTERNS = (
     r"\brm\s+-rf\b",
     r"\bRemove-Item\b(?=.*-Recurse\b)(?=.*-Force\b)",
@@ -102,6 +123,8 @@ def code_preflight_enabled() -> bool:
 # L0: Hash-based smoke cache — solves findings 2/4/5
 # ═══════════════════════════════════════════════════════════════════
 
+CACHE_VERSION = 1  # bump when preflight check logic changes (semantic hash, smoke detection, etc.)
+
 
 @dataclass
 class SmokeCacheEntry:
@@ -109,6 +132,7 @@ class SmokeCacheEntry:
     timestamp: float = field(default_factory=time.time)
     smoke_function_found: bool = False
     smoke_function_name: str = ""
+    cache_version: int = CACHE_VERSION
 
 
 class SmokeCache:
@@ -181,9 +205,41 @@ _SMOKE_FUNCTION_NAMES = frozenset({"smoke", "smoke_test", "minimal_smoke", "smok
 def _strip_smoke_assignments(tree: ast.AST) -> ast.AST:
     """Return a copy of *tree* with smoke-checked marker assignments removed.
 
-    Strips top-level assignments to SMOKE_CHECKED, SMOKE_TEST_PASSED,
-    and PREFLIGHT_SMOKE_CHECKED so the semantic hash is stable when
-    an agent marks smoke as passed.
+    Strips top-level assignments to names in ``_SMOKE_CHECKED_NAMES``
+    (SMOKE_CHECKED, SMOKE_TEST_PASSED, PREFLIGHT_SMOKE_CHECKED) so the
+    semantic hash is stable when an agent adds or removes smoke-verification
+    markers between runs.
+
+    .. important::
+
+        Only the **assignment statement** is stripped.  If the marker is
+        *referenced* elsewhere (e.g. ``if SMOKE_CHECKED: cleanup()``),
+        the reference remains — which will cause a ``NameError`` at runtime
+        unless the agent also defines the variable.  This is intentional:
+        the semantic hash must not change just because the agent declared
+        smoke passed, but the hash MUST change if the agent adds new logic
+        that depends on the marker.
+
+    **What is stripped** (hash-stable):
+        - ``SMOKE_CHECKED = True``
+        - ``SMOKE_TEST_PASSED = True``
+        - ``PREFLIGHT_SMOKE_CHECKED = True``
+        - ``SMOKE_CHECKED: bool = True`` (annotated assignment)
+
+    **What is NOT stripped** (hash-changing):
+        - ``SMOKE_POLICY = "off"`` — policy changes must invalidate cache
+        - ``REQUIRES_SMOKE = True`` — smoke requirement changes must invalidate
+        - Any logic that *uses* a smoke marker (e.g. ``if SMOKE_CHECKED: ...``)
+
+    **Known edge case** (risk #3): If an agent writes::
+
+        SMOKE_CHECKED = True
+        if SMOKE_CHECKED:
+            dangerous_operation()
+
+    The assignment is stripped but the ``if SMOKE_CHECKED:`` reference
+    remains → ``NameError`` at runtime.  The agent must not reference
+    smoke markers in logic; they are declarative only.
     """
 
     class SmokeStripper(ast.NodeTransformer):
@@ -256,34 +312,8 @@ def evaluate_code_run_preflight(
             warnings=[f"non_python_code_type:{code_type}"],
         )
 
-    # ── L0: hash cache lookup ──────────────────────────────────────
-    code_hash = SmokeCache.hash_code(code) if smoke_cache is not None else ""
-    if smoke_cache is not None and code_hash:
-        cached = smoke_cache.get(code_hash)
-        if cached is not None and cached.passed:
-            return CodePreflightResult(
-                allowed=True,
-                checks={**checks, "smoke_check": True, "cached": True},
-                blocked_reasons=[],
-                warnings=[],
-                suggested_next_step="",
-            )
-        if cached is not None and not cached.passed:
-            # Previously failed — enforce smoke unless code has changed
-            checks["smoke_check"] = False
-            hint = "smoke check previously failed for this exact code; fix the script or run a smoke test first"
-            if cached.smoke_function_found:
-                hint += (
-                    f"; a smoke entry point `{cached.smoke_function_name}()` "
-                    f"was detected — call it with a minimal test case"
-                )
-            return CodePreflightResult(
-                allowed=False,
-                checks=checks,
-                blocked_reasons=[f"cached_smoke_failure: {hint}"],
-                warnings=[],
-                suggested_next_step=hint,
-            )
+    # ── L0: cache is now checked by ga.py before calling preflight.
+    # smoke_cache parameter kept for backward compatibility; unused here.
 
     try:
         tree = ast.parse(code or "")
@@ -342,14 +372,6 @@ def evaluate_code_run_preflight(
         or manifest_smoke_checked
     )
 
-    # In OFF/WARN mode smoke is not enforced, so treat as "passed" for caching.
-    # Only REQUIRE mode with unchecked smoke counts as "not passed".
-    smoke_passed = (
-        smoke_policy in (SmokePolicy.OFF, SmokePolicy.WARN)
-        or smoke_checked
-        or not requires_smoke
-    )
-
     smoke_action: dict | None = None
     if requires_smoke and not smoke_checked:
         if smoke_policy == SmokePolicy.OFF:
@@ -358,7 +380,7 @@ def evaluate_code_run_preflight(
             checks["smoke_check"] = False
             warnings.append(
                 "smoke_warning: smoke check recommended but not enforced "
-                f"(SMOKE_POLICY={smoke_policy})"
+                f"(SMOKE_POLICY={smoke_policy.value})"
             )
         else:  # REQUIRE (default)
             checks["smoke_check"] = False
@@ -387,17 +409,6 @@ def evaluate_code_run_preflight(
         suggested_next_step=_suggest_next_step(blocked_reasons, smoke_fn_found, smoke_fn_name),
         action=smoke_action,
     )
-
-    # ── L0: cache the result ──────────────────────────────────────
-    if smoke_cache is not None and code_hash:
-        smoke_cache.put(
-            code_hash,
-            SmokeCacheEntry(
-                passed=smoke_passed,
-                smoke_function_found=smoke_fn_found,
-                smoke_function_name=smoke_fn_name,
-            ),
-        )
 
     return result
 

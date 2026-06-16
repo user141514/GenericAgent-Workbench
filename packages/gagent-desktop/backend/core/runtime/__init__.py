@@ -10,10 +10,12 @@ from .clarification_gate import (
     should_allow_clarification,
 )
 from .code_preflight import (
+    CACHE_VERSION,
     CODE_PREFLIGHT_ENV_VAR,
     CodePreflightResult,
     SmokeCache,
     SmokeCacheEntry,
+    SmokePolicy,
     code_preflight_enabled,
     evaluate_code_run_preflight,
     get_smoke_cache,
@@ -92,6 +94,7 @@ from .shared_store import Artifact, SharedArtifactStore
 from .state_machine import IllegalModeTransition, ModeStateMachine, mode_for_route
 
 __all__ = [
+    "CACHE_VERSION",
     "CLARIFICATION_GATE_ENV_VAR",
     "ClarificationDecision",
     "DIRECT_ANSWER_ENV_VAR",
@@ -105,6 +108,7 @@ __all__ = [
     "CodePreflightResult",
     "SmokeCache",
     "SmokeCacheEntry",
+    "SmokePolicy",
     "get_smoke_cache",
     "reset_smoke_cache",
     "TOOL_PATH_ALLOW_SENSITIVE_ENV_VAR",

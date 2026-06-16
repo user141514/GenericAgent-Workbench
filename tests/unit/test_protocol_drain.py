@@ -155,14 +155,32 @@ class TestFormatter:
         assert "Turn 3" in result
         assert "LLM Running" in result
 
-    def test_verbose_tool_call_formatting(self):
+    def test_tool_calls_hidden_by_default(self):
+        """Tool calls must be hidden unless GENERIC_AGENT_SHOW_TOOL_CALLS=1."""
+        from core.protocol.formatter import VerboseFormatter, CompactFormatter
+        vf = VerboseFormatter()
+        cf = CompactFormatter()
+        assert vf.hide_tool_calls() is True
+        assert cf.hide_tool_calls() is True
+        assert vf.format_tool_call("file_read", {"path": "/tmp/x.txt"}) == ""
+        assert cf.format_tool_call("file_read", {"path": "/tmp/x.txt"}) == ""
+
+    def test_verbose_tool_call_formatting(self, monkeypatch):
+        monkeypatch.setenv("GENERIC_AGENT_SHOW_TOOL_CALLS", "1")
+        import importlib
+        import core.protocol.formatter
+        importlib.reload(core.protocol.formatter)
         from core.protocol.formatter import VerboseFormatter
         f = VerboseFormatter()
         result = f.format_tool_call("file_read", {"path": "/tmp/x.txt"})
         assert "file_read" in result
         assert "/tmp/x.txt" in result
 
-    def test_verbose_formatter_outputs_full_json(self):
+    def test_verbose_formatter_outputs_full_json(self, monkeypatch):
+        monkeypatch.setenv("GENERIC_AGENT_SHOW_TOOL_CALLS", "1")
+        import importlib
+        import core.protocol.formatter
+        importlib.reload(core.protocol.formatter)
         from core.protocol.formatter import VerboseFormatter
         f = VerboseFormatter()
         args = {"path": "/tmp/test.txt", "content": "hello"}
@@ -171,7 +189,11 @@ class TestFormatter:
         assert "/tmp/test.txt" in result
         assert "````" in result  # markdown code block wrapper
 
-    def test_compact_formatter_truncates_args(self):
+    def test_compact_formatter_truncates_args(self, monkeypatch):
+        monkeypatch.setenv("GENERIC_AGENT_SHOW_TOOL_CALLS", "1")
+        import importlib
+        import core.protocol.formatter
+        importlib.reload(core.protocol.formatter)
         from core.protocol.formatter import CompactFormatter
         f = CompactFormatter()
         args = {f"key{i}": f"value{i}" for i in range(10)}

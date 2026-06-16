@@ -35,6 +35,66 @@ describe("renderMessageText", () => {
     expect(rendered).not.toContain("LLM Running");
     expect(rendered).toBe("a".repeat(1900));
   });
+
+  it("shows only the final assistant answer after legacy tool transcript noise", () => {
+    const text = [
+      "**LLM Running (Turn 1) ...**",
+      "",
+      "Tool: `file_read` args:",
+      "```text",
+      "{\"path\":\"main_manuscript_v2_mainline.md\"}",
+      "```",
+      "```",
+      "[Action] Reading file: F:\\GAgent-Multi\\temp\\main_manuscript_v2_mainline.md",
+      "```",
+      "**LLM Running (Turn 2) ...**",
+      "<summary>Prepared the answer.</summary>",
+      "",
+      "---",
+      "",
+      "## Final audit",
+      "",
+      "Only this should be displayed.",
+    ].join("\n");
+
+    const rendered = renderMessageText(text, {
+      role: "assistant",
+      compact: true,
+      latestTraceTurn: 2,
+    });
+
+    expect(rendered).toBe("## Final audit\n\nOnly this should be displayed.");
+    expect(rendered).not.toContain("Tool:");
+    expect(rendered).not.toContain("[Action]");
+    expect(rendered).not.toContain("<summary>");
+  });
+
+  it("hides leading function-style tool call transcripts from the displayed reply", () => {
+    const text = [
+      'code_run({"script": "\\n# 探索项目结构\\nimport os\\n"})',
+      "",
+      'file_read({"path": "app.py"})',
+      "",
+      'file_read({"path": "ai_service.py"})',
+      "",
+      "现在我已经读完所有关键文件，下面是完整的审计报告。",
+      "",
+      "---",
+      "",
+      "## 代码审计报告",
+      "",
+      "这里只显示最终回复。",
+    ].join("\n");
+
+    const rendered = renderMessageText(text, {
+      role: "assistant",
+      compact: true,
+    });
+
+    expect(rendered).toBe("现在我已经读完所有关键文件，下面是完整的审计报告。\n\n---\n\n## 代码审计报告\n\n这里只显示最终回复。");
+    expect(rendered).not.toContain("code_run");
+    expect(rendered).not.toContain("file_read");
+  });
 });
 
 describe("copyableMessageText", () => {
@@ -75,5 +135,16 @@ describe("copyableMessageText", () => {
     expect(copied).not.toContain("Tool:");
     expect(copied).not.toContain("[Action]");
     expect(copied).not.toContain("<summary>");
+  });
+
+  it("removes leading function-style tool call transcripts from copied replies", () => {
+    const text = [
+      'code_run({"script": "\\nprint(1)\\n"})',
+      'file_read({"path": "app.py"})',
+      "",
+      "最终结论。",
+    ].join("\n");
+
+    expect(copyableMessageText(text)).toBe("最终结论。");
   });
 });

@@ -27,7 +27,14 @@ from .runtime.clarification_gate import (
     emit_clarification_allowed,
     emit_clarification_denied,
 )
-from .runtime.code_preflight import evaluate_code_run_preflight, get_smoke_cache
+from .runtime.code_preflight import (
+    CACHE_VERSION,
+    CodePreflightResult,
+    SmokeCache,
+    SmokeCacheEntry,
+    evaluate_code_run_preflight,
+    get_smoke_cache,
+)
 from .runtime.path_safety import ToolPathResult, resolve_tool_path
 from .runtime.web_tool_errors import enrich_web_tool_result, web_tool_failure_prompt
 
@@ -784,10 +791,35 @@ class GenericAgentHandler(BaseHandler):
         raw_path = os.path.join(self.cwd, args.get("cwd", './'))
         cwd = os.path.normpath(os.path.abspath(raw_path))
         code_cwd = os.path.normpath(self.cwd)
-        preflight = evaluate_code_run_preflight(
-            code, code_type, cwd, args,
-            smoke_cache=get_smoke_cache(),
-        )
+        # ── L0: cache check before preflight ──────────────────────
+        try:
+            smoke_cache = get_smoke_cache()
+            code_hash = SmokeCache.hash_code(code)
+            cached = smoke_cache.get(code_hash) if code_hash else None
+        except Exception:
+            # Cache layer failure → fall back to full preflight
+            smoke_cache = None
+            code_hash = ""
+            cached = None
+
+        if cached is not None and cached.passed and cached.cache_version == CACHE_VERSION:
+            # Smoke previously verified for this exact code — skip preflight.
+            preflight = CodePreflightResult(
+                allowed=True,
+                checks={"enabled": True, "smoke_check": True, "cached": True},
+                blocked_reasons=[],
+                warnings=[],
+            )
+            smoke_fn_found = cached.smoke_function_found
+            smoke_fn_name = cached.smoke_function_name
+        else:
+            preflight = evaluate_code_run_preflight(code, code_type, cwd, args)
+            smoke_fn_found = (
+                preflight.action is not None
+                and preflight.action.get("type") == "run_smoke"
+            )
+            smoke_fn_name = preflight.action.get("function", "") if preflight.action else ""
+
         profiler = getattr(getattr(self, "parent", None), "active_profiler", None)
         if profiler is not None:
             try:
@@ -807,6 +839,20 @@ class GenericAgentHandler(BaseHandler):
                 pass
         if preflight.allowed:
             result = yield from code_run(code, code_type, timeout, cwd, code_cwd=code_cwd, stop_signal=self.code_stop_signal)
+            # ── L0: cache successful preflight + execution ────────
+            # Cache every successful run so that adding SMOKE_CHECKED=True once
+            # blesses the code for the rest of the session.  Only skip caching
+            # when smoke was bypassed via WARN mode (unverified allowance).
+            try:
+                smoke_not_warned = not any("smoke_warning" in w for w in preflight.warnings)
+                if smoke_cache is not None and smoke_not_warned and code_hash and preflight.checks.get("smoke_check", True):
+                    smoke_cache.put(code_hash, SmokeCacheEntry(
+                        passed=True,
+                        smoke_function_found=smoke_fn_found,
+                        smoke_function_name=smoke_fn_name,
+                    ))
+            except Exception:
+                pass  # cache write failure must not break execution
         else:
             yield "[Code Preflight] blocked before execution.\n"
             result = preflight.to_tool_message()
@@ -823,6 +869,14 @@ class GenericAgentHandler(BaseHandler):
                     "The previous code_run was blocked before execution. Do not claim the code ran. "
                     "Fix the listed syntax, input file, CSV schema, or smoke-check issue first; then rerun a minimal check before any full experiment."
                 )
+        elif 'preflight' in locals() and preflight.warnings:
+            # WARN mode: code was allowed to run, but preflight produced
+            # recommendations the agent should see in its next instruction.
+            next_prompt += "\n[CODE PREFLIGHT WARNINGS]\n"
+            for w in preflight.warnings:
+                next_prompt += f"  - {w}\n"
+            if preflight.suggested_next_step:
+                next_prompt += f"\nSuggestion: {preflight.suggested_next_step}\n"
         return StepOutcome(result, next_prompt=next_prompt)
     
     def do_ask_user(self, args, response):
