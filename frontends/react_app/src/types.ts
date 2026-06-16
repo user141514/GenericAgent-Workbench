@@ -5,6 +5,7 @@ export type AgentEventKind =
   | "turn_start"
   | "turn_end"
   | "turn_delta"
+  | "thinking_block"  // LLM reasoning/thinking content
   | "frontier_state"
   | "stopped"
   | "error";
