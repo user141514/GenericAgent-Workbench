@@ -503,6 +503,7 @@ def _parse_openai_sse(resp_lines, api_mode="chat_completions"):
             delta = ch.get("delta") or {}
             if delta.get("reasoning_content"):
                 reasoning_text += delta["reasoning_content"]
+                yield {"_thinking_delta": delta["reasoning_content"]}
             if delta.get("content"):
                 text = delta["content"]; content_text += text; yield text
             for tc in (delta.get("tool_calls") or []):
