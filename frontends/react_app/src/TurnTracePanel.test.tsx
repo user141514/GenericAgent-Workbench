@@ -50,4 +50,28 @@ describe("TurnTraceList", () => {
 
     expect(container.textContent).toBe("");
   });
+
+  it("renders thinking chain inside turn cards when thinkingByTurn is provided", () => {
+    const thinkingByTurn = new Map<number, string[]>();
+    thinkingByTurn.set(1, [
+      "Analyzing the codebase structure",
+      "Identifying relevant files",
+    ]);
+
+    render(
+      <TurnTraceList
+        events={[
+          event("turn_start", 1),
+          event("thinking_block" as AgentEvent["kind"], 1, "Analyzing the codebase structure"),
+          event("thinking_block" as AgentEvent["kind"], 1, "Identifying relevant files"),
+          event("turn_end", 1),
+          event("turn_start", 2),
+        ]}
+        thinkingByTurn={thinkingByTurn}
+      />,
+    );
+
+    // Turn 1 card shows collapsed thinking
+    expect(screen.getByText("💭 思考过程 (2 steps)")).toBeTruthy();
+  });
 });
