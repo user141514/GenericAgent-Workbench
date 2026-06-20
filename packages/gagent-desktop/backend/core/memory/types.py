@@ -57,19 +57,6 @@ class MemoryCandidate:
 
 
 @dataclass
-class SmokeCacheEntry:
-    code_hash: str
-    source_path: str
-    status: str = "unknown"
-    output_snippet: str | None = None
-    python_version: str | None = None
-    key_deps: str | None = None
-    passed_at: str | None = None
-    created_at: str = ""
-    updated_at: str = ""
-
-
-@dataclass
 class MemoryEvent:
     id: str
     event_type: str

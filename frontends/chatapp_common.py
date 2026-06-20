@@ -47,6 +47,11 @@ RESTORE_BLOCK_RE = re.compile(
 )
 HISTORY_RE = re.compile(r"<history>\s*(.*?)\s*</history>", re.DOTALL)
 SUMMARY_RE = re.compile(r"<summary>\s*(.*?)\s*</summary>", re.DOTALL)
+RECENT_CONVERSATION_RE = re.compile(
+    r"\[RECENT CONVERSATION[^\]]*\]\s*(.*?)(?:\[/RECENT CONVERSATION\]|\Z)",
+    re.DOTALL,
+)
+RECENT_TURN_RE = re.compile(r"^## Turn\s+(\d+)\s*$", re.MULTILINE)
 
 
 def clean_reply(text):
@@ -231,14 +236,107 @@ def _native_history_lines(prompt_text):
     return restored
 
 
+def _append_recent_role(sections, role, lines):
+    text = "\n".join(lines).strip()
+    if text:
+        sections.append((role, text))
+
+
+def _recent_turn_sections(segment):
+    sections = []
+    role = None
+    lines = []
+    skip_tool_events = False
+    for raw_line in (segment or "").splitlines():
+        line = raw_line.rstrip()
+        if line.startswith("USER:"):
+            _append_recent_role(sections, role, lines)
+            role = "user"
+            lines = [line.split(":", 1)[1].strip()]
+            skip_tool_events = False
+            continue
+        if line.startswith("ASSISTANT:"):
+            _append_recent_role(sections, role, lines)
+            role = "assistant"
+            lines = [line.split(":", 1)[1].strip()]
+            skip_tool_events = False
+            continue
+        if line.startswith("TOOL_EVENTS:"):
+            _append_recent_role(sections, role, lines)
+            role = None
+            lines = []
+            skip_tool_events = True
+            continue
+        if skip_tool_events:
+            continue
+        if role:
+            lines.append(line)
+    _append_recent_role(sections, role, lines)
+    return sections
+
+
+def _recent_conversation_lines(prompt_text):
+    restored = []
+    for block in RECENT_CONVERSATION_RE.findall(prompt_text or ""):
+        matches = list(RECENT_TURN_RE.finditer(block))
+        turns = []
+        for index, match in enumerate(matches):
+            start = match.end()
+            end = matches[index + 1].start() if index + 1 < len(matches) else len(block)
+            try:
+                turn = int(match.group(1))
+            except (TypeError, ValueError):
+                turn = index
+            turns.append((turn, index, block[start:end]))
+        if not turns and block.strip():
+            turns.append((0, 0, block))
+        for _, _, segment in sorted(turns, key=lambda item: (item[0], item[1])):
+            for role, text in _recent_turn_sections(segment):
+                prefix = "[USER]: " if role == "user" else "[Agent] "
+                _append_restored_line(restored, prefix + text)
+    return restored
+
+
+def _remove_uploaded_file_context(text):
+    return re.sub(
+        r"<uploaded_file_context>.*?</uploaded_file_context>",
+        "",
+        text or "",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+
+
+def _looks_like_internal_prompt(text):
+    stripped = (text or "").lstrip()
+    return stripped.startswith((
+        "[DANGER]",
+        "[REFLECT]",
+        "[System]",
+        "[ROUTER_HINT]",
+        "[LEGACY PROJECT MEMORY",
+        "[RECENT CONVERSATION",
+        "### [WORKING MEMORY]",
+        "### Research and Code Priority Guard",
+        "### Answer Quality",
+        "### Problem Framing",
+        "TOOL_EVENTS:",
+        "cwd =",
+    ))
+
+
 def _native_first_user_line(prompt_text):
     text = (prompt_text or "").strip()
     if text.startswith(FILE_HINT):
         text = text[len(FILE_HINT):].lstrip()
+    if RECENT_CONVERSATION_RE.search(text):
+        matches = list(RECENT_CONVERSATION_RE.finditer(text))
+        if matches:
+            text = text[matches[-1].end():].strip()
+        text = _remove_uploaded_file_context(text).strip()
     for marker in ("### 用户当前消息", "### Current User Message"):
         if marker in text:
             return text.split(marker, 1)[-1].strip()
-    if not text or "<history>" in text or text.startswith("### [WORKING MEMORY]"):
+    if not text or "<history>" in text or _looks_like_internal_prompt(text):
         return ""
     return text
 
@@ -257,7 +355,7 @@ def _native_response_summary(response_body, max_chars=None):
         return ""
     text_parts = []
     for block in blocks:
-        if isinstance(block, dict) and block.get("type") == "text":
+        if isinstance(block, dict) and block.get("type") in ("text", "output_text"):
             text = block.get("text", "")
             if isinstance(text, str) and text:
                 text_parts.append(text)
@@ -281,19 +379,30 @@ def _append_restored_line(restored, line):
     restored.append(line)
 
 
+def _trim_leading_agent_context(restored):
+    for index, line in enumerate(restored or []):
+        if not isinstance(line, str) or not line.startswith("[USER]: "):
+            continue
+        user_text = line[8:].strip()
+        if _looks_like_internal_prompt(user_text):
+            continue
+        return list(restored[index:])
+    return restored
+
+
 def _restore_native_prompt(prompt_body, response_body=""):
     prompt = _native_prompt_obj(prompt_body)
     if prompt is None:
         return []
     prompt_text = _native_prompt_text(prompt)
-    restored = list(_native_history_lines(prompt_text))
+    restored = list(_recent_conversation_lines(prompt_text) or _native_history_lines(prompt_text))
     user_text = _native_first_user_line(prompt_text)
     if user_text:
         _append_restored_line(restored, f"[USER]: {user_text}")
     summary = _native_response_summary(response_body)
     if summary:
         _append_restored_line(restored, f"[Agent] {summary}")
-    return restored
+    return _trim_leading_agent_context(restored)
 
 
 def _restore_native_history(content):
@@ -309,15 +418,24 @@ def _restore_native_history(content):
         elif pending_prompt is not None:
             pairs.append((pending_prompt, body))
             pending_prompt = None
+    pending_fallback = []
     if pending_prompt is not None:
         restored = _restore_native_prompt(pending_prompt)
         if restored:
-            return restored
+            pending_fallback = restored
+    fallback_with_user = []
+    fallback_any = pending_fallback
     for prompt_body, response_body in reversed(pairs):
         restored = _restore_native_prompt(prompt_body, response_body)
-        if restored:
+        has_user = any(line.startswith("[USER]: ") for line in restored)
+        has_agent = any(line.startswith("[Agent] ") for line in restored)
+        if restored and has_user and has_agent:
             return restored
-    return []
+        if restored and has_user and not fallback_with_user:
+            fallback_with_user = restored
+        if restored and not fallback_any:
+            fallback_any = restored
+    return fallback_with_user or fallback_any
 
 
 def format_restore(filepath=None, backend_kind=None):

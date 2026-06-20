@@ -59,6 +59,11 @@ class HistoryRestoreService:
         "### Research and Code Priority Guard",
         "[RESEARCH WORKFLOW]",
         "You are the execution engine",
+        "[DANGER]",
+        "[REFLECT]",
+        "[System]",
+        "TOOL_EVENTS:",
+        "cwd =",
     )
 
     # ── file discovery ──────────────────────────────────────────────────
@@ -130,13 +135,13 @@ class HistoryRestoreService:
                 line[8:] for line in restored
                 if isinstance(line, str) and line.startswith("[USER]: ")
             ]
-        first_q = self._extract_first_user_question(filepath)
-        if first_q:
-            return self._truncate_title(first_q)
         for question in questions:
             title = self._title_from_user_text(question)
             if title:
                 return self._truncate_title(title)
+        first_q = self._extract_first_user_question(filepath)
+        if first_q:
+            return self._truncate_title(first_q)
         return ""
 
     @classmethod
@@ -156,11 +161,17 @@ class HistoryRestoreService:
 
     @classmethod
     def _title_from_user_text(cls, text: str) -> str:
-        from frontends.chatapp_common import FILE_HINT
+        from frontends.chatapp_common import FILE_HINT, _recent_conversation_lines
 
         stripped = (text or "").strip()
         if stripped.startswith(FILE_HINT):
             stripped = stripped[len(FILE_HINT):].lstrip()
+        recent_lines = _recent_conversation_lines(stripped)
+        for line in recent_lines:
+            if line.startswith("[USER]: "):
+                candidate = line[8:].strip()
+                if candidate and not cls._looks_like_synthetic_user_text(candidate):
+                    return candidate.replace("\n", " ").strip()
         for marker in ("### 用户当前消息", "### Current User Message", "Original user request:"):
             if marker in stripped:
                 candidate = stripped.split(marker, 1)[-1].strip()

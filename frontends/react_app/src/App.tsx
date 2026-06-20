@@ -25,9 +25,10 @@ import {
   updateSettings,
   uploadFiles,
 } from "./api";
+import { ChatMessageItem } from "./ChatMessageItem";
 import { FrontierStatePanel } from "./FrontierStatePanel";
-import { MarkdownMessage } from "./MarkdownMessage";
-import { copyableMessageText, renderMessageText } from "./messageText";
+import { copyableMessageText } from "./messageText";
+import { hasVisibleTurnTrace, thinkingMapForEvents } from "./messageTrace";
 import { lastAssistantText, useAppStore } from "./store";
 import { TurnTraceList } from "./TurnTracePanel";
 import type { AgentEvent, AppSettings, RoutingMode } from "./types";
@@ -96,25 +97,8 @@ export default function App() {
     }
     return "";
   }, [messages]);
-  const hasTurnTrace = useMemo(
-    () => events.some((event) => event.turn > 0 && event.kind !== "status"),
-    [events],
-  );
-  const latestTraceTurn = useMemo(
-    () => events.reduce((maxTurn, event) => (event.kind === "status" ? maxTurn : Math.max(maxTurn, event.turn || 0)), 0),
-    [events],
-  );
-  const thinkingByTurn = useMemo(() => {
-    const map = new Map<number, string[]>();
-    for (const e of events) {
-      if (e.kind === "thinking_block" && e.text) {
-        const arr = map.get(e.turn) || [];
-        arr.push(e.text);
-        map.set(e.turn, arr);
-      }
-    }
-    return map;
-  }, [events]);
+  const hasTurnTrace = useMemo(() => hasVisibleTurnTrace(events), [events]);
+  const thinkingByTurn = useMemo(() => thinkingMapForEvents(events), [events]);
   const traceMessageId = hasTurnTrace
     ? streamingAssistantId || (status === "idle" || status === "error" ? latestAssistantId : "")
     : "";
@@ -513,34 +497,26 @@ export default function App() {
             </div>
           ) : (
             messages.map((message) => {
-              const text = renderMessageText(
-                message.text,
-                {
-                  role: message.role,
-                  compact: settings.compact_assistant_history,
-                  streaming: message.streaming,
-                  latestTraceTurn: message.id === traceMessageId ? latestTraceTurn : 0,
-                },
-              );
-              const showTraceHere = message.id === traceMessageId;
+              const messageTraceEvents = message.role === "assistant" ? (message.traceEvents || []) : [];
+              const liveTraceEvents = message.id === traceMessageId ? events : [];
+              const traceEventsForMessage = messageTraceEvents.length ? messageTraceEvents : liveTraceEvents;
+              const thinkingForMessage = messageTraceEvents.length ? thinkingMapForEvents(messageTraceEvents) : thinkingByTurn;
               const showFrontierHere = Boolean(frontierState?.enabled)
                 && message.role === "assistant"
                 && (message.id === traceMessageId || (!traceMessageId && message.id === latestAssistantId));
               const showCopyHere = message.role === "assistant" && message.id === latestAssistantId && Boolean(latestReply);
               return (
-                <article key={message.id} className={`message message-${message.role}`}>
-                  <div className="message-role">{message.role}</div>
-                  {showTraceHere && <TurnTraceList events={events} thinkingByTurn={thinkingByTurn} />}
-                  {showFrontierHere && <FrontierStatePanel snapshot={frontierState} />}
-                  {text && <MarkdownMessage role={message.role} text={text} />}
-                  {showCopyHere && (
-                    <div className="message-actions">
-                      <button className="message-copy-button" type="button" onClick={copyLastReply}>
-                        复制
-                      </button>
-                    </div>
-                  )}
-                </article>
+                <ChatMessageItem
+                  key={message.id}
+                  message={message}
+                  traceEvents={traceEventsForMessage}
+                  thinkingByTurn={thinkingForMessage}
+                  compactAssistantHistory={settings.compact_assistant_history}
+                  showFrontier={showFrontierHere}
+                  frontierState={frontierState}
+                  showCopy={showCopyHere}
+                  onCopy={copyLastReply}
+                />
               );
             })
           )}

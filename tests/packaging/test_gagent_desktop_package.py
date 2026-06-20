@@ -18,6 +18,9 @@ def test_gagent_desktop_manifest_is_publishable_and_whitelisted() -> None:
         "!backend/**/__pycache__/**",
         "!backend/**/*.pyc",
         "!backend/**/*.pyo",
+        "!backend/**/*.backup*",
+        "!backend/**/*.bak*",
+        "!backend/**/*.tgz",
         "bin/**/*",
         "electron/**/*",
         "scripts/**/*",
@@ -78,6 +81,32 @@ def test_gagent_desktop_cli_dry_run_can_override_with_external_repo() -> None:
     assert Path(payload["repo"]).resolve() == ROOT
     assert payload["repoSource"] == "arg"
     assert payload["usesPackagedBackend"] is False
+
+
+def test_gagent_desktop_desktop_requirements_include_web_search_bridge_deps() -> None:
+    requirements = {
+        line.strip().split(";", 1)[0].strip().lower()
+        for line in (PACKAGE / "backend" / "requirements-desktop.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+
+    assert "bottle" in requirements
+    assert "simple-websocket-server" in requirements
+
+
+def test_packaged_backend_contains_tmwd_browser_extension() -> None:
+    extension = PACKAGE / "backend" / "assets" / "tmwd_cdp_bridge"
+
+    for name in [
+        "manifest.json",
+        "background.js",
+        "config.js",
+        "content.js",
+        "disable_dialogs.js",
+        "popup.html",
+        "popup.js",
+    ]:
+        assert (extension / name).is_file()
 
 
 def test_gagent_desktop_cli_health_check_requires_current_api_contract() -> None:

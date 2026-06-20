@@ -153,7 +153,6 @@ def verify_distillation_candidate(
     candidate: dict[str, Any],
     tool_event_ledger: Any | None = None,
     change_classifier: Any | None = None,
-    smoke_cache_entries: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Cross-reference a distillation candidate against tool execution evidence.
 
@@ -165,7 +164,6 @@ def verify_distillation_candidate(
         candidate: From build_distillation_candidate().
         tool_event_ledger: ToolEventLedger instance (from M7) or None.
         change_classifier: ChangeClassifier instance (from M7) or None.
-        smoke_cache_entries: List of smoke cache entries relevant to files_touched.
 
     Returns:
         The candidate dict with added tool_cross_reference field:
@@ -177,8 +175,6 @@ def verify_distillation_candidate(
             "ledger_available": bool,
             "classifier_pending": int,
             "classifier_executed": int,
-            "smoke_verified": int,
-            "smoke_failed": int,
         }
     """
     ref: dict[str, Any] = {
@@ -189,8 +185,6 @@ def verify_distillation_candidate(
         "ledger_available": False,
         "classifier_pending": 0,
         "classifier_executed": 0,
-        "smoke_verified": 0,
-        "smoke_failed": 0,
     }
 
     # ── Cross-reference with tool event ledger ──
@@ -243,16 +237,6 @@ def verify_distillation_candidate(
         except Exception:
             pass
 
-    # ── Cross-reference with smoke cache ──
-    if smoke_cache_entries:
-        passed = sum(1 for e in smoke_cache_entries if e.get("status") == "passed")
-        failed = sum(1 for e in smoke_cache_entries if e.get("status") == "failed")
-        ref["smoke_verified"] = passed
-        ref["smoke_failed"] = failed
-        # Smoke-passed code is evidence of verified safety
-        if passed > 0 and not ref["verified"]:
-            ref["verified"] = True
-
     # ── Attach to candidate ──
     candidate["tool_cross_reference"] = ref
     return candidate
@@ -270,7 +254,6 @@ def build_verified_candidate(
     is_proposed: bool = False,
     tool_event_ledger: Any | None = None,
     change_classifier: Any | None = None,
-    smoke_cache_entries: list[dict] | None = None,
 ) -> dict[str, Any]:
     """Build and verify a distillation candidate in one step.
 
@@ -287,9 +270,7 @@ def build_verified_candidate(
         questions=questions,
         is_proposed=is_proposed,
     )
-    return verify_distillation_candidate(
-        candidate, tool_event_ledger, change_classifier, smoke_cache_entries
-    )
+    return verify_distillation_candidate(candidate, tool_event_ledger, change_classifier)
 
 
 def format_inbox_entry(candidate: dict[str, Any]) -> str:

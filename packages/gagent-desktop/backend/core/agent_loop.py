@@ -457,7 +457,16 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                             break
                         try:
                             chunk = next(response_gen)
-                            yield chunk
+                            if isinstance(chunk, dict) and "_thinking_delta" in chunk:
+                                yield from _emit_status(handler, {
+                                    "type": "status",
+                                    "event_type": "thinking_delta",
+                                    "scope": "classic_executor",
+                                    "message": chunk["_thinking_delta"],
+                                    "classic_turn": turn,
+                                })
+                            else:
+                                yield chunk
                         except StopIteration as e:
                             _resp = e.value
                             break
@@ -468,6 +477,14 @@ def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, 
                     yield "\n\n"
                 else:
                     response = exhaust(response_gen)
+                    if response.thinking:
+                        yield from _emit_status(handler, {
+                            "type": "status",
+                            "event_type": "thinking_blocks",
+                            "scope": "classic_executor",
+                            "message": response.thinking,
+                            "classic_turn": turn,
+                        })
                     cleaned = formatter.clean_content(response.content)
                     if cleaned:
                         yield cleaned + "\n"

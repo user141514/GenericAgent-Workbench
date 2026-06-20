@@ -1,8 +1,13 @@
 {
   "name": "gagent-desktop",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "GenericAgent desktop app with packaged React UI and sanitized local backend.",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+ssh://git@github.com/user141514/GenericAgent-Workbench.git",
+    "directory": "packages/gagent-desktop"
+  },
   "type": "commonjs",
   "main": "electron/main.cjs",
   "bin": {
@@ -29,6 +34,9 @@
   ],
   "scripts": {
     "dry-run": "node bin/gagent-desktop.js --dry-run --json",
+    "update": "node bin/gagent-desktop.js update",
+    "test:update": "node scripts/test-cli-update.cjs",
+    "test:update:cmd": "node scripts/test-cli-update-cmd.cjs",
     "pack:dry": "npm pack --dry-run",
     "pack:npm": "npm pack",
     "prepublishOnly": "node scripts/prepublish-check.cjs",

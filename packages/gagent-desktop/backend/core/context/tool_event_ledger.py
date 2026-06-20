@@ -43,7 +43,6 @@ class ToolEvent:
     timestamp: float = 0.0
     result_chars: int = 0
     error_like: bool = False
-    smoke_cache_status: str = ""  # smoke cache status: "hit_passed" | "hit_failed" | "miss" | ""
 
     def __post_init__(self):
         if self.timestamp == 0.0:
@@ -68,7 +67,6 @@ class ToolEvent:
             "timestamp": self.timestamp,
             "result_chars": self.result_chars,
             "error_like": self.error_like,
-            "smoke_cache_status": self.smoke_cache_status,
         }
 
     def one_line(self) -> str:
@@ -76,11 +74,7 @@ class ToolEvent:
         status_mark = {"success": "+", "error": "!", "interrupted": "~", "pending": "?"}.get(self.status, "?")
         target = f" → {self.target_path}" if self.target_path else ""
         result = f": {self.result_summary[:80]}" if self.result_summary else ""
-        smoke = ""
-        if self.smoke_cache_status:
-            smoke_marks = {"hit_passed": "[smoke✓]", "hit_failed": "[smoke✗]", "miss": "[smoke?]"}
-            smoke = " " + smoke_marks.get(self.smoke_cache_status, f"[{self.smoke_cache_status}]")
-        return f"[{status_mark}] {self.tool_name}({self.args_summary[:80]}){target}{result}{smoke}"
+        return f"[{status_mark}] {self.tool_name}({self.args_summary[:80]}){target}{result}"
 
 
 class ToolEventLedger:
@@ -105,7 +99,6 @@ class ToolEventLedger:
         target_path: str | None = None,
         turn: int = 0,
         index: int = 0,
-        smoke_cache_status: str = "",
     ) -> str:
         """Record a tool call before execution. Returns event_id."""
         if not tool_event_ledger_enabled():
@@ -118,7 +111,6 @@ class ToolEventLedger:
             target_path=target_path,
             turn=turn,
             index=index,
-            smoke_cache_status=smoke_cache_status,
         )
 
         event_id = f"{tool_name}_{turn}_{index}_{time.time()}"

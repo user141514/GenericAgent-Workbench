@@ -686,8 +686,17 @@ class GeneraticAgent(AgentBackend):
                     try:
                         from core.quality import (
                             build_research_code_priority_context,
+                            build_state_driven_thinking_context,
                             research_code_priority_enabled,
                         )
+                        state_context = build_state_driven_thinking_context(
+                            history_query,
+                            route_target=None,
+                            max_chars=2600,
+                        )
+                        state_block = str(state_context.get("block") or "").strip()
+                        if state_block:
+                            user_input = state_block + "\n\n" + user_input
                         if research_code_priority_enabled():
                             priority_context = build_research_code_priority_context(
                                 history_query,

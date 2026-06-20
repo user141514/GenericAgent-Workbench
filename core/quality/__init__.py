@@ -52,6 +52,13 @@ from .research_workflow import (
     score_research_workflow_response,
     should_inject_research_workflow,
 )
+from .state_driven_thinking import (
+    STATE_DRIVEN_ACTIONS,
+    STATE_DRIVEN_THINKING_ENV_VAR,
+    build_state_driven_thinking_context,
+    should_inject_state_driven_thinking,
+    state_driven_thinking_enabled,
+)
 
 __all__ = [
     "ANSWER_QUALITY_ENV_VAR",
@@ -61,6 +68,8 @@ __all__ = [
     "RESEARCH_WORKFLOW_ENV_VAR",
     "RESEARCH_WORKFLOW_MAX_CHARS_ENV_VAR",
     "RESEARCH_WORKFLOW_REPAIR_ENV_VAR",
+    "STATE_DRIVEN_ACTIONS",
+    "STATE_DRIVEN_THINKING_ENV_VAR",
     "REQUIRED_AUDIT_GATES",
     "CANDIDATE_OPERATORS",
     "ExecutionAction",
@@ -78,6 +87,7 @@ __all__ = [
     "build_problem_framing_context",
     "build_research_code_priority_context",
     "build_research_workflow_context",
+    "build_state_driven_thinking_context",
     "detect_causal_claims",
     "detect_quant_claims",
     "detect_state_transition_claims",
@@ -91,9 +101,11 @@ __all__ = [
     "research_workflow_enabled",
     "research_workflow_repair_enabled",
     "score_research_workflow_response",
+    "state_driven_thinking_enabled",
     "should_inject_answer_quality_context",
     "frontier_state_should_activate",
     "should_inject_problem_framing",
     "should_inject_research_code_priority",
     "should_inject_research_workflow",
+    "should_inject_state_driven_thinking",
 ]

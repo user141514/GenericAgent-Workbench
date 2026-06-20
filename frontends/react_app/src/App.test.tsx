@@ -116,6 +116,41 @@ describe("App chat surface", () => {
     expect(assistantMessage?.textContent).not.toContain("Tool: `file_read` args");
   });
 
+  it("renders preserved turn traces on previous assistant replies", async () => {
+    useAppStore.setState({
+      messages: [
+        { id: "u1", role: "user", text: "first task" },
+        {
+          id: "a1",
+          role: "assistant",
+          text: "first final",
+          traceEvents: [
+            event("turn_start", 1),
+            event("chunk", 1, "inspected files"),
+            event("turn_end", 1),
+          ],
+        },
+        { id: "u2", role: "user", text: "second task" },
+        { id: "a2", role: "assistant", text: "second final" },
+      ],
+      events: [],
+      runId: "",
+      status: "idle",
+    });
+
+    render(<App />);
+
+    await waitForSettings();
+    const turnTitle = screen.getByText("LLM Done (Turn 1) ...");
+    const assistantMessage = turnTitle.closest("article");
+    const finalAnswer = assistantMessage?.querySelector(".message-final-answer");
+    const traceSection = assistantMessage?.querySelector(".message-trace-section");
+
+    expect(finalAnswer?.textContent).toContain("first final");
+    expect(traceSection?.textContent).toContain("LLM Done (Turn 1) ...");
+    expect(assistantMessage?.textContent).not.toContain("second final");
+  });
+
   it("copies only the cleaned final assistant reply", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
@@ -158,6 +193,11 @@ describe("App chat surface", () => {
     render(<App />);
 
     await waitForSettings();
+    const finalAnswer = document.querySelector(".message-final-answer");
+    expect(finalAnswer?.textContent).toContain("Final audit");
+    expect(finalAnswer?.textContent).not.toContain("Tool:");
+    expect(finalAnswer?.textContent).not.toContain("[Action]");
+
     fireEvent.click(screen.getByRole("button", { name: "复制" }));
 
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("## Final audit\n\nOnly this should be copied."));

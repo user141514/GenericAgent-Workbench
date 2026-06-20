@@ -55,4 +55,17 @@ describe("buildTurnSummaries", () => {
     expect(turns[0].entries.map((entry) => entry.kind)).toEqual(["turn_start", "chunk", "chunk", "done"]);
     expect(turns[0].entries[turns[0].entries.length - 1]?.text).toBe("final");
   });
+
+  it("keeps thinking blocks out of detail lines", () => {
+    const turns = buildTurnSummaries([
+      event("turn_start", 1),
+      event("thinking_block", 1, "这"),
+      event("thinking_block", 1, "个"),
+      event("chunk", 1, "visible answer"),
+    ]);
+
+    expect(turns[0].text).toBe("visible answer");
+    expect(turns[0].entries.map((entry) => entry.kind)).toEqual(["turn_start", "chunk"]);
+    expect(turns[0].entries.map((entry) => entry.label)).not.toContain("thinking_block");
+  });
 });

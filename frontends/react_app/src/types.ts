@@ -25,6 +25,7 @@ export interface ChatMessage {
   role: "user" | "assistant" | "system";
   text: string;
   streaming?: boolean;
+  traceEvents?: AgentEvent[];
 }
 
 export interface FrontierStateSnapshot {

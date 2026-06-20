@@ -154,3 +154,49 @@ def test_web_search_uses_browser_driver_without_llm(monkeypatch):
     assert result["status"] == "success"
     assert result["results"][0]["url"] == "https://docs.python.org/"
     assert any("https://www.bing.com/search?q=python+docs" in script for script in fake.scripts)
+
+
+def test_web_search_github_engine_uses_api_without_browser(monkeypatch):
+    import core.ga as ga
+
+    class FakeResponse:
+        status_code = 200
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "total_count": 1,
+                "items": [
+                    {
+                        "full_name": "python/cpython",
+                        "html_url": "https://github.com/python/cpython",
+                        "description": "The Python programming language",
+                        "stargazers_count": 64000,
+                        "language": "Python",
+                        "updated_at": "2026-01-01T00:00:00Z",
+                    }
+                ],
+            }
+
+    captured = {}
+
+    def fake_get(url, **kwargs):
+        captured["url"] = url
+        captured["kwargs"] = kwargs
+        return FakeResponse()
+
+    monkeypatch.setattr(ga, "driver", None)
+    monkeypatch.setattr(ga, "first_init_driver", lambda: (_ for _ in ()).throw(AssertionError("browser used")))
+    monkeypatch.setattr(ga.requests, "get", fake_get)
+
+    result = ga.web_search("python cpython", engine="github", max_results=3, timeout=7)
+
+    assert result["status"] == "success"
+    assert result["engine"] == "github"
+    assert result["search_url"] == "https://api.github.com/search/repositories"
+    assert result["results"][0]["url"] == "https://github.com/python/cpython"
+    assert captured["url"] == "https://api.github.com/search/repositories"
+    assert captured["kwargs"]["params"]["q"] == "python cpython"
+    assert captured["kwargs"]["params"]["per_page"] == 3

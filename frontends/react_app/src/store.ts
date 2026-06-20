@@ -30,25 +30,50 @@ export interface AppState {
 export function applyAgentEvent(
   messages: ChatMessage[],
   event: AgentEvent,
+  currentEvents: AgentEvent[] = [],
 ): { messages: ChatMessage[]; status: RunStatus; error: string } {
   const next = [...messages];
   const last = next[next.length - 1];
   const terminal = event.kind === "done" || event.kind === "stopped" || event.kind === "error";
+  const traceEvents = traceEventsForMessage(currentEvents, event);
 
-  if (event.kind === "chunk" || event.kind === "turn_delta" || event.kind === "done" || event.kind === "stopped") {
+  if (event.kind === "chunk") {
     if (!last || last.role !== "assistant" || !last.streaming) {
-      next.push({ id: cryptoId(), role: "assistant", text: event.text, streaming: !terminal });
+      next.push({ id: cryptoId(), role: "assistant", text: event.text, streaming: true, traceEvents });
     } else {
-      next[next.length - 1] = { ...last, text: event.text, streaming: !terminal };
+      next[next.length - 1] = {
+        ...last,
+        text: mergeChunkText(last.text, event.text),
+        streaming: true,
+        traceEvents: appendTraceEvent(last.traceEvents, event),
+      };
     }
+  } else if (event.kind === "done" || event.kind === "stopped") {
+    if (!last || last.role !== "assistant" || !last.streaming) {
+      next.push({ id: cryptoId(), role: "assistant", text: event.text, streaming: false, traceEvents });
+    } else {
+      next[next.length - 1] = {
+        ...last,
+        text: event.text,
+        streaming: false,
+        traceEvents: appendTraceEvent(last.traceEvents, event),
+      };
+    }
+  } else if (shouldKeepTraceEvent(event) && last?.role === "assistant" && last.streaming) {
+    next[next.length - 1] = { ...last, traceEvents: appendTraceEvent(last.traceEvents, event) };
   }
 
   if (event.kind === "error") {
     const errorText = friendlyErrorText(event.error || "Run failed.");
     if (!last || last.role !== "assistant" || !last.streaming) {
-      next.push({ id: cryptoId(), role: "assistant", text: errorText, streaming: false });
+      next.push({ id: cryptoId(), role: "assistant", text: errorText, streaming: false, traceEvents });
     } else {
-      next[next.length - 1] = { ...last, text: errorText || last.text, streaming: false };
+      next[next.length - 1] = {
+        ...last,
+        text: errorText || last.text,
+        streaming: false,
+        traceEvents: appendTraceEvent(last.traceEvents, event),
+      };
     }
     return { messages: next, status: "error", error: errorText };
   }
@@ -117,13 +142,16 @@ export const useAppStore = create<AppState>((set) => ({
   setStopping: () => set({ status: "stopping" }),
   applyEvent: (event) =>
     set((state) => {
+      if (isStaleRunEvent(state.runId, event)) {
+        return {};
+      }
       if (event.kind === "frontier_state") {
         const snapshot = event.metadata.frontier_state;
         return {
           frontierState: isFrontierStateSnapshot(snapshot) ? snapshot : state.frontierState,
         };
       }
-      const applied = applyAgentEvent(state.messages, event);
+      const applied = applyAgentEvent(state.messages, event, state.events);
       return {
         messages: applied.messages,
         status: applied.status,
@@ -138,7 +166,11 @@ export const useAppStore = create<AppState>((set) => ({
   setError: (error) => set({ error: friendlyErrorText(error), status: "error" }),
   restoreConversation: (messages) =>
     set({
-      messages: messages.map((message) => ({ ...message, id: cryptoId() })),
+      messages: messages.map((message) => ({
+        ...message,
+        id: cryptoId(),
+        traceEvents: message.role === "assistant" ? synthesizeTraceEvents(message.text) : undefined,
+      })),
       events: [],
       frontierState: null,
       runId: "",
@@ -158,4 +190,81 @@ function cryptoId() {
     return globalThis.crypto.randomUUID();
   }
   return `id_${Math.random().toString(16).slice(2)}`;
+}
+
+function shouldKeepTraceEvent(event: AgentEvent) {
+  return Boolean(event.turn) && event.kind !== "status" && event.kind !== "frontier_state";
+}
+
+function isStaleRunEvent(runId: string, event: AgentEvent) {
+  return Boolean(runId && event.task_id && event.task_id !== runId);
+}
+
+function mergeChunkText(existing: string, chunk: string) {
+  if (!existing) return chunk;
+  if (!chunk) return existing;
+  if (chunk.startsWith(existing)) return chunk;
+  if (existing.endsWith(chunk)) return existing;
+  return `${existing}${chunk}`;
+}
+
+function traceEventsForMessage(currentEvents: AgentEvent[], event: AgentEvent) {
+  return [...currentEvents, event].filter(shouldKeepTraceEvent);
+}
+
+function appendTraceEvent(existing: AgentEvent[] | undefined, event: AgentEvent) {
+  if (!shouldKeepTraceEvent(event)) return existing;
+  return [...(existing || []), event];
+}
+
+function synthesizeTraceEvents(text: string): AgentEvent[] | undefined {
+  const raw = String(text || "");
+  const events: AgentEvent[] = [];
+  const markerRe = /\**LLM Running \(Turn (\d+)\) \.\.\.\**/g;
+  const matches = [...raw.matchAll(markerRe)];
+  for (const match of matches) {
+    const turn = Number(match[1] || 0);
+    if (!turn) continue;
+    events.push(syntheticEvent("turn_start", turn, "Recovered turn"));
+  }
+
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index];
+    const turn = Number(match[1] || 0);
+    const start = (match.index || 0) + match[0].length;
+    const end = index + 1 < matches.length ? matches[index + 1].index || raw.length : raw.length;
+    const segment = raw.slice(start, end);
+    const detail = firstTraceDetail(segment);
+    if (turn && detail) {
+      events.push(syntheticEvent("turn_delta", turn, detail));
+    }
+  }
+
+  return events.length ? events.sort((a, b) => a.turn - b.turn) : undefined;
+}
+
+function firstTraceDetail(segment: string) {
+  for (const line of String(segment || "").split(/\r?\n/)) {
+    const text = line.trim();
+    if (!text || text.startsWith("```")) continue;
+    if (text.startsWith("Tool:")) return text;
+    if (/^\[(?:Action|Status|Stdout|Stderr|Error|Info|Path Guard)\]/.test(text)) return text;
+    if (/^[a-z][a-z0-9_]*\(\{.*\}\)\s*$/.test(text)) return text;
+    if (text.includes("<tool_use") || text.includes("'type': 'tool_use'") || text.includes('"type": "tool_use"')) {
+      return "Recovered tool call";
+    }
+  }
+  return "";
+}
+
+function syntheticEvent(kind: AgentEvent["kind"], turn: number, text: string): AgentEvent {
+  return {
+    kind,
+    text,
+    error: "",
+    source: "history",
+    turn,
+    task_id: "restored_history",
+    metadata: { synthetic: true },
+  };
 }

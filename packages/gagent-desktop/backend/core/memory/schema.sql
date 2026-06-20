@@ -105,21 +105,3 @@ ON memory_candidates(scope_type, scope_id);
 
 CREATE INDEX IF NOT EXISTS idx_memory_events_memory_id
 ON memory_events(memory_id);
-
-CREATE TABLE IF NOT EXISTS smoke_cache (
-    code_hash TEXT PRIMARY KEY,
-    source_path TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'unknown',
-    output_snippet TEXT,
-    python_version TEXT,
-    key_deps TEXT,
-    passed_at TEXT,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_smoke_cache_source_path
-ON smoke_cache(source_path);
-
-CREATE INDEX IF NOT EXISTS idx_smoke_cache_status
-ON smoke_cache(status);

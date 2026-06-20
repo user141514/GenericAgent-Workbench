@@ -13,6 +13,7 @@ EVENT_KINDS = frozenset({
     "turn_start",   # new LLM turn began
     "turn_end",     # LLM turn completed
     "turn_delta",   # delta within a turn (paired with chunk)
+    "thinking_block",  # LLM reasoning/thinking content block
     "frontier_state",  # expandable research/audit state snapshot
     "stopped",      # user aborted
     "error",        # backend exception
@@ -79,8 +80,15 @@ class AgentOutputEvent:
         event_label = item.get("event", "")
         item_type = item.get("type", "")
         if item_type == "status":
-            kind = "turn_start" if item.get("event_type") == "classic_turn_started" else "status"
-            text = str(item.get("message", ""))
+            event_type = item.get("event_type", "")
+            if event_type == "classic_turn_started":
+                kind = "turn_start"
+            elif event_type in ("thinking_delta", "thinking_blocks"):
+                kind = "thinking_block"
+                text = str(item.get("message", ""))
+            else:
+                kind = "status"
+                text = str(item.get("message", ""))
         elif event_label in _LEGACY_EVENT_MAP:
             kind = _LEGACY_EVENT_MAP[event_label]
             if kind == "stopped":

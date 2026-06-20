@@ -62,8 +62,8 @@ describe("TurnTraceList", () => {
       <TurnTraceList
         events={[
           event("turn_start", 1),
-          event("thinking_block" as AgentEvent["kind"], 1, "Analyzing the codebase structure"),
-          event("thinking_block" as AgentEvent["kind"], 1, "Identifying relevant files"),
+          event("thinking_block", 1, "Analyzing the codebase structure"),
+          event("thinking_block", 1, "Identifying relevant files"),
           event("turn_end", 1),
           event("turn_start", 2),
         ]}
@@ -71,7 +71,6 @@ describe("TurnTraceList", () => {
       />,
     );
 
-    // Turn 1 card shows collapsed thinking
-    expect(screen.getByText("💭 思考过程 (2 steps)")).toBeTruthy();
+    expect(screen.getByText(/思考过程 · 2 段/)).toBeTruthy();
   });
 });

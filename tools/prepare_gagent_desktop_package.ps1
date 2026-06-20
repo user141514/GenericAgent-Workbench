@@ -78,6 +78,9 @@ try {
     Invoke-Robocopy (Join-Path $root "assets\icons") (Join-Path $assetsDest "icons") @(
         "/E", "/XD", "__pycache__", "/XF", "*.pyc", "*.pyo"
     )
+    Invoke-Robocopy (Join-Path $root "assets\tmwd_cdp_bridge") (Join-Path $assetsDest "tmwd_cdp_bridge") @(
+        "/E", "/XD", "__pycache__", "/XF", "*.pyc", "*.pyo"
+    )
 
     $memoryDest = Join-Path $packageBackend "memory"
     New-Item -ItemType Directory -Force -Path $memoryDest | Out-Null
@@ -106,6 +109,7 @@ try {
         "# Desktop backend runtime requirements",
         "# Keep this list focused; the full repository requirements include legacy UI/bot/vision stacks.",
         "beautifulsoup4",
+        "bottle",
         "eval_type_backport; python_version < `"3.10`"",
         "fastapi",
         "markdown",
@@ -118,6 +122,7 @@ try {
         "python-dotenv>=1.0",
         "pywin32; platform_system == `"Windows`"",
         "requests",
+        "simple-websocket-server",
         "urllib3",
         "uvicorn"
     ) | Set-Content -LiteralPath (Join-Path $packageBackend "requirements-desktop.txt") -Encoding UTF8

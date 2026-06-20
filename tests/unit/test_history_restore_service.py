@@ -229,6 +229,144 @@ class TestRestore:
         assert restored.restored[-1].startswith("[Agent] ")
         assert "TAIL_VISIBLE_AFTER_500" in restored.restored[-1]
 
+    def test_native_history_restore_expands_recent_conversation_turns(self, tmp_path):
+        prompt = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "[RECENT CONVERSATION — last 2 turns]\n"
+                        "## Turn 2\n"
+                        "USER: second question\n"
+                        "ASSISTANT: second answer summary\n"
+                        "TOOL_EVENTS:\n"
+                        "- none\n\n"
+                        "## Turn 1\n"
+                        "USER: first question\n"
+                        "ASSISTANT: first answer summary\n"
+                        "TOOL_EVENTS:\n"
+                        "- none\n"
+                        "[/RECENT CONVERSATION]\n\n"
+                        "current question"
+                    ),
+                }
+            ],
+        }
+        p = _make_history_file(
+            tmp_path,
+            "native_recent_turns.txt",
+            [
+                "=== Prompt ===",
+                json.dumps(prompt, ensure_ascii=False),
+                "=== Response ===",
+                repr([
+                    {"type": "thinking", "thinking": "internal"},
+                    {"type": "tool_use", "name": "file_read", "input": {}},
+                    {"type": "text", "text": "current answer summary"},
+                ]),
+            ],
+        )
+
+        svc = HistoryRestoreService()
+        restored = svc.restore(str(p), backend_kind="openai-agents")
+
+        assert svc.extract_title(str(p), backend_kind="openai-agents") == "first question"
+        assert restored is not None
+        assert restored.restored == [
+            "[USER]: first question",
+            "[Agent] first answer summary",
+            "[USER]: second question",
+            "[Agent] second answer summary",
+            "[USER]: current question",
+            "[Agent] current answer summary",
+        ]
+
+    def test_title_skips_internal_danger_reflect_prompts(self, tmp_path):
+        input_items = [
+            {"role": "user", "content": [{"type": "input_text", "text": "[DANGER] generated repair note"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "[REFLECT] retry note"}]},
+            {"role": "user", "content": [{"type": "input_text", "text": "real first question"}]},
+            {"role": "assistant", "content": [{"type": "output_text", "text": "answer"}]},
+        ]
+        p = _make_history_file(
+            tmp_path,
+            "input_items_internal_prompts.txt",
+            [
+                "=== INPUT_ITEMS ===",
+                json.dumps(input_items, ensure_ascii=False),
+            ],
+        )
+
+        title = HistoryRestoreService().extract_title(str(p), backend_kind="openai-agents")
+
+        assert title == "real first question"
+
+    def test_native_restore_prefers_question_answer_pair_over_agent_only_tail(self, tmp_path):
+        first_prompt = {
+            "role": "user",
+            "content": [{"type": "text", "text": "### Current User Message\nfirst question"}],
+        }
+        tail_prompt = {
+            "role": "user",
+            "content": [{"type": "text", "text": "[DANGER] generated repair note"}],
+        }
+        p = _make_history_file(
+            tmp_path,
+            "native_agent_only_tail.txt",
+            [
+                "=== Prompt ===",
+                json.dumps(first_prompt, ensure_ascii=False),
+                "=== Response ===",
+                repr([{"type": "text", "text": "first answer summary"}]),
+                "=== Prompt ===",
+                json.dumps(tail_prompt, ensure_ascii=False),
+                "=== Response ===",
+                repr([{"type": "text", "text": "agent-only tail"}]),
+            ],
+        )
+
+        restored = HistoryRestoreService().restore(str(p), backend_kind="openai-agents")
+
+        assert restored is not None
+        assert restored.restored == [
+            "[USER]: first question",
+            "[Agent] first answer summary",
+        ]
+
+    def test_native_restore_trims_leading_agent_context_when_user_exists(self, tmp_path):
+        prompt = {
+            "role": "user",
+            "content": [
+                {
+                    "type": "text",
+                    "text": (
+                        "<history>\n"
+                        "[Agent] stale assistant-only context\n"
+                        "[USER]: [System] Blank response, regenerate and tooluse\n"
+                        "[USER]: first question\n"
+                        "[Agent] first answer summary\n"
+                        "</history>"
+                    ),
+                }
+            ],
+        }
+        p = _make_history_file(
+            tmp_path,
+            "native_leading_agent.txt",
+            [
+                "=== Prompt ===",
+                json.dumps(prompt, ensure_ascii=False),
+                "=== Response ===",
+                repr([{"type": "text", "text": "current answer"}]),
+            ],
+        )
+
+        restored = HistoryRestoreService().restore(str(p), backend_kind="openai-agents")
+
+        assert restored is not None
+        assert restored.restored[0] == "[USER]: first question"
+
 
 class TestNoStreamlitDependency:
     """Service must work without Streamlit installed."""

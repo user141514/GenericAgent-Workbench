@@ -149,7 +149,7 @@
     "type": "function",
     "function": {
       "name": "web_search",
-      "description": "使用已连接浏览器标签页执行确定性的网页搜索，不调用 LLM 浏览器代理或付费搜索 API。适合 browser_agent 遇到 429/rate limit 后作为备用搜索链路。它会打开公共搜索页并用固定 JavaScript 抽取可见结果链接；失败时必须报告结构化阻塞，不要声称已经完成搜索。",
+      "description": "执行确定性的网页搜索，不调用 LLM 浏览器代理。普通搜索引擎会打开已连接浏览器标签页并用固定 JavaScript 抽取可见结果链接；需要 GitHub 仓库结果或浏览器搜索不可用时，使用 engine=github 直接调用 GitHub 公共搜索 API。失败时必须报告结构化阻塞，不要声称已经完成搜索。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -163,9 +163,10 @@
               "bing",
               "duckduckgo",
               "google",
-              "scholar"
+              "scholar",
+              "github"
             ],
-            "description": "要在浏览器中打开的公共搜索引擎。",
+            "description": "搜索引擎。普通引擎会在已连接浏览器中打开；github 会直接调用 GitHub 仓库搜索 API。",
             "default": "bing"
           },
           "max_results": {

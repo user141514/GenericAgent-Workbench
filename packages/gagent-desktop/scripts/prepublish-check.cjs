@@ -65,6 +65,31 @@ function checkDistAssets() {
   }
 }
 
+function checkTmwdExtensionAssets() {
+  const required = [
+    "backend/assets/tmwd_cdp_bridge/manifest.json",
+    "backend/assets/tmwd_cdp_bridge/background.js",
+    "backend/assets/tmwd_cdp_bridge/config.js",
+    "backend/assets/tmwd_cdp_bridge/content.js",
+    "backend/assets/tmwd_cdp_bridge/disable_dialogs.js",
+    "backend/assets/tmwd_cdp_bridge/popup.html",
+    "backend/assets/tmwd_cdp_bridge/popup.js",
+  ];
+  for (const relativePath of required) {
+    if (!exists(relativePath)) {
+      fail(`packaged TMWebDriver extension is missing ${relativePath}.`);
+    }
+  }
+  const manifestPath = path.join(packageRoot, "backend", "assets", "tmwd_cdp_bridge", "manifest.json");
+  if (fs.existsSync(manifestPath)) {
+    try {
+      JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+    } catch (error) {
+      fail(`packaged TMWebDriver extension manifest is invalid JSON: ${error.message}`);
+    }
+  }
+}
+
 function checkDryRun() {
   const result = run(nodeBin, ["bin/gagent-desktop.js", "--dry-run", "--json"]);
   if (result.status !== 0) {
@@ -114,12 +139,25 @@ function checkPackDryRun() {
     "electron/main.cjs",
     "dist/index.html",
     "backend/core/api/server.py",
+    "backend/assets/tmwd_cdp_bridge/manifest.json",
     "backend/requirements-desktop.txt",
     "python-runtime/python.exe",
   ]) {
     if (!paths.has(required)) {
       fail(`npm pack output is missing ${required}`);
     }
+  }
+}
+
+function checkEmbeddedPythonImports() {
+  const pythonExe = path.join(packageRoot, "python-runtime", process.platform === "win32" ? "python.exe" : "bin/python");
+  if (!fs.existsSync(pythonExe)) {
+    fail(`embedded Python executable is missing: ${pythonExe}`);
+    return;
+  }
+  const result = run(pythonExe, ["-c", "import bottle, simple_websocket_server"]);
+  if (result.status !== 0) {
+    fail(`embedded Python is missing web_search bridge dependencies:\n${result.stderr || result.stdout}`);
   }
 }
 
@@ -137,8 +175,10 @@ if (!exists("python-runtime/python.exe")) {
   fail("embedded Windows Python runtime is missing.");
 }
 checkDistAssets();
+checkTmwdExtensionAssets();
 checkDryRun();
 checkPackDryRun();
+checkEmbeddedPythonImports();
 
 if (process.exitCode) {
   process.exit(process.exitCode);

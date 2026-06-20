@@ -31,6 +31,7 @@ from .quality import (
     build_problem_framing_context,
     build_research_code_priority_context,
     build_research_workflow_context,
+    build_state_driven_thinking_context,
     problem_framing_enabled,
     research_code_priority_enabled,
     research_workflow_enabled,
@@ -38,6 +39,8 @@ from .quality import (
     should_inject_problem_framing,
     should_inject_research_code_priority,
     should_inject_research_workflow,
+    should_inject_state_driven_thinking,
+    state_driven_thinking_enabled,
 )
 from .openai_runtime import (
     ClassicProgressAccumulator,
@@ -2134,6 +2137,11 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     raw_query,
                     route_target=route_target,
                 )
+                state_driven_thinking_flag = bool(state_driven_thinking_enabled())
+                state_driven_thinking_query_match = should_inject_state_driven_thinking(
+                    raw_query,
+                    route_target=route_target,
+                )
                 answer_quality_route_override = (
                     answer_quality_flag
                     and answer_quality_query_match
@@ -2360,6 +2368,34 @@ class OpenAIOrchestratedAgent(AgentBackend):
                             "required_sections": [],
                             "required_audit_gates": [],
                         }
+                state_driven_thinking_context = {
+                    "block": "",
+                    "chars": 0,
+                    "matched": False,
+                    "reason": "disabled",
+                }
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS:
+                    if state_driven_thinking_flag:
+                        if state_driven_thinking_query_match:
+                            state_driven_thinking_context = build_state_driven_thinking_context(
+                                raw_query,
+                                route_target=route_target,
+                                max_chars=2600,
+                            )
+                        else:
+                            state_driven_thinking_context = {
+                                "block": "",
+                                "chars": 0,
+                                "matched": False,
+                                "reason": "query did not match state-driven thinking triggers",
+                            }
+                    else:
+                        state_driven_thinking_context = {
+                            "block": "",
+                            "chars": 0,
+                            "matched": False,
+                            "reason": "state-driven thinking disabled",
+                        }
                 if profiler is not None:
                     profiler.record_event(
                         "research_workflow_gate",
@@ -2539,6 +2575,10 @@ class OpenAIOrchestratedAgent(AgentBackend):
                     research_workflow_required_audit_gates=list(
                         research_workflow_context.get("required_audit_gates") or []
                     ),
+                    state_driven_thinking_enabled=state_driven_thinking_flag,
+                    state_driven_thinking_context_injected=bool(state_driven_thinking_context.get("block")),
+                    state_driven_thinking_context_chars=int(state_driven_thinking_context.get("chars") or 0),
+                    state_driven_thinking_reason=str(state_driven_thinking_context.get("reason") or ""),
                     read_prefetch_should_prefetch=read_prefetch_should_prefetch,
                     read_prefetch_target_file=read_prefetch_target_file,
                     read_prefetch_reason=read_prefetch_reason,
@@ -2580,6 +2620,11 @@ class OpenAIOrchestratedAgent(AgentBackend):
                 )
                 if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS and research_workflow_block:
                     inputs.append({"role": "user", "content": research_workflow_block})
+                state_driven_thinking_block = _sanitize_runtime_injected_text(
+                    str(state_driven_thinking_context.get("block") or "").strip()
+                )
+                if selected_agent_name in ORCHESTRATOR_CONTEXT_AGENTS and state_driven_thinking_block:
+                    inputs.append({"role": "user", "content": state_driven_thinking_block})
                 problem_framing_block = _sanitize_runtime_injected_text(
                     str(problem_framing_context.get("block") or "").strip()
                 )
@@ -2679,6 +2724,7 @@ class OpenAIOrchestratedAgent(AgentBackend):
                         route_hint=route_hint if (route_hint and selected_agent is agents["root"]) else "",
                         answer_quality=answer_quality_block,
                         research_workflow=research_workflow_block,
+                        state_driven_thinking=state_driven_thinking_block,
                         sop_context=optional_sop_block,
                         prefetch_block=prefetch_block if prefetch_injected else "",
                         clarification=_clarify_text,

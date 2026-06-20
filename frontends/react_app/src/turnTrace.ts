@@ -46,7 +46,7 @@ export function buildTurnSummaries(events: AgentEvent[]): TurnSummary[] {
     }
 
     const text = summarizeEventText(event.error || event.text);
-    if (event.kind !== "status" && text) {
+    if (event.kind !== "status" && event.kind !== "thinking_block" && text) {
       current.text = text;
       current.entries = [
         ...current.entries,

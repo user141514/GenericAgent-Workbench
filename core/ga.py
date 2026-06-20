@@ -3,6 +3,7 @@ from datetime import datetime
 from pathlib import Path
 import tempfile, traceback, subprocess, itertools, collections, difflib, hashlib, shutil
 from urllib.parse import quote_plus
+import requests
 if sys.stdout is None: sys.stdout = open(os.devnull, "w")
 if sys.stderr is None: sys.stderr = open(os.devnull, "w")
 PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
@@ -132,6 +133,8 @@ def ask_user(question, candidates=None):
 from . import simphtml
 driver = None
 _tmwd_browser_proc = None
+_DEFAULT_TMWD_START_URL = "about:blank"
+_GITHUB_SEARCH_API = "https://api.github.com/search/repositories"
 
 
 def _env_enabled(name, default="1"):
@@ -164,6 +167,18 @@ def _build_tmwd_browser_cmd(browser_exe, profile_dir, extension_dir, start_url):
     ]
 
 
+def _is_valid_tmwd_extension_dir(extension_dir):
+    manifest_path = os.path.join(extension_dir, "manifest.json")
+    if not os.path.isdir(extension_dir) or not os.path.isfile(manifest_path):
+        return False
+    try:
+        with open(manifest_path, "r", encoding="utf-8") as manifest_file:
+            json.load(manifest_file)
+    except (OSError, json.JSONDecodeError):
+        return False
+    return True
+
+
 def _launch_tmwd_browser():
     global _tmwd_browser_proc
     if not _env_enabled("GENERIC_AGENT_WEB_AUTOLAUNCH", "1"):
@@ -172,12 +187,17 @@ def _launch_tmwd_browser():
         return True
     browser_exe = _find_tmwd_browser_exe()
     extension_dir = os.path.join(PROJECT_ROOT, "assets", "tmwd_cdp_bridge")
-    if not browser_exe or not os.path.isdir(extension_dir):
+    if not browser_exe:
+        return False
+    if not _is_valid_tmwd_extension_dir(extension_dir):
+        print(f"[TMWebDriver] browser autolaunch skipped; extension manifest is missing or invalid: {extension_dir}")
         return False
     profile_dir = os.environ.get("GENERIC_AGENT_TMWD_PROFILE_DIR") or os.path.join(
         PROJECT_ROOT, "temp", "tmwd_edge_profile"
     )
-    start_url = os.environ.get("GENERIC_AGENT_WEB_AUTOLAUNCH_URL", "https://example.com")
+    start_url = os.environ.get("GENERIC_AGENT_WEB_AUTOLAUNCH_URL", _DEFAULT_TMWD_START_URL).strip()
+    if not start_url:
+        start_url = _DEFAULT_TMWD_START_URL
     os.makedirs(profile_dir, exist_ok=True)
     cmd = _build_tmwd_browser_cmd(browser_exe, profile_dir, extension_dir, start_url)
     creationflags = 0
@@ -228,11 +248,88 @@ _SEARCH_ENGINES = {
     "scholar": "https://scholar.google.com/scholar?q={query}",
 }
 
+_GITHUB_ENGINE_ALIASES = {
+    "github",
+    "github_api",
+    "github-api",
+    "github_repo",
+    "github-repo",
+    "github_repos",
+    "github-repos",
+    "github_repositories",
+    "github-repositories",
+}
+
 
 def _web_search_url(query, engine="bing"):
     engine_key = str(engine or "bing").strip().lower()
     template = _SEARCH_ENGINES.get(engine_key, _SEARCH_ENGINES["bing"])
     return template.format(query=quote_plus(str(query or "").strip()))
+
+
+def _github_search_headers():
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "GenericAgent-Workbench",
+    }
+    token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
+
+
+def _github_api_search(query, max_results=8, timeout=18):
+    try:
+        limit = int(max_results or 8)
+    except (TypeError, ValueError):
+        limit = 8
+    limit = max(1, min(limit, 20))
+    try:
+        request_timeout = int(timeout or 18)
+    except (TypeError, ValueError):
+        request_timeout = 18
+    request_timeout = max(3, min(request_timeout, 60))
+
+    try:
+        response = requests.get(
+            _GITHUB_SEARCH_API,
+            params={"q": query, "per_page": limit},
+            headers=_github_search_headers(),
+            timeout=request_timeout,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        results = []
+        for item in list(payload.get("items") or [])[:limit]:
+            url = item.get("html_url") or ""
+            title = item.get("full_name") or item.get("name") or url
+            description = item.get("description") or ""
+            results.append({
+                "rank": len(results) + 1,
+                "title": title,
+                "url": url,
+                "snippet": description,
+                "stars": item.get("stargazers_count", 0),
+                "language": item.get("language"),
+                "updated_at": item.get("updated_at"),
+            })
+        return {
+            "status": "success",
+            "query": query,
+            "engine": "github",
+            "search_url": _GITHUB_SEARCH_API,
+            "result_count": len(results),
+            "total_count": int(payload.get("total_count") or len(results)),
+            "results": results,
+        }
+    except Exception as e:
+        return {
+            "status": "error",
+            "query": query,
+            "engine": "github",
+            "search_url": _GITHUB_SEARCH_API,
+            "msg": format_error(e),
+        }
 
 
 def _web_search_extract_script(max_results=8):
@@ -302,16 +399,20 @@ return (() => {{
 
 
 def web_search(query, engine="bing", max_results=8, timeout=18, switch_tab_id=None):
-    """Deterministic browser-backed web search.
+    """Deterministic web search.
 
-    This does not call an LLM or paid search API. It navigates a connected
-    browser tab to a public search URL and extracts visible result links.
+    Browser engines navigate a connected tab to a public search URL and extract
+    visible result links. The github engine uses the public GitHub REST API
+    directly so repository search still works when the browser bridge is down.
     """
     global driver
     query = str(query or "").strip()
     if not query:
         return {"status": "error", "msg": "query is empty"}
     try:
+        engine_key = str(engine or "bing").strip().lower()
+        if engine_key in _GITHUB_ENGINE_ALIASES:
+            return _github_api_search(query, max_results=max_results, timeout=timeout)
         if driver is None:
             first_init_driver()
         if driver is None or len(driver.get_all_sessions()) == 0:
@@ -326,7 +427,6 @@ def web_search(query, engine="bing", max_results=8, timeout=18, switch_tab_id=No
             if sessions:
                 driver.default_session_id = sessions[0].get("id")
 
-        engine_key = str(engine or "bing").strip().lower()
         if engine_key not in _SEARCH_ENGINES:
             engine_key = "bing"
         search_url = _web_search_url(query, engine_key)

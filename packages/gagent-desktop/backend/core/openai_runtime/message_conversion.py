@@ -1,4 +1,4 @@
-"""Pure message conversion utilities — history lines, chat messages, Claude API format."""
+"""Pure message conversion utilities -- history lines, chat messages, Claude API format."""
 from __future__ import annotations
 
 import json

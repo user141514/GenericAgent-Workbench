@@ -67,11 +67,19 @@ def _run_loop(*, verbose: bool, response_text: str, handler: _RecordingHandler |
     return output, handler
 
 
-def test_verbose_loop_consumes_tool_calls_from_generator_return_value():
+def test_verbose_loop_consumes_tool_calls_from_generator_return_value_without_displaying_tool_logs():
     output, handler = _run_loop(verbose=True, response_text=_tool_use("file_read"))
 
     assert "file_read" in handler.dispatched
-    assert "[tool 0] file_read" in output
+    assert "[tool 0] file_read" not in output
+
+
+def test_verbose_formatter_exposes_hide_tool_calls_interface():
+    from core.protocol.formatter import CompactFormatter, NullFormatter, VerboseFormatter
+
+    assert VerboseFormatter().hide_tool_calls() is True
+    assert CompactFormatter().hide_tool_calls() is True
+    assert NullFormatter().hide_tool_calls() is True
 
 
 def test_compact_loop_consumes_tool_calls_from_generator_return_value():

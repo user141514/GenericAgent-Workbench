@@ -26,6 +26,27 @@ npm install -g gagent-desktop
 gagent-desktop
 ```
 
+To update an existing global install later from either PowerShell or `cmd.exe`:
+
+```powershell
+gagent-desktop update
+# equivalent:
+gagent-desktop --update
+```
+
+In plain `cmd.exe`, the same commands are:
+
+```cmd
+gagent-desktop update
+gagent-desktop --update
+```
+
+When running from the package directory, the same updater is available through:
+
+```powershell
+npm run update
+```
+
 If the package was built without `python-runtime/`, the launcher falls back to a
 local virtual environment in `~/.gagent-desktop/python-env`. You can prepare that
 fallback environment explicitly:
@@ -146,6 +167,9 @@ backend passed with `--repo` and `--python`.
 
 ```powershell
 npm run dry-run
+npm run update
+npm run test:update
+npm run test:update:cmd
 npm pack --dry-run
 npm publish --dry-run
 ```

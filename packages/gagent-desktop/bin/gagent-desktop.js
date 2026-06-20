@@ -34,6 +34,9 @@ function parseArgs(argv) {
   if (rest[0] === "setup") {
     args.setup = true;
     rest.shift();
+  } else if (rest[0] === "update") {
+    args.update = true;
+    rest.shift();
   }
 
   for (let index = 0; index < rest.length; index += 1) {
@@ -56,10 +59,13 @@ function parseArgs(argv) {
 
 function usage() {
   return [
-    "Usage: gagent-desktop [setup] [options]",
+    "Usage: gagent-desktop [setup|update] [options]",
+    "",
+    "Commands:",
+    "  setup             Create/update the bundled backend Python environment and exit.",
+    "  update            Check npm for a newer version and self-update.",
     "",
     "Options:",
-    "  setup             Create/update the bundled backend Python environment and exit.",
     "  --repo <path>     Optional external GAgent-Multi checkout. Defaults to packaged backend.",
     "  --python <path>   Python executable for setup. Defaults to GAGENT_PYTHON or python.",
     "  --host <host>     API host. Default: 127.0.0.1.",
@@ -255,44 +261,47 @@ function compareVersions(a, b) {
   return 0;
 }
 
-async function updateSelf() {
-  const current = packageVersion();
-  const npmName = "gagent-desktop";
+async function updateSelf(options = {}) {
+  const current = options.currentVersion || packageVersion();
+  const npmName = options.packageName || "gagent-desktop";
+  const logger = options.logger || console;
+  const latestVersionFetcher = options.fetchLatestVersion || fetchLatestVersion;
+  const installer = options.runInstall || ((command, args) => spawnSync(command, args, {
+    stdio: "inherit",
+    shell: false,
+  }));
 
-  console.log(`gagent-desktop ${current} — checking for updates...`);
+  logger.log(`gagent-desktop ${current} - checking for updates...`);
 
-  const latest = await fetchLatestVersion(npmName);
+  const latest = await latestVersionFetcher(npmName);
   if (!latest) {
-    console.log("Could not reach npm registry. Try again later.");
+    logger.log("Could not reach npm registry. Try again later.");
     return 1;
   }
 
   if (current === latest) {
-    console.log(`Already up to date (v${current}).`);
+    logger.log(`Already up to date (v${current}).`);
     return 0;
   }
 
   // Don't downgrade if current is newer than npm registry
   if (compareVersions(current, latest) >= 0) {
-    console.log(`Already up to date (v${current}). Remote is v${latest}.`);
+    logger.log(`Already up to date (v${current}). Remote is v${latest}.`);
     return 0;
   }
 
-  console.log(`Update available: v${current} → v${latest}`);
-  console.log(`Running: npm install -g ${npmName}@latest ...`);
+  logger.log(`Update available: v${current} -> v${latest}`);
+  logger.log(`Running: npm install -g ${npmName}@latest ...`);
 
-  const result = spawnSync(
-    process.platform === "win32" ? "npm.cmd" : "npm",
-    ["install", "-g", `${npmName}@latest`],
-    { stdio: "inherit", shell: false },
-  );
+  const npmCommand = options.npmCommand || (process.platform === "win32" ? "npm.cmd" : "npm");
+  const result = installer(npmCommand, ["install", "-g", `${npmName}@latest`]);
 
   if (result.status !== 0) {
-    console.error(`Update failed (exit ${result.status}). Try manually: npm install -g ${npmName}@latest`);
+    logger.error(`Update failed (exit ${result.status}). Try manually: npm install -g ${npmName}@latest`);
     return 1;
   }
 
-  console.log(`Updated to v${latest}. Restart gagent-desktop to use the new version.`);
+  logger.log(`Updated to v${latest}. Restart gagent-desktop to use the new version.`);
   return 0;
 }
 
@@ -474,10 +483,19 @@ function fail(message) {
   process.exit(1);
 }
 
-main()
-  .then((code) => {
-    process.exitCode = code;
-  })
-  .catch((error) => {
-    fail(error && error.message ? error.message : String(error));
-  });
+if (require.main === module) {
+  main()
+    .then((code) => {
+      process.exitCode = code;
+    })
+    .catch((error) => {
+      fail(error && error.message ? error.message : String(error));
+    });
+}
+
+module.exports = {
+  compareVersions,
+  fetchLatestVersion,
+  parseArgs,
+  updateSelf,
+};

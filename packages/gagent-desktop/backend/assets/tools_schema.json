@@ -44,10 +44,10 @@
   }},
   {"type": "function", "function": {
     "name": "web_search",
-    "description": "Run deterministic browser-backed web search without using an LLM browser agent or paid search API. Use this when online search is needed, especially after browser_agent hits rate limits. It navigates a connected browser tab to a public search page and extracts visible result links with fixed JavaScript. If it fails, report the structured blocker instead of claiming search was performed.",
+    "description": "Run deterministic web search without using an LLM browser agent. Browser engines navigate a connected browser tab to a public search page and extract visible result links with fixed JavaScript. Use engine=github for direct GitHub repository search through the public GitHub API when browser search is unavailable or GitHub sources are needed. If it fails, report the structured blocker instead of claiming search was performed.",
     "parameters": {"type": "object", "properties": {
       "query": {"type": "string", "description": "Search query. Keep it concise and source-oriented."},
-      "engine": {"type": "string", "enum": ["bing", "duckduckgo", "google", "scholar"], "description": "Public search engine to open in the connected browser tab.", "default": "bing"},
+      "engine": {"type": "string", "enum": ["bing", "duckduckgo", "google", "scholar", "github"], "description": "Search engine. Browser engines open a connected browser tab; github uses the public GitHub repository search API directly.", "default": "bing"},
       "max_results": {"type": "integer", "description": "Maximum extracted result links. Keep small unless broader source scouting is needed.", "default": 8},
       "timeout": {"type": "integer", "description": "Maximum seconds to wait for search page load and extraction.", "default": 18},
       "switch_tab_id": {"type": "string", "description": "[Optional] Switch to this tab before navigating to the search URL."}},

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from .types import EvidenceChunk, MemoryCandidate, MemoryEvent, MemoryItem, SmokeCacheEntry
+from .types import EvidenceChunk, MemoryCandidate, MemoryEvent, MemoryItem
 from .write_gate import MemoryWriteDecision, MemoryWriteGate
 
 
@@ -64,28 +64,6 @@ class MemoryStore:
             conn.execute("ALTER TABLE evidence_chunks ADD COLUMN content_hash TEXT")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_evidence_chunks_content_hash ON evidence_chunks(content_hash)"
-        )
-        # Auto-create smoke_cache table if upgrading from older schema
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS smoke_cache (
-                code_hash TEXT PRIMARY KEY,
-                source_path TEXT NOT NULL,
-                status TEXT NOT NULL DEFAULT 'unknown',
-                output_snippet TEXT,
-                python_version TEXT,
-                key_deps TEXT,
-                passed_at TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_smoke_cache_source_path ON smoke_cache(source_path)"
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_smoke_cache_status ON smoke_cache(status)"
         )
 
     def _check_write_gate(
@@ -466,141 +444,6 @@ class MemoryStore:
                     "SQLite FTS5 is required for evidence chunk indexing, but this SQLite build does not support it."
                 ) from exc
             raise
-
-    # ══════════════════════════════════════════════════════════════════
-    # Smoke cache — content-addressed code safety memory
-    # ══════════════════════════════════════════════════════════════════
-
-    def get_smoke_cache(self, code_hash: str) -> SmokeCacheEntry | None:
-        """Look up a smoke cache entry by code hash."""
-        with self._connection() as conn:
-            row = conn.execute(
-                """
-                SELECT code_hash, source_path, status, output_snippet,
-                       python_version, key_deps, passed_at, created_at, updated_at
-                FROM smoke_cache
-                WHERE code_hash = ?
-                """,
-                (code_hash,),
-            ).fetchone()
-        if row is None:
-            return None
-        return SmokeCacheEntry(
-            code_hash=row["code_hash"],
-            source_path=row["source_path"],
-            status=row["status"],
-            output_snippet=row["output_snippet"],
-            python_version=row["python_version"],
-            key_deps=row["key_deps"],
-            passed_at=row["passed_at"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
-        )
-
-    def set_smoke_cache(
-        self,
-        *,
-        code_hash: str,
-        source_path: str,
-        status: str = "passed",
-        output_snippet: str | None = None,
-        python_version: str | None = None,
-        key_deps: str | None = None,
-    ) -> SmokeCacheEntry:
-        """Insert or update a smoke cache entry. Returns the entry."""
-        now = _utc_now_iso()
-        passed_at = now if status == "passed" else None
-
-        with self._connection() as conn:
-            # Check existing
-            existing = conn.execute(
-                "SELECT status, passed_at FROM smoke_cache WHERE code_hash = ?",
-                (code_hash,),
-            ).fetchone()
-
-            if existing:
-                # Update — preserve existing passed_at if re-passing
-                keep_passed_at = existing["passed_at"]
-                if status == "passed" and not keep_passed_at:
-                    keep_passed_at = now
-                conn.execute(
-                    """
-                    UPDATE smoke_cache
-                    SET source_path = ?, status = ?, output_snippet = ?,
-                        python_version = ?, key_deps = ?, passed_at = ?, updated_at = ?
-                    WHERE code_hash = ?
-                    """,
-                    (
-                        source_path, status, output_snippet,
-                        python_version, key_deps, keep_passed_at, now, code_hash,
-                    ),
-                )
-            else:
-                conn.execute(
-                    """
-                    INSERT INTO smoke_cache
-                        (code_hash, source_path, status, output_snippet,
-                         python_version, key_deps, passed_at, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        code_hash, source_path, status, output_snippet,
-                        python_version, key_deps, passed_at, now, now,
-                    ),
-                )
-
-        return SmokeCacheEntry(
-            code_hash=code_hash,
-            source_path=source_path,
-            status=status,
-            output_snippet=output_snippet,
-            python_version=python_version,
-            key_deps=key_deps,
-            passed_at=passed_at,
-            created_at=existing["created_at"] if existing else now,
-            updated_at=now,
-        )
-
-    def invalidate_smoke_cache(self, *, code_hash: str | None = None, source_path: str | None = None) -> int:
-        """Delete smoke cache entries by hash or by path. Returns count deleted."""
-        with self._connection() as conn:
-            if code_hash:
-                cursor = conn.execute("DELETE FROM smoke_cache WHERE code_hash = ?", (code_hash,))
-            elif source_path:
-                cursor = conn.execute("DELETE FROM smoke_cache WHERE source_path = ?", (source_path,))
-            else:
-                cursor = conn.execute("DELETE FROM smoke_cache")
-            return cursor.rowcount
-
-    def get_smoke_cache_by_path(self, source_path: str) -> list[SmokeCacheEntry]:
-        """Return all smoke cache entries for a given source path."""
-        with self._connection() as conn:
-            rows = conn.execute(
-                """
-                SELECT code_hash, source_path, status, output_snippet,
-                       python_version, key_deps, passed_at, created_at, updated_at
-                FROM smoke_cache
-                WHERE source_path = ?
-                ORDER BY updated_at DESC
-                """,
-                (source_path,),
-            ).fetchall()
-        return [
-            SmokeCacheEntry(
-                code_hash=row["code_hash"],
-                source_path=row["source_path"],
-                status=row["status"],
-                output_snippet=row["output_snippet"],
-                python_version=row["python_version"],
-                key_deps=row["key_deps"],
-                passed_at=row["passed_at"],
-                created_at=row["created_at"],
-                updated_at=row["updated_at"],
-            )
-            for row in rows
-        ]
-
-    # ── End smoke cache ──
 
     @staticmethod
     def _row_to_memory_item(row: sqlite3.Row) -> MemoryItem:

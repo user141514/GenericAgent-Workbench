@@ -19,7 +19,7 @@ describe("ThinkingChain", () => {
         isLive={false}
       />,
     );
-    expect(screen.getByText(/思考过程 \(2 steps\)/)).toBeTruthy();
+    expect(screen.getByText(/思考过程 · 2 段/)).toBeTruthy();
     expect(screen.queryByText("Step 1 text")).toBeNull();
   });
 
@@ -42,14 +42,14 @@ describe("ThinkingChain", () => {
 
     rerender(<ThinkingChain steps={["Step 1"]} isLive={false} />);
     expect(screen.queryByText("Step 1")).toBeNull();
-    expect(screen.getByText(/思考过程 \(1 steps\)/)).toBeTruthy();
+    expect(screen.getByText(/思考过程 · 1 段/)).toBeTruthy();
   });
 
   it("expands on click when collapsed", () => {
     render(
       <ThinkingChain steps={["Expand me"]} isLive={false} />,
     );
-    fireEvent.click(screen.getByText(/思考过程 \(1 steps\)/));
+    fireEvent.click(screen.getByText(/思考过程 · 1 段/));
     expect(screen.getByText("Expand me")).toBeTruthy();
   });
 
@@ -57,17 +57,17 @@ describe("ThinkingChain", () => {
     render(
       <ThinkingChain steps={["Collapse me"]} isLive={true} />,
     );
-    const header = screen.getByText(/思考过程 \(1 steps\)/);
+    const header = screen.getByText(/思考过程 · 1 段/);
     fireEvent.click(header);
     expect(screen.queryByText("Collapse me")).toBeNull();
   });
 
-  it("applies thinking-live class to last step when isLive", () => {
+  it("renders live thinking as prose blocks instead of numbered steps", () => {
     render(
       <ThinkingChain steps={["First", "Last"]} isLive={true} />,
     );
-    const steps = document.querySelectorAll(".thinking-steps li");
-    expect(steps[0].className).not.toContain("thinking-live");
-    expect(steps[1].className).toContain("thinking-live");
+    expect(document.querySelectorAll(".thinking-steps li")).toHaveLength(0);
+    expect(document.querySelectorAll(".thinking-segment")).toHaveLength(2);
+    expect(document.querySelector(".thinking-chain")?.className).toContain("thinking-live");
   });
 });

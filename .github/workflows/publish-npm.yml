@@ -1,0 +1,54 @@
+name: Publish gagent-desktop to npm
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-npm-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js for Trusted Publishing
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Install desktop package dependencies
+        run: npm ci
+        working-directory: packages/gagent-desktop
+
+      - name: Install React frontend dependencies
+        run: npm --prefix frontends/react_app ci
+
+      - name: Prepare packaged React frontend and backend
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\prepare_gagent_desktop_package.ps1
+
+      - name: Prepare embedded Windows Python runtime
+        shell: pwsh
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File tools\prepare_gagent_desktop_windows_runtime.ps1
+
+      - name: Run npm package gate
+        run: npm --prefix packages/gagent-desktop run prepublishOnly
+
+      - name: Publish with npm Trusted Publishing
+        run: npm --prefix packages/gagent-desktop publish --access public
