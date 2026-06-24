@@ -249,6 +249,33 @@ textarea {
   word-break: break-word;
 }
 
+.llm-config-section {
+  display: grid;
+  gap: 8px;
+}
+
+.config-field {
+  display: grid;
+  gap: 5px;
+  color: #344054;
+  font-size: 13px;
+}
+
+.config-field input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #d4cabf;
+  border-radius: 8px;
+  background: #fff;
+  color: #211f1c;
+  padding: 8px 10px;
+}
+
+.config-path {
+  overflow-wrap: anywhere;
+  margin: 0;
+}
+
 .toggle-row {
   display: flex;
   align-items: center;

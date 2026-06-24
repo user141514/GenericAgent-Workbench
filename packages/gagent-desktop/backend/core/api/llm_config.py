@@ -18,6 +18,8 @@ KNOWN_DEEPSEEK_MODELS = [
     "deepseek-v4-flash",
 ]
 CONFIG_FILENAME = "llm_config.json"
+APP_CONFIG_DIR = "gagent-desktop"
+LEGACY_WINDOWS_CONFIG_DIR = "GenericAgent"
 
 
 def get_config_path() -> Path:
@@ -26,8 +28,17 @@ def get_config_path() -> Path:
         return Path(override).expanduser().resolve() / CONFIG_FILENAME
     if os.name == "nt":
         root = os.getenv("APPDATA") or str(Path.home() / "AppData" / "Roaming")
-        return Path(root) / "GenericAgent" / CONFIG_FILENAME
-    return Path.home() / ".config" / "genericagent" / CONFIG_FILENAME
+        return Path(root) / APP_CONFIG_DIR / CONFIG_FILENAME
+    return Path.home() / ".config" / APP_CONFIG_DIR / CONFIG_FILENAME
+
+
+def get_legacy_config_paths() -> list[Path]:
+    if os.getenv("GAGENT_DESKTOP_STATE_DIR") or os.getenv("GAGENT_CONFIG_DIR"):
+        return []
+    if os.name == "nt":
+        root = os.getenv("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        return [Path(root) / LEGACY_WINDOWS_CONFIG_DIR / CONFIG_FILENAME]
+    return [Path.home() / ".config" / "genericagent" / CONFIG_FILENAME]
 
 
 def default_llm_config() -> dict[str, Any]:
@@ -42,6 +53,8 @@ def default_llm_config() -> dict[str, Any]:
 def load_saved_llm_config() -> dict[str, Any]:
     config = default_llm_config()
     path = get_config_path()
+    if not path.exists():
+        _migrate_legacy_config(path)
     if path.exists():
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -53,6 +66,24 @@ def load_saved_llm_config() -> dict[str, Any]:
                 if isinstance(value, str):
                     config[key] = value.strip()
     return _normalize_config(config)
+
+
+def _migrate_legacy_config(path: Path) -> None:
+    for legacy_path in get_legacy_config_paths():
+        if legacy_path == path or not legacy_path.exists():
+            continue
+        try:
+            data = legacy_path.read_text(encoding="utf-8")
+            json.loads(data)
+        except (OSError, json.JSONDecodeError):
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(data, encoding="utf-8")
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
+        return
 
 
 def load_effective_llm_config() -> dict[str, Any]:

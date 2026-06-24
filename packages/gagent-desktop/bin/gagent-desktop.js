@@ -14,10 +14,17 @@ const PACKAGED_PYTHON_RUNTIME = path.join(PACKAGE_ROOT, "python-runtime");
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 8765;
 
+function defaultPythonCommand(env = process.env, platform = process.platform) {
+  if (env.GAGENT_PYTHON) {
+    return env.GAGENT_PYTHON;
+  }
+  return platform === "win32" ? "python" : "python3";
+}
+
 function parseArgs(argv) {
   const args = {
     repo: "",
-    python: process.env.GAGENT_PYTHON || "python",
+    python: defaultPythonCommand(),
     host: process.env.GA_REACT_API_HOST || DEFAULT_HOST,
     port: Number(process.env.GA_REACT_API_PORT || DEFAULT_PORT),
     dryRun: false,
@@ -105,6 +112,33 @@ function isGAgentRepo(repo) {
   return fs.existsSync(path.join(repo, "core", "api", "server.py"));
 }
 
+function commandExists(command) {
+  const result = spawnSync(command, ["--version"], {
+    stdio: "ignore",
+    shell: false,
+  });
+  return !result.error && result.status === 0;
+}
+
+function setupPythonCandidates(requestedPython, platform = process.platform) {
+  const candidates = [requestedPython];
+  if (platform === "win32") {
+    candidates.push("py", "python");
+  } else {
+    candidates.push("python3", "python");
+  }
+  return [...new Set(candidates.filter(Boolean))];
+}
+
+function resolveSetupPython(requestedPython, platform = process.platform) {
+  for (const candidate of setupPythonCandidates(requestedPython, platform)) {
+    if (commandExists(candidate)) {
+      return candidate;
+    }
+  }
+  return requestedPython;
+}
+
 function buildConfig(args) {
   const repo = findRepoRoot(args.repo);
   const packagedBackend = isGAgentRepo(PACKAGED_BACKEND);
@@ -114,11 +148,12 @@ function buildConfig(args) {
   const embeddedPython = resolveEmbeddedPython(PACKAGED_PYTHON_RUNTIME);
   const hasEmbeddedPython = fs.existsSync(embeddedPython);
   const hasPythonEnv = fs.existsSync(venvPython);
+  const setupPython = resolveSetupPython(args.python);
   const python = usesPackagedBackend && hasEmbeddedPython
     ? embeddedPython
     : usesPackagedBackend && hasPythonEnv
       ? venvPython
-      : args.python;
+      : setupPython;
   const apiUrl = `http://${args.host}:${args.port}`;
   const requirements = repo ? resolveRequirementsFile(repo) : "";
   return {
@@ -128,7 +163,8 @@ function buildConfig(args) {
     packagedBackend,
     usesPackagedBackend,
     python,
-    setupPython: args.python,
+    setupPython,
+    setupPythonCandidates: setupPythonCandidates(args.python),
     embeddedPython,
     hasEmbeddedPython,
     venvDir,
@@ -159,6 +195,8 @@ function dryRunOutput(config, json) {
     repo: config.repo,
     repoSource: config.repoSource,
     python: config.python,
+    setupPython: config.setupPython,
+    setupPythonCandidates: config.setupPythonCandidates,
     apiUrl: config.apiUrl,
     noApi: config.noApi,
     dist: config.dist,
@@ -305,6 +343,13 @@ async function updateSelf(options = {}) {
   return 0;
 }
 
+function platformDependencyHint(platform = process.platform) {
+  if (platform !== "linux") {
+    return "";
+  }
+  return "Linux setup requires Python 3 with venv/pip plus the standard Electron desktop runtime libraries. See the Linux section in the package README.";
+}
+
 function fetchLatestVersion(packageName) {
   const url = `https://registry.npmjs.org/${encodeURIComponent(packageName)}/latest`;
 
@@ -344,12 +389,21 @@ async function ensurePythonEnvironment(config, { force }) {
   if (!fs.existsSync(config.requirements)) {
     fail(`Bundled backend requirements are missing: ${config.requirements}`);
   }
+  if (!commandExists(config.setupPython)) {
+    const hint = platformDependencyHint();
+    fail(`Python executable is unavailable: ${config.setupPython}${hint ? `\n${hint}` : ""}`);
+  }
   fs.mkdirSync(config.venvDir, { recursive: true });
   if (!fs.existsSync(config.venvPython)) {
-    await runCommand(config.setupPython, ["-m", "venv", config.venvDir], {
-      cwd: config.repo,
-      label: "create Python environment",
-    });
+    try {
+      await runCommand(config.setupPython, ["-m", "venv", config.venvDir], {
+        cwd: config.repo,
+        label: "create Python environment",
+      });
+    } catch (error) {
+      const hint = platformDependencyHint();
+      throw new Error(`${error.message}${hint ? `\n${hint}` : ""}`);
+    }
   }
   await runCommand(config.venvPython, ["-m", "pip", "install", "--upgrade", "pip"], {
     cwd: config.repo,
@@ -381,7 +435,64 @@ function startBackend(config) {
   return child;
 }
 
+function electronBinaryCandidates(electronDir = path.join(PACKAGE_ROOT, "node_modules", "electron")) {
+  if (process.platform === "win32") {
+    return [
+      path.join(electronDir, "dist", "electron.exe"),
+      path.join(electronDir, "dist", "Electron.exe"),
+    ];
+  }
+  if (process.platform === "darwin") {
+    return [path.join(electronDir, "dist", "Electron.app", "Contents", "MacOS", "Electron")];
+  }
+  return [path.join(electronDir, "dist", "electron")];
+}
+
+function hasElectronBinary(electronDir = path.join(PACKAGE_ROOT, "node_modules", "electron")) {
+  return electronBinaryCandidates(electronDir).some((candidate) => fs.existsSync(candidate));
+}
+
+function ensureElectronBinary(options = {}) {
+  const electronDir = options.electronDir || path.join(PACKAGE_ROOT, "node_modules", "electron");
+  const installScript = path.join(electronDir, "install.js");
+  const logger = options.logger || console;
+  const runner = options.runner || spawnSync;
+  if (hasElectronBinary(electronDir)) {
+    return true;
+  }
+  if (!fs.existsSync(installScript)) {
+    throw new Error(`Electron install script is missing: ${installScript}`);
+  }
+
+  const mirrors = [];
+  if (process.env.ELECTRON_MIRROR) mirrors.push(process.env.ELECTRON_MIRROR);
+  mirrors.push("https://npmmirror.com/mirrors/electron/", "");
+
+  for (const mirror of [...new Set(mirrors)]) {
+    logger.log(mirror ? `Installing Electron binary via ${mirror} ...` : "Installing Electron binary via default source ...");
+    const env = { ...process.env };
+    if (mirror) env.ELECTRON_MIRROR = mirror;
+    else delete env.ELECTRON_MIRROR;
+    const result = runner(process.execPath, [installScript], {
+      cwd: electronDir,
+      stdio: "inherit",
+      shell: false,
+      env,
+    });
+    if (result.status === 0 && hasElectronBinary(electronDir)) {
+      return true;
+    }
+  }
+  const hint = platformDependencyHint();
+  throw new Error(
+    "Electron binary is missing and automatic installation failed. Try manually from the package directory: "
+    + "node node_modules/electron/install.js"
+    + (hint ? `\n${hint}` : "")
+  );
+}
+
 function launchElectron(config) {
+  ensureElectronBinary();
   const electronPath = require("electron");
   const child = spawn(electronPath, [config.packageRoot], {
     stdio: "inherit",
@@ -495,7 +606,14 @@ if (require.main === module) {
 
 module.exports = {
   compareVersions,
+  defaultPythonCommand,
   fetchLatestVersion,
   parseArgs,
+  electronBinaryCandidates,
+  ensureElectronBinary,
+  hasElectronBinary,
+  platformDependencyHint,
+  resolveSetupPython,
+  setupPythonCandidates,
   updateSelf,
 };

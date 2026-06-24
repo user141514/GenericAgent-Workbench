@@ -4,6 +4,8 @@ import type {
   AttachmentMeta,
   ChatMessage,
   HistoryItem,
+  LlmConfig,
+  LlmConfigPatch,
   RoutingMode,
 } from "./types";
 
@@ -68,6 +70,38 @@ export async function updateSettings(patch: Partial<Pick<AppSettings, "routing_m
     throw new Error(await response.text());
   }
   return (await response.json()) as AppSettings;
+}
+
+export async function fetchLlmConfig() {
+  const response = await fetch(`${API_BASE}/api/llm-config`);
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return (await response.json()) as LlmConfig;
+}
+
+export async function updateLlmConfig(patch: LlmConfigPatch) {
+  const response = await fetch(`${API_BASE}/api/llm-config`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return (await response.json()) as LlmConfig;
+}
+
+export async function checkLlmConfig(patch: LlmConfigPatch & { probe_chat?: boolean }) {
+  const response = await fetch(`${API_BASE}/api/llm-config/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+  if (!response.ok) {
+    throw new Error(await response.text());
+  }
+  return response.json() as Promise<{ ok: boolean; message: string; latency_ms: number }>;
 }
 
 export async function resetConversation() {

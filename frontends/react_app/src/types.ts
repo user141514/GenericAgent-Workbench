@@ -71,3 +71,18 @@ export interface AppSettings {
   current_key_index: number;
   key_labels: string[];
 }
+
+export interface LlmConfig {
+  provider: string;
+  base_url: string;
+  model: string;
+  api_key_masked: string;
+  configured: boolean;
+  source: string;
+  config_path: string;
+  backend: string;
+}
+
+export type LlmConfigPatch = Partial<Pick<LlmConfig, "provider" | "base_url" | "model">> & {
+  api_key?: string;
+};

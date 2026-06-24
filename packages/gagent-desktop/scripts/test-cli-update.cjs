@@ -2,7 +2,10 @@
 "use strict";
 
 const assert = require("node:assert/strict");
-const { parseArgs, updateSelf } = require("../bin/gagent-desktop.js");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { ensureElectronBinary, parseArgs, updateSelf } = require("../bin/gagent-desktop.js");
 
 async function testParseUpdateCommand() {
   assert.equal(parseArgs(["update"]).update, true);
@@ -46,6 +49,36 @@ async function testInstallsLatestWhenNewerVersionExists() {
   assert.deepEqual(installs[0][1], ["install", "-g", "gagent-desktop@latest"]);
 }
 
+async function testEnsuresElectronBinaryWithMirrorFallback() {
+  const calls = [];
+  const electronDir = fs.mkdtempSync(path.join(os.tmpdir(), "gagent-electron-test-"));
+  fs.writeFileSync(path.join(electronDir, "install.js"), "// fake installer\n");
+  const oldMirror = process.env.ELECTRON_MIRROR;
+  delete process.env.ELECTRON_MIRROR;
+  try {
+    const ok = ensureElectronBinary({
+      electronDir,
+      logger: { log: () => undefined },
+      runner: (command, args, options) => {
+        calls.push({ command, args, mirror: options.env.ELECTRON_MIRROR || "" });
+        if (options.env.ELECTRON_MIRROR === "https://npmmirror.com/mirrors/electron/") {
+          const dist = path.join(electronDir, "dist");
+          fs.mkdirSync(dist, { recursive: true });
+          fs.writeFileSync(path.join(dist, process.platform === "win32" ? "electron.exe" : "electron"), "fake");
+          return { status: 0 };
+        }
+        return { status: 1 };
+      },
+    });
+    assert.equal(ok, true);
+    assert.ok(calls.some((call) => call.mirror === "https://npmmirror.com/mirrors/electron/"));
+  } finally {
+    fs.rmSync(electronDir, { recursive: true, force: true });
+    if (oldMirror === undefined) delete process.env.ELECTRON_MIRROR;
+    else process.env.ELECTRON_MIRROR = oldMirror;
+  }
+}
+
 async function testReturnsFailureWhenInstallFails() {
   const errors = [];
   const code = await updateSelf({
@@ -63,6 +96,7 @@ async function main() {
   await testParseUpdateCommand();
   await testSkipsWhenCurrentIsLatest();
   await testInstallsLatestWhenNewerVersionExists();
+  await testEnsuresElectronBinaryWithMirrorFallback();
   await testReturnsFailureWhenInstallFails();
   console.log("[test-cli-update] ok");
 }

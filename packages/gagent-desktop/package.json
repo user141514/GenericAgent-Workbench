@@ -1,6 +1,6 @@
 {
   "name": "gagent-desktop",
-  "version": "0.2.1",
+  "version": "0.2.3",
   "description": "GenericAgent desktop app with packaged React UI and sanitized local backend.",
   "license": "MIT",
   "repository": {
@@ -21,6 +21,13 @@
     "!backend/**/*.backup*",
     "!backend/**/*.bak*",
     "!backend/**/*.tgz",
+    "!backend/.env",
+    "!backend/mykey.py",
+    "!backend/mykey.json",
+    "!backend/temp/**",
+    "!backend/logs/**",
+    "!backend/memory/global_mem.txt",
+    "!backend/memory/global_mem_insight.txt",
     "bin/**/*",
     "electron/**/*",
     "scripts/**/*",
@@ -37,12 +44,13 @@
     "update": "node bin/gagent-desktop.js update",
     "test:update": "node scripts/test-cli-update.cjs",
     "test:update:cmd": "node scripts/test-cli-update-cmd.cjs",
+    "test:linux-fallback": "node scripts/test-linux-fallback.cjs",
     "pack:dry": "npm pack --dry-run",
     "pack:npm": "npm pack",
     "prepublishOnly": "node scripts/prepublish-check.cjs",
     "publish:dry": "npm publish --dry-run",
     "publish:npm": "npm publish --access public",
-    "postinstall": "node -e \"console.log('\\n  gagent-desktop installed.\\n  First run: gagent-desktop setup  (auto-creates Python env)\\n  Or with custom Python: gagent-desktop --python D:\\\\\\\\python\\\\\\\\python.exe\\n')\"",
+    "postinstall": "node scripts/postinstall.cjs",
     "runtime:win": "powershell -NoProfile -ExecutionPolicy Bypass -File ..\\..\\tools\\prepare_gagent_desktop_windows_runtime.ps1",
     "dist:dir": "node scripts/run-electron-builder.cjs --dir --win --x64",
     "dist:win": "node scripts/run-electron-builder.cjs --win portable --x64"
@@ -72,7 +80,14 @@
           "**/*",
           "!**/__pycache__/**",
           "!**/*.pyc",
-          "!**/*.pyo"
+          "!**/*.pyo",
+          "!mykey.py",
+          "!mykey.json",
+          "!.env",
+          "!temp/**",
+          "!logs/**",
+          "!memory/global_mem.txt",
+          "!memory/global_mem_insight.txt"
         ]
       },
       {

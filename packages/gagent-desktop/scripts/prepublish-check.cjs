@@ -147,6 +147,17 @@ function checkPackDryRun() {
       fail(`npm pack output is missing ${required}`);
     }
   }
+  for (const forbidden of [
+    "backend/.env",
+    "backend/mykey.py",
+    "backend/mykey.json",
+    "backend/memory/global_mem.txt",
+    "backend/memory/global_mem_insight.txt",
+  ]) {
+    if (paths.has(forbidden)) {
+      fail(`npm pack output includes local runtime data: ${forbidden}`);
+    }
+  }
 }
 
 function checkEmbeddedPythonImports() {

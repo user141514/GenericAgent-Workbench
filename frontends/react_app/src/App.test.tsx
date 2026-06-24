@@ -3,7 +3,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
-import { createRun, uploadFiles } from "./api";
+import { createRun, fetchLlmConfig, updateLlmConfig, uploadFiles } from "./api";
 import { useAppStore } from "./store";
 import type { AgentEvent } from "./types";
 
@@ -12,6 +12,16 @@ vi.mock("./api", () => ({
   distillDeleteHistory: vi.fn(),
   fetchHistory: vi.fn().mockResolvedValue({ items: [] }),
   fetchMemory: vi.fn().mockResolvedValue({ items: {} }),
+  fetchLlmConfig: vi.fn().mockResolvedValue({
+    provider: "deepseek",
+    base_url: "https://api.deepseek.com",
+    model: "deepseek-v4-pro",
+    api_key_masked: "",
+    configured: false,
+    source: "unset",
+    config_path: "C:\\Users\\Administrator\\AppData\\Roaming\\gagent-desktop\\llm_config.json",
+    backend: "unconfigured",
+  }),
   fetchSettings: vi.fn().mockResolvedValue({
     routing_mode: "auto",
     compact_assistant_history: true,
@@ -30,6 +40,8 @@ vi.mock("./api", () => ({
   switchKey: vi.fn(),
   triggerAutonomous: vi.fn(),
   updateSettings: vi.fn(),
+  updateLlmConfig: vi.fn(),
+  checkLlmConfig: vi.fn(),
   uploadFiles: vi.fn(),
 }));
 
@@ -256,7 +268,7 @@ describe("App chat surface", () => {
     render(<App />);
     await waitForSettings();
 
-    const textbox = screen.getByRole("textbox");
+    const textbox = screen.getByRole("textbox", { name: "Message" });
     const file = new File(["paper text"], "inside.md", { type: "text/markdown" });
 
     fireEvent.dragEnter(textbox, {
@@ -278,7 +290,7 @@ describe("App chat surface", () => {
     render(<App />);
     await waitForSettings();
 
-    const textbox = screen.getByRole("textbox");
+    const textbox = screen.getByRole("textbox", { name: "Message" });
     fireEvent.change(textbox, { target: { value: "first line" } });
 
     fireEvent.keyDown(textbox, { key: "Enter", code: "Enter", shiftKey: true });
@@ -296,12 +308,43 @@ describe("App chat surface", () => {
     render(<App />);
     await waitForSettings();
 
-    const textbox = screen.getByRole("textbox") as HTMLTextAreaElement;
+    const textbox = screen.getByRole("textbox", { name: "Message" }) as HTMLTextAreaElement;
     Object.defineProperty(textbox, "scrollHeight", { configurable: true, value: 112 });
 
     fireEvent.change(textbox, { target: { value: "line 1\nline 2\nline 3\nline 4" } });
 
     expect(textbox.style.height).toBe("112px");
+  });
+
+  it("lets the user save an API key from the model link panel", async () => {
+    vi.mocked(updateLlmConfig).mockResolvedValueOnce({
+      provider: "deepseek",
+      base_url: "https://api.deepseek.com",
+      model: "deepseek-v4-pro",
+      api_key_masked: "sk-1...abcd",
+      configured: true,
+      source: "local",
+      config_path: "C:\\Users\\Administrator\\AppData\\Roaming\\gagent-desktop\\llm_config.json",
+      backend: "deepseek-v4-pro",
+    });
+
+    render(<App />);
+    await waitForSettings();
+
+    await waitFor(() => expect(fetchLlmConfig).toHaveBeenCalled());
+    const apiKeyInput = screen.getByLabelText("API key");
+    fireEvent.change(apiKeyInput, { target: { value: "sk-1234abcd" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save API key" }));
+
+    await waitFor(() =>
+      expect(updateLlmConfig).toHaveBeenCalledWith({
+        provider: "deepseek",
+        base_url: "https://api.deepseek.com",
+        model: "deepseek-v4-pro",
+        api_key: "sk-1234abcd",
+      }),
+    );
+    expect(screen.getByText(/Saved API key/)).toBeTruthy();
   });
 
   it("does not upload dropped files while a run is active", async () => {

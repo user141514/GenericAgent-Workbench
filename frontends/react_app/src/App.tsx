@@ -13,6 +13,7 @@ import {
   createRun,
   distillDeleteHistory,
   fetchHistory,
+  fetchLlmConfig,
   fetchMemory,
   fetchSettings,
   reinjectTools,
@@ -22,6 +23,7 @@ import {
   streamRunEvents,
   switchKey,
   triggerAutonomous,
+  updateLlmConfig,
   updateSettings,
   uploadFiles,
 } from "./api";
@@ -31,7 +33,7 @@ import { copyableMessageText } from "./messageText";
 import { hasVisibleTurnTrace, thinkingMapForEvents } from "./messageTrace";
 import { lastAssistantText, useAppStore } from "./store";
 import { TurnTraceList } from "./TurnTracePanel";
-import type { AgentEvent, AppSettings, RoutingMode } from "./types";
+import type { AgentEvent, AppSettings, LlmConfig, RoutingMode } from "./types";
 import "./styles.css";
 
 type SidePanel = "history" | "memory" | "";
@@ -48,6 +50,17 @@ const routingLabels: Record<RoutingMode, string> = {
   multi_agent: "多Agent编排",
 };
 
+const emptyLlmConfig: LlmConfig = {
+  provider: "deepseek",
+  base_url: "https://api.deepseek.com",
+  model: "deepseek-v4-pro",
+  api_key_masked: "",
+  configured: false,
+  source: "unset",
+  config_path: "",
+  backend: "",
+};
+
 export default function App() {
   const [input, setInput] = useState("");
   const [isUploading, setIsUploading] = useState(false);
@@ -55,6 +68,9 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [sidePanel, setSidePanel] = useState<SidePanel>("");
   const [historyMenu, setHistoryMenu] = useState<HistoryContextMenu>(null);
+  const [llmConfig, setLlmConfig] = useState<LlmConfig>(emptyLlmConfig);
+  const [apiKeyInput, setApiKeyInput] = useState("");
+  const [isSavingLlmConfig, setIsSavingLlmConfig] = useState(false);
   const eventSource = useRef<EventSource | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -119,6 +135,7 @@ export default function App() {
       fetchHistory().then((data) => setHistory(data.items)).catch(() => setHistory([])),
       fetchMemory().then((data) => setMemory(data.items)).catch(() => setMemory({})),
       fetchSettings().then((data) => setSettings(data)).catch(() => undefined),
+      fetchLlmConfig().then((data) => setLlmConfig(data)).catch(() => undefined),
     ]);
   }
 
@@ -316,6 +333,27 @@ export default function App() {
     }
   }
 
+  async function onSaveLlmConfig() {
+    if (isSavingLlmConfig) return;
+    setIsSavingLlmConfig(true);
+    setNotice("");
+    try {
+      const next = await updateLlmConfig({
+        provider: llmConfig.provider,
+        base_url: llmConfig.base_url,
+        model: llmConfig.model,
+        api_key: apiKeyInput,
+      });
+      setLlmConfig(next);
+      setApiKeyInput("");
+      setNotice(`Saved API key to ${next.config_path}`);
+    } catch (configError) {
+      setError(configError instanceof Error ? configError.message : String(configError));
+    } finally {
+      setIsSavingLlmConfig(false);
+    }
+  }
+
   async function onReinjectTools() {
     try {
       const result = await reinjectTools();
@@ -439,6 +477,55 @@ export default function App() {
           </div>
         </section>
 
+        <section className="side-section llm-config-section">
+          <h2>LLM config</h2>
+          <label className="config-field">
+            <span>Provider</span>
+            <input
+              value={llmConfig.provider}
+              onChange={(event) => setLlmConfig({ ...llmConfig, provider: event.currentTarget.value })}
+            />
+          </label>
+          <label className="config-field">
+            <span>Base URL</span>
+            <input
+              value={llmConfig.base_url}
+              onChange={(event) => setLlmConfig({ ...llmConfig, base_url: event.currentTarget.value })}
+            />
+          </label>
+          <label className="config-field">
+            <span>Model</span>
+            <input
+              value={llmConfig.model}
+              onChange={(event) => setLlmConfig({ ...llmConfig, model: event.currentTarget.value })}
+            />
+          </label>
+          <label className="config-field">
+            <span>API key</span>
+            <input
+              aria-label="API key"
+              type="password"
+              value={apiKeyInput}
+              placeholder={llmConfig.api_key_masked || "Paste API key"}
+              onChange={(event) => setApiKeyInput(event.currentTarget.value)}
+            />
+          </label>
+          <p className="muted config-path" title={llmConfig.config_path}>
+            {llmConfig.configured ? `Configured: ${llmConfig.api_key_masked}` : "API key is not configured"}
+          </p>
+          <p className="muted config-path" title={llmConfig.config_path}>
+            {llmConfig.config_path || "Config path unavailable"}
+          </p>
+          <button
+            className="plain-action"
+            type="button"
+            onClick={onSaveLlmConfig}
+            disabled={isSavingLlmConfig || !apiKeyInput.trim()}
+          >
+            Save API key
+          </button>
+        </section>
+
         <section className="side-section">
           <h2>运行控制</h2>
           <label className="toggle-row">
@@ -556,6 +643,7 @@ export default function App() {
             )}
             <textarea
               ref={textareaRef}
+              aria-label="Message"
               value={input}
               onChange={(event) => {
                 setInput(event.target.value);

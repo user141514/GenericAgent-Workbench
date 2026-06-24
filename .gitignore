@@ -75,6 +75,8 @@ build/
 packages/gagent-desktop/node_modules/
 packages/gagent-desktop/python-runtime/
 packages/gagent-desktop/release/
+packages/gagent-desktop/backend/memory/global_mem.txt
+packages/gagent-desktop/backend/memory/global_mem_insight.txt
 .cache/gagent-desktop/
 core/graphify-out/
 memory/graphify-out/
