@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { ensureElectronBinary, parseArgs, updateSelf } = require("../bin/gagent-desktop.js");
+const { ensureElectronBinary, parseArgs, runInstallCommand, updateSelf } = require("../bin/gagent-desktop.js");
 
 async function testParseUpdateCommand() {
   assert.equal(parseArgs(["update"]).update, true);
@@ -47,6 +47,20 @@ async function testInstallsLatestWhenNewerVersionExists() {
   assert.equal(installs.length, 1);
   assert.match(installs[0][0], /^npm(\.cmd)?$/);
   assert.deepEqual(installs[0][1], ["install", "-g", "gagent-desktop@latest"]);
+}
+
+async function testDefaultInstallerHandlesExecutablePathsWithSpaces() {
+  const result = runInstallCommand(process.execPath, ["-e", "process.exit(0)"], {
+    stdio: "pipe",
+  });
+  assert.equal(result.status, 0, result.stderr ? String(result.stderr) : "");
+
+  if (process.platform === "win32") {
+    const cmdResult = runInstallCommand("npm.cmd", ["--version"], {
+      stdio: "pipe",
+    });
+    assert.equal(cmdResult.status, 0, cmdResult.stderr ? String(cmdResult.stderr) : "");
+  }
 }
 
 async function testEnsuresElectronBinaryWithMirrorFallback() {
@@ -96,6 +110,7 @@ async function main() {
   await testParseUpdateCommand();
   await testSkipsWhenCurrentIsLatest();
   await testInstallsLatestWhenNewerVersionExists();
+  await testDefaultInstallerHandlesExecutablePathsWithSpaces();
   await testEnsuresElectronBinaryWithMirrorFallback();
   await testReturnsFailureWhenInstallFails();
   console.log("[test-cli-update] ok");

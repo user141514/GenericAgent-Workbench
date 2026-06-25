@@ -304,10 +304,7 @@ async function updateSelf(options = {}) {
   const npmName = options.packageName || "gagent-desktop";
   const logger = options.logger || console;
   const latestVersionFetcher = options.fetchLatestVersion || fetchLatestVersion;
-  const installer = options.runInstall || ((command, args) => spawnSync(command, args, {
-    stdio: "inherit",
-    shell: false,
-  }));
+  const installer = options.runInstall || runInstallCommand;
 
   logger.log(`gagent-desktop ${current} - checking for updates...`);
 
@@ -341,6 +338,25 @@ async function updateSelf(options = {}) {
 
   logger.log(`Updated to v${latest}. Restart gagent-desktop to use the new version.`);
   return 0;
+}
+
+function quoteWindowsCommandArg(value) {
+  return `"${String(value).replace(/"/g, '\\"')}"`;
+}
+
+function runInstallCommand(command, args, options = {}) {
+  if (process.platform === "win32" && /\.(?:cmd|bat)$/i.test(command)) {
+    return spawnSync(command, args, {
+      stdio: "inherit",
+      shell: true,
+      ...options,
+    });
+  }
+  return spawnSync(command, args, {
+    stdio: "inherit",
+    shell: false,
+    ...options,
+  });
 }
 
 function platformDependencyHint(platform = process.platform) {
@@ -614,6 +630,7 @@ module.exports = {
   hasElectronBinary,
   platformDependencyHint,
   resolveSetupPython,
+  runInstallCommand,
   setupPythonCandidates,
   updateSelf,
 };
